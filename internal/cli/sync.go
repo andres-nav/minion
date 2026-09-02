@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/andres-nav/minion/internal/ssh"
 	"github.com/andres-nav/minion/internal/sync"
 )
 
@@ -26,8 +25,12 @@ func cmdSync(args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
+	if rt.local {
+		fmt.Println("nothing to sync: local host runs in place")
+		return 0
+	}
 
-	sent, removed, err := pushChanges(rt.client, rt.invoke, r.Root, r.Template.Exclude, rt.dir, *del)
+	sent, removed, err := pushChanges(rt.exec, rt.invoke, r.Root, r.Template.Exclude, rt.dir, *del)
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -42,7 +45,7 @@ func cmdSync(args []string) int {
 // pushChanges syncs modified files from root to remoteDir over the ssh agent
 // (respecting .gitignore). With del, remote files absent locally are removed.
 // Returns the counts of files sent and removed.
-func pushChanges(client *ssh.Client, invoke, root string, exclude []string, remoteDir string, del bool) (int, int, error) {
+func pushChanges(client execer, invoke, root string, exclude []string, remoteDir string, del bool) (int, int, error) {
 	// Pass excludes so the remote manifest is filtered the same way as the local
 	// one — otherwise --delete would treat excluded remote files (build output,
 	// etc.) as stale and remove them.

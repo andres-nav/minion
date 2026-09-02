@@ -7,9 +7,18 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/andres-nav/minion/internal/runner"
 )
+
+// Job is a task command plus its lifecycle hooks and environment.
+type Job struct {
+	Dir       string
+	Env       []string
+	Command   string
+	Before    []string
+	OnSuccess []string
+	OnFailure []string
+	Always    []string
+}
 
 // sq single-quotes s for safe use as a shell argument.
 func sq(s string) string {
@@ -34,7 +43,7 @@ type Meta struct {
 // the exit code to <jobDir>/status. Hook order mirrors the local runner:
 // before → command → on_success|on_failure → always; a failing before hook
 // runs always (teardown) and exits.
-func Script(workDir, jobDir string, j runner.Job, m Meta) string {
+func Script(workDir, jobDir string, j Job, m Meta) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
 	fmt.Fprintf(&b, "cd %s || exit 1\n", workDir)
@@ -47,6 +56,9 @@ func Script(workDir, jobDir string, j runner.Job, m Meta) string {
 		}
 	}
 	b.WriteString("start=$(date +%s)\n")
+	// record start time and task so `ps` can report them (the id is a random name).
+	fmt.Fprintf(&b, "echo \"$start\" > %s/started\n", jobDir)
+	fmt.Fprintf(&b, "printf %%s %s > %s/task\n", sq(m.Task), jobDir)
 
 	// Commands run in ( ) subshells so a task calling exit/cd can't terminate
 	// the wrapper before it records the status.
@@ -119,11 +131,11 @@ func LatestJobCommand() string {
 	return fmt.Sprintf("ls -1t ~/%s 2>/dev/null | head -1", jobsDir)
 }
 
-// PsCommand lists jobs and their status (running, or the recorded exit code).
+// PsCommand lists jobs as tab-separated id, task, started-epoch, and status.
 func PsCommand() string {
 	return fmt.Sprintf(
 		"for d in ~/%s/*/; do [ -d \"$d\" ] || continue; id=$(basename \"$d\"); "+
 			"if [ -e \"$d/status\" ]; then st=\"exit $(cat \"$d/status\")\"; else st=running; fi; "+
-			"printf '%%s\\t%%s\\n' \"$id\" \"$st\"; done",
+			"printf '%%s\\t%%s\\t%%s\\t%%s\\n' \"$id\" \"$(cat \"$d/task\" 2>/dev/null)\" \"$(cat \"$d/started\" 2>/dev/null)\" \"$st\"; done",
 		jobsDir)
 }

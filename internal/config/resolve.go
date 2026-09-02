@@ -21,7 +21,6 @@ type Resolved struct {
 	HostName     string
 	Host         Host
 	Template     Template
-	RepoConfig   *RepoConfig
 	RepoFile     string
 	Ambiguous    []string // other templates that also matched at Root
 }
@@ -110,7 +109,6 @@ func (c *Config) build(root, gr, name string, ambiguous []string, rc *RepoConfig
 		HostName:     tmpl.Host,
 		Host:         c.Hosts[tmpl.Host],
 		Template:     tmpl,
-		RepoConfig:   rc,
 		RepoFile:     rcPath,
 		Ambiguous:    ambiguous,
 	}

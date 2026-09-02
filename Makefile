@@ -23,10 +23,11 @@ cross: ## cross-compile agent binaries for remote platforms (bin/minion-<os>-<ar
 	  echo "built → $$out"; \
 	done
 
-install: build cross ## build (incl. cross), copy binaries into $(PREFIX)/bin
-	@mkdir -p $(PREFIX)/bin
-	@cp bin/minion bin/minion-* $(PREFIX)/bin/
-	@echo "installed → $(PREFIX)/bin (minion + cross agents)"
+install: build cross ## install the host binary to $(PREFIX)/bin, agents to $(PREFIX)/libexec/minion
+	@mkdir -p $(PREFIX)/bin $(PREFIX)/libexec/minion
+	@cp bin/minion $(PREFIX)/bin/minion
+	@cp bin/minion-linux-* $(PREFIX)/libexec/minion/
+	@echo "installed → $(PREFIX)/bin/minion (agents in $(PREFIX)/libexec/minion)"
 
 test: ## run tests and vet
 	@go test ./...

@@ -56,6 +56,10 @@ func cmdDoctor(args []string) int {
 		if h, ok := cfg.Hosts[n]; ok && h.SSH != "" {
 			alias = h.SSH
 		}
+		if isLocalAlias(alias) {
+			fmt.Printf("host %-14s OK    local (this machine)\n", n)
+			continue
+		}
 		c := ssh.New(alias)
 		unm, err := c.Output("uname -sm")
 		if err != nil {

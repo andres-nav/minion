@@ -22,11 +22,19 @@ func ResolveAgentBinary(selfPath, selfPlatform, target string, exists func(strin
 	if !ok {
 		return "", fmt.Errorf("unrecognized remote platform %q", target)
 	}
-	cand := filepath.Join(filepath.Dir(selfPath), fmt.Sprintf("minion-%s-%s", goos, goarch))
-	if exists(cand) {
-		return cand, nil
+	name := fmt.Sprintf("minion-%s-%s", goos, goarch)
+	dir := filepath.Dir(selfPath)
+	// Look alongside the binary (dev/build tree: bin/) then in the installed
+	// libexec dir (bin/../libexec/minion), so ~/.local/bin holds only `minion`.
+	for _, cand := range []string{
+		filepath.Join(dir, name),
+		filepath.Join(dir, "..", "libexec", "minion", name),
+	} {
+		if exists(cand) {
+			return cand, nil
+		}
 	}
-	return "", fmt.Errorf("no minion binary for %s (looked for %s); build it with `make cross`", target, cand)
+	return "", fmt.Errorf("no minion binary for %s (looked for %s); build it with `make cross`", target, name)
 }
 
 func splitPlatform(p string) (goos, goarch string, ok bool) {

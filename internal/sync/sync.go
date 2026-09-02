@@ -147,6 +147,9 @@ func Match(root string, patterns []string) ([]string, error) {
 		}
 	}
 	for _, pat := range patterns {
+		if strings.TrimSpace(pat) == "" {
+			continue // an empty pattern would match the whole root — ignore it
+		}
 		matches, err := filepath.Glob(filepath.Join(root, filepath.FromSlash(pat)))
 		if err != nil {
 			return nil, err

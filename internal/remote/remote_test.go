@@ -4,13 +4,11 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
-
-	"github.com/andres-nav/minion/internal/runner"
 )
 
 func TestScriptIsValidShell(t *testing.T) {
 	// empty hook lists must still yield syntactically valid sh.
-	jobs := []runner.Job{
+	jobs := []Job{
 		{Command: "make"},
 		{Command: "make", Before: []string{"a"}},
 		{Command: "make", OnSuccess: []string{"a"}},
@@ -27,7 +25,7 @@ func TestScriptIsValidShell(t *testing.T) {
 }
 
 func TestScript(t *testing.T) {
-	j := runner.Job{
+	j := Job{
 		Command:   "make x",
 		Env:       []string{"PATH=$HOME/.toolbox/bin:$PATH"},
 		Before:    []string{"mwinit -f"},

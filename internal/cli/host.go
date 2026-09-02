@@ -11,7 +11,7 @@ import (
 	"github.com/andres-nav/minion/internal/ssh"
 )
 
-var errNoHost = errors.New("no host configured (set host in the template or .minion.json, or pass --host)")
+var errNoHost = errors.New("no host configured (set host in the template or .minion.json, or pass --host; use --host localhost to run on this machine)")
 
 // errf prints a "minion: …" error to stderr and returns exit code 1.
 func errf(format string, a ...any) int {
@@ -57,17 +57,21 @@ func resolveHost(cfg *config.Config, r *config.Resolved, override string) (confi
 	return config.Host{}, name
 }
 
-// aliasFor resolves just the ssh alias for a command that doesn't bootstrap the
-// agent (attach/kill/ps).
-func aliasFor(override string) (string, error) {
+// executorFor resolves an executor for a command that doesn't bootstrap or sync
+// (attach/kill/ps): a local executor for a localhost alias, else an ssh client.
+func executorFor(override string) (execer, string, error) {
 	cfg, r, err := resolveContext()
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	if _, alias := resolveHost(cfg, r, override); alias != "" {
-		return alias, nil
+	_, alias := resolveHost(cfg, r, override)
+	if alias == "" {
+		return nil, "", errNoHost
 	}
-	return "", errNoHost
+	if isLocalAlias(alias) {
+		return localExec{}, alias, nil
+	}
+	return ssh.New(alias), alias, nil
 }
 
 // remoteDirFor computes the remote destination directory, expanding {repo}. A
@@ -83,21 +87,27 @@ func remoteDirFor(tmplDir, hostDir, root string) string {
 	return strings.ReplaceAll(rd, "{repo}", filepath.Base(root))
 }
 
-// remoteTarget bundles a bootstrapped ssh client with its resolved context.
+// remoteTarget bundles an executor (ssh or local) with its resolved context.
 type remoteTarget struct {
-	client   *ssh.Client
-	invoke   string
+	exec     execer
+	invoke   string // remote minion invocation ("" for local)
 	alias    string
-	dir      string // remote destination directory
+	dir      string // working/destination directory
+	local    bool
 	resolved *config.Resolved
 }
 
-// dialRemote resolves the host, bootstraps the agent, and returns a ready
-// target. It returns errNoHost when no host is configured.
+// dialRemote resolves the host and returns a ready target. A localhost alias
+// runs in place with no ssh/bootstrap; a remote alias bootstraps the agent.
+// Returns errNoHost when no host is configured.
 func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remoteTarget, error) {
 	host, alias := resolveHost(cfg, r, override)
 	if alias == "" {
 		return nil, errNoHost
+	}
+	if isLocalAlias(alias) {
+		// run in the project itself; no sync, no bootstrap.
+		return &remoteTarget{exec: localExec{}, alias: alias, dir: r.Root, local: true, resolved: r}, nil
 	}
 	client := ssh.New(alias)
 	invoke, err := client.EnsureAgent(version, agentBinaryFor)
@@ -105,7 +115,7 @@ func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remot
 		return nil, err
 	}
 	return &remoteTarget{
-		client:   client,
+		exec:     client,
 		invoke:   invoke,
 		alias:    alias,
 		dir:      remoteDirFor(r.Template.RemoteDir, host.RemoteDir, r.Root),

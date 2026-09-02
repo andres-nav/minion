@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/andres-nav/minion/internal/remote"
-	"github.com/andres-nav/minion/internal/ssh"
 )
 
 func cmdKill(args []string) int {
@@ -26,15 +25,13 @@ func cmdKill(args []string) int {
 		}
 	}
 
-	alias, err := aliasFor(*host)
+	client, _, err := executorFor(*host)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "minion: %v\n", err)
-		return 1
+		return errf("%v", err)
 	}
-	code, err := ssh.New(alias).Run(remote.KillCommand(remote.JobDir(id)), nil, os.Stdout, os.Stderr)
+	code, err := client.Run(remote.KillCommand(remote.JobDir(id)), nil, os.Stdout, os.Stderr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "minion: %v\n", err)
-		return 1
+		return errf("%v", err)
 	}
 	return code
 }

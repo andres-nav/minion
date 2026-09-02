@@ -7,7 +7,6 @@ import (
 	"os"
 	"strings"
 
-	"github.com/andres-nav/minion/internal/ssh"
 	"github.com/andres-nav/minion/internal/sync"
 )
 
@@ -23,12 +22,15 @@ func cmdFetch(args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
-	if len(r.Template.Fetch) == 0 {
-		return errf("template has no fetch patterns")
-	}
 	rt, err := dialRemote(cfg, r, *hostFlag)
 	if err != nil {
 		return errf("%v", err)
+	}
+	if rt.local {
+		return errf("fetch is for remote hosts; local runs write results in place")
+	}
+	if len(r.Template.Fetch) == 0 {
+		return errf("template has no fetch patterns")
 	}
 
 	dest := r.Root
@@ -36,7 +38,7 @@ func cmdFetch(args []string) int {
 		dest = *into
 	}
 
-	n, err := pullResults(rt.client, rt.invoke, rt.dir, r.Template.Fetch, dest)
+	n, err := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, dest)
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -45,7 +47,7 @@ func cmdFetch(args []string) int {
 }
 
 // pullResults streams files matching patterns from remoteDir back into dest.
-func pullResults(client *ssh.Client, invoke, remoteDir string, patterns []string, dest string) (int, error) {
+func pullResults(client execer, invoke, remoteDir string, patterns []string, dest string) (int, error) {
 	cmd := invoke + " _agent send " + remoteDir
 	for _, p := range patterns {
 		cmd += " " + shellQuote(p)

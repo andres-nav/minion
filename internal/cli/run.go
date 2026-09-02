@@ -1,30 +1,24 @@
 package cli
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/andres-nav/minion/internal/config"
 	"github.com/andres-nav/minion/internal/remote"
-	"github.com/andres-nav/minion/internal/runner"
 )
 
 // cmdTask runs a task. verb is a standard verb ("build", "test", …); for "run"
-// the task name is the first positional argument. It runs remotely when a host
-// is resolved (template/repo host or --host), else locally; --local forces local.
+// the task name is the first positional argument. It runs on the resolved host
+// (template/repo host or --host); use --host localhost to run on this machine.
 func cmdTask(verb string, args []string) int {
 	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
-	host := fs.String("host", "", "run on a remote host")
-	local := fs.Bool("local", false, "force local execution")
-	var detach bool
-	fs.BoolVar(&detach, "detach", false, "launch remotely without attaching")
-	fs.BoolVar(&detach, "d", false, "shorthand for --detach")
+	host := fs.String("host", "", "host to run on (a hosts-map name, ssh alias, or localhost)")
+	detach := fs.Bool("detach", false, "launch without attaching")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -61,7 +55,7 @@ func cmdTask(verb string, args []string) int {
 		return 1
 	}
 
-	job := runner.Job{
+	job := remote.Job{
 		Dir:       r.Root,
 		Env:       r.Template.Env,
 		Command:   command,
@@ -71,36 +65,33 @@ func cmdTask(verb string, args []string) int {
 		Always:    r.Template.Always,
 	}
 
-	if *local {
-		return runner.Local(job, os.Stdout, os.Stderr)
-	}
 	rt, err := dialRemote(cfg, r, *host)
 	if err != nil {
-		if errors.Is(err, errNoHost) {
-			return runner.Local(job, os.Stdout, os.Stderr)
-		}
 		return errf("%v", err)
 	}
-	return runRemote(rt, taskName, job, detach)
+	return runRemote(rt, taskName, job, *detach)
 }
 
-func runRemote(rt *remoteTarget, taskName string, job runner.Job, detach bool) int {
+func runRemote(rt *remoteTarget, taskName string, job remote.Job, detach bool) int {
 	r := rt.resolved
 
-	n, _, err := pushChanges(rt.client, rt.invoke, r.Root, r.Template.Exclude, rt.dir, false)
-	if err != nil {
-		return errf("%v", err)
+	// Local runs happen in place; remote runs sync the project up first.
+	if !rt.local {
+		n, _, err := pushChanges(rt.exec, rt.invoke, r.Root, r.Template.Exclude, rt.dir, false)
+		if err != nil {
+			return errf("%v", err)
+		}
+		fmt.Fprintf(os.Stderr, "synced %d file(s) to %s:%s\n", n, rt.alias, rt.dir)
 	}
-	fmt.Fprintf(os.Stderr, "synced %d file(s) to %s:%s\n", n, rt.alias, rt.dir)
 
-	id := taskName + "-" + time.Now().Format("20060102-150405")
+	id := randomName()
 	jobDir := remote.JobDir(id)
 	job.Dir = rt.dir
 	sha, dirty := gitProvenance(r.Root)
 	meta := remote.Meta{ID: id, Task: taskName, Host: rt.alias, Git: sha, Dirty: dirty}
 	script := remote.Script(rt.dir, jobDir, job, meta)
 
-	if code, err := rt.client.Run(remote.LaunchCommand(jobDir), strings.NewReader(script), io.Discard, os.Stderr); err != nil || code != 0 {
+	if code, err := rt.exec.Run(remote.LaunchCommand(jobDir), strings.NewReader(script), io.Discard, os.Stderr); err != nil || code != 0 {
 		return errf("launch failed (err=%v exit=%d)", err, code)
 	}
 	fmt.Fprintf(os.Stderr, "started %s on %s\n", id, rt.alias)
@@ -110,15 +101,15 @@ func runRemote(rt *remoteTarget, taskName string, job runner.Job, detach bool) i
 		return 0
 	}
 
-	code, err := rt.client.Run(remote.AttachCommand(jobDir), nil, os.Stdout, os.Stderr)
+	code, err := rt.exec.Run(remote.AttachCommand(jobDir), nil, os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("detached (job %s still running): %v", id, err)
 	}
 
-	// Fetch results regardless of exit code — failed runs still leave useful
-	// output/logs worth pulling back.
-	if len(r.Template.Fetch) > 0 {
-		if n, ferr := pullResults(rt.client, rt.invoke, rt.dir, r.Template.Fetch, r.Root); ferr != nil {
+	// Fetch results (remote only — local runs already wrote them in place),
+	// regardless of exit code, since failed runs still leave useful output.
+	if !rt.local && len(r.Template.Fetch) > 0 {
+		if n, ferr := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, r.Root); ferr != nil {
 			fmt.Fprintf(os.Stderr, "minion: fetch failed: %v\n", ferr)
 		} else {
 			fmt.Fprintf(os.Stderr, "fetched %d file(s) to %s\n", n, r.Root)

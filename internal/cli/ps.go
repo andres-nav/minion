@@ -3,11 +3,11 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/andres-nav/minion/internal/remote"
-	"github.com/andres-nav/minion/internal/ssh"
 )
 
 func cmdPs(args []string) int {
@@ -17,11 +17,11 @@ func cmdPs(args []string) int {
 		return 2
 	}
 
-	alias, err := aliasFor(*host)
+	client, alias, err := executorFor(*host)
 	if err != nil {
 		return errf("%v", err)
 	}
-	out, err := ssh.New(alias).Output(remote.PsCommand())
+	out, err := client.Output(remote.PsCommand())
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -30,38 +30,22 @@ func cmdPs(args []string) int {
 		return 0
 	}
 
-	fmt.Printf("%-24s %-12s %-6s %s\n", "JOB", "TASK", "AGE", "STATUS")
+	fmt.Printf("%-18s %-10s %-17s %-6s %s\n", "NAME", "TASK", "STARTED", "AGE", "STATUS")
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
-		parts := strings.SplitN(line, "\t", 2)
-		if len(parts) != 2 {
+		f := strings.SplitN(line, "\t", 4)
+		if len(f) != 4 {
 			continue
 		}
-		id, status := parts[0], parts[1]
-		task, t, ok := parseJobID(id)
-		age := "?"
-		if ok {
+		id, task, started, status := f[0], f[1], f[2], f[3]
+		when, age := "?", "?"
+		if epoch, err := strconv.ParseInt(started, 10, 64); err == nil {
+			t := time.Unix(epoch, 0).Local()
+			when = t.Format("2006-01-02 15:04")
 			age = humanizeAge(time.Since(t))
 		}
-		fmt.Printf("%-24s %-12s %-6s %s\n", id, task, age, status)
+		fmt.Printf("%-18s %-10s %-17s %-6s %s\n", id, task, when, age, status)
 	}
 	return 0
-}
-
-// parseJobID splits "<task>-YYYYmmdd-HHMMSS" into its task and start time.
-func parseJobID(id string) (task string, t time.Time, ok bool) {
-	i := strings.LastIndex(id, "-")
-	if i <= 0 {
-		return "", time.Time{}, false
-	}
-	j := strings.LastIndex(id[:i], "-")
-	if j <= 0 {
-		return "", time.Time{}, false
-	}
-	parsed, err := time.ParseInLocation("20060102-150405", id[j+1:], time.Local)
-	if err != nil {
-		return "", time.Time{}, false
-	}
-	return id[:j], parsed, true
 }
 
 func humanizeAge(d time.Duration) string {

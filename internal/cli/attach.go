@@ -6,7 +6,6 @@ import (
 	"os"
 
 	"github.com/andres-nav/minion/internal/remote"
-	"github.com/andres-nav/minion/internal/ssh"
 )
 
 func cmdAttach(args []string) int {
@@ -26,11 +25,10 @@ func cmdAttach(args []string) int {
 		}
 	}
 
-	alias, err := aliasFor(*host)
+	client, alias, err := executorFor(*host)
 	if err != nil {
 		return errf("%v", err)
 	}
-	client := ssh.New(alias)
 
 	if id == "" { // no id → most recent job
 		latest, err := client.Output(remote.LatestJobCommand())
