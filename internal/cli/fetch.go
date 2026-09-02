@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/andres-nav/minion/internal/remote"
 	"github.com/andres-nav/minion/internal/sync"
@@ -13,8 +17,12 @@ import (
 func cmdFetch(args []string) int {
 	fs := flag.NewFlagSet("fetch", flag.ContinueOnError)
 	hostFlag := fs.String("host", "", "override the host")
-	into := fs.String("into", "", "local destination directory (default: project root)")
+	into := fs.String("into", "", "local destination (overrides fetch_into)")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	id := fs.Arg(0) // optional job id for {id}/{ts}; "" → latest
+	if err := reparseTrailingFlags(fs); err != nil {
 		return 2
 	}
 
@@ -33,9 +41,12 @@ func cmdFetch(args []string) int {
 		return errf("template has no fetch patterns")
 	}
 
-	dest := r.Root
-	if *into != "" {
-		dest = *into
+	dest := expandLocalHome(*into)
+	if dest == "" {
+		if id == "" { // resolve the latest run for {id}/{ts}
+			id, _ = rt.exec.Output(remote.LatestJobCommand())
+		}
+		dest = fetchDest(r.Root, r.Template.FetchInto, id, jobStartTS(rt.exec, id), filepath.Base(r.Root))
 	}
 
 	n, err := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, dest)
@@ -44,6 +55,22 @@ func cmdFetch(args []string) int {
 	}
 	fmt.Printf("fetched %d file(s): %s:%s → %s\n", n, rt.alias, rt.dir, dest)
 	return 0
+}
+
+// jobStartTS reads a job's start time and formats it for {ts}, or "" on failure.
+func jobStartTS(client execer, id string) string {
+	if id == "" {
+		return ""
+	}
+	out, err := client.Output("cat " + remote.JobDir(id) + "/started")
+	if err != nil {
+		return ""
+	}
+	epoch, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return ""
+	}
+	return time.Unix(epoch, 0).Local().Format(tsLayout)
 }
 
 // pullResults streams files matching patterns from remoteDir back into dest.

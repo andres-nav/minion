@@ -169,6 +169,9 @@ func mergeTemplate(base, over Template) Template {
 	if len(over.Fetch) > 0 {
 		out.Fetch = over.Fetch
 	}
+	if over.FetchInto != "" {
+		out.FetchInto = over.FetchInto
+	}
 	if over.Build != "" {
 		out.Build = over.Build
 	}

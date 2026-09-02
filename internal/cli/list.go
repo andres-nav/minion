@@ -27,29 +27,16 @@ func cmdList(args []string) int {
 		return 2
 	}
 
-	cfg, err := config.Load()
+	_, r, err := resolveContext()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "minion: %v\n", err)
-		return 1
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "minion: %v\n", err)
-		return 1
-	}
-
-	r, err := cfg.Resolve(cwd)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "minion: %v\n", err)
-		return 1
+		return errf("%v", err)
 	}
 
 	tasks := r.Template.OrderedTasks()
 
 	var remoteDir string
 	if r.HostName != "" {
-		remoteDir = remoteDirFor(r.Template.RemoteDir, cfg.Hosts[r.HostName].RemoteDir, r.Root)
+		remoteDir = remoteDirFor(r.Template.RemoteDir, r.Host.RemoteDir, r.Root)
 	}
 
 	if *jsonOut {
@@ -66,8 +53,7 @@ func cmdList(args []string) int {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(out); err != nil {
-			fmt.Fprintf(os.Stderr, "minion: %v\n", err)
-			return 1
+			return errf("%v", err)
 		}
 		return 0
 	}

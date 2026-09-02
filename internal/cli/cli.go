@@ -2,10 +2,21 @@
 package cli
 
 import (
+	"flag"
 	"fmt"
 	"io"
 	"os"
 )
+
+// reparseTrailingFlags re-parses flags that follow the first positional arg,
+// since flag.Parse stops at the first non-flag token (so `kill <id> --host x`
+// works). Call after Parse and reading Arg(0).
+func reparseTrailingFlags(fs *flag.FlagSet) error {
+	if fs.NArg() > 1 {
+		return fs.Parse(fs.Args()[1:])
+	}
+	return nil
+}
 
 // version is overridden at build time via
 // -ldflags "-X github.com/andres-nav/minion/internal/cli.version=...".

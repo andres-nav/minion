@@ -36,6 +36,7 @@ type Template struct {
 	OnFailure []string `json:"on_failure"`
 	Always    []string `json:"always"`
 	Fetch     []string `json:"fetch"`
+	FetchInto string   `json:"fetch_into"` // local dest for fetched results; supports {id} {ts} {repo}
 
 	Build string `json:"build"`
 	Test  string `json:"test"`

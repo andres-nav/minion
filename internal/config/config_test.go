@@ -185,7 +185,7 @@ func fullTemplate(p string) Template {
 		Needs: []string{p + "-needs"}, Push: []string{p + "-push"}, Exclude: []string{p + "-excl"},
 		Env: []string{p + "=1"}, Before: []string{p + "-before"},
 		OnSuccess: []string{p + "-succ"}, OnFailure: []string{p + "-fail"}, Always: []string{p + "-always"},
-		Fetch: []string{p + "-fetch"}, Build: p + "-build", Test: p + "-test",
+		Fetch: []string{p + "-fetch"}, FetchInto: p + "-fetchinto", Build: p + "-build", Test: p + "-test",
 		Run: p + "-run", Lint: p + "-lint", Clean: p + "-clean",
 		Tasks: map[string]string{"shared": p + "-shared", p + "-only": p + "-only"},
 	}

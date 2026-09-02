@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/andres-nav/minion/internal/config"
 	"github.com/andres-nav/minion/internal/remote"
@@ -26,22 +27,19 @@ func cmdTask(verb string, args []string) int {
 
 	taskName := verb
 	if verb == "run" {
-		if fs.NArg() == 0 {
+		taskName = fs.Arg(0)
+		if taskName == "" {
 			fmt.Fprintln(os.Stderr, "usage: minion run <task>")
 			return 2
 		}
-		taskName = fs.Arg(0)
-		if fs.NArg() > 1 { // allow flags after the task name
-			if err := fs.Parse(fs.Args()[1:]); err != nil {
-				return 2
-			}
+		if err := reparseTrailingFlags(fs); err != nil {
+			return 2
 		}
 	}
 
 	cfg, r, err := resolveContext()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "minion: %v\n", err)
-		return 1
+		return errf("%v", err)
 	}
 	if r.TemplateName == "" {
 		fmt.Fprintf(os.Stderr, "minion: no template for %s (add detect rules or a .minion.json with \"use\")\n", r.Root)
@@ -106,6 +104,7 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, detach bool) i
 	}
 
 	id := randomName()
+	ts := time.Now().Format(tsLayout)
 	jobDir := remote.JobDir(id)
 	job.Dir = rt.dir
 	sha, dirty := gitProvenance(r.Root)
@@ -130,10 +129,11 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, detach bool) i
 	// Fetch results (remote only — local runs already wrote them in place),
 	// regardless of exit code, since failed runs still leave useful output.
 	if !rt.local && len(r.Template.Fetch) > 0 {
-		if n, ferr := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, r.Root); ferr != nil {
+		dest := fetchDest(r.Root, r.Template.FetchInto, id, ts, filepath.Base(r.Root))
+		if n, ferr := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, dest); ferr != nil {
 			fmt.Fprintf(os.Stderr, "minion: fetch failed: %v\n", ferr)
 		} else {
-			fmt.Fprintf(os.Stderr, "fetched %d file(s) to %s\n", n, r.Root)
+			fmt.Fprintf(os.Stderr, "fetched %d file(s) to %s\n", n, dest)
 		}
 	}
 	return code

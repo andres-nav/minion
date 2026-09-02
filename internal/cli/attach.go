@@ -15,14 +15,9 @@ func cmdAttach(args []string) int {
 		return 2
 	}
 
-	id := ""
-	if fs.NArg() >= 1 {
-		id = fs.Arg(0)
-		if fs.NArg() > 1 { // allow flags after the id
-			if err := fs.Parse(fs.Args()[1:]); err != nil {
-				return 2
-			}
-		}
+	id := fs.Arg(0) // "" if none → most recent job below
+	if err := reparseTrailingFlags(fs); err != nil {
+		return 2
 	}
 
 	client, alias, err := executorFor(*host)
