@@ -66,7 +66,7 @@ commands:
   fetch         pull result files back from the remote (--host, --into)
   attach [<id>] watch a remote job's output (default: the latest) (--host)
   kill <id>     stop a running remote job (--host)
-  ps            list remote jobs and their status (--host)
+  ps            list this package's remote jobs (--all for every job) (--host)
   ssh           open an interactive shell on the host, in the project dir (--host)
   doctor        validate config and check hosts (reachable + agent) (--host)
   version       print the minion version

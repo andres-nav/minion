@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
+	"github.com/andres-nav/minion/internal/remote"
 	"github.com/andres-nav/minion/internal/sync"
 )
 
@@ -50,7 +50,7 @@ func cmdFetch(args []string) int {
 func pullResults(client execer, invoke, remoteDir string, patterns []string, dest string) (int, error) {
 	cmd := invoke + " _agent send " + remoteDir
 	for _, p := range patterns {
-		cmd += " " + shellQuote(p)
+		cmd += " " + remote.ShellQuote(p)
 	}
 
 	count := 0
@@ -66,10 +66,4 @@ func pullResults(client execer, invoke, remoteDir string, patterns []string, des
 		return 0, fmt.Errorf("remote send failed (exit %d)", code)
 	}
 	return count, nil
-}
-
-// shellQuote single-quotes s so the remote shell passes it literally (patterns
-// must not be glob-expanded by the shell before the agent sees them).
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

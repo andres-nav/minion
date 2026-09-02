@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/andres-nav/minion/internal/remote"
 	"github.com/andres-nav/minion/internal/sync"
 )
 
@@ -51,13 +52,13 @@ func pushChanges(client execer, invoke, root string, exclude []string, remoteDir
 	// etc.) as stale and remove them.
 	manifestCmd := invoke + " _agent manifest " + remoteDir
 	for _, e := range exclude {
-		manifestCmd += " " + shellQuote(e)
+		manifestCmd += " " + remote.ShellQuote(e)
 	}
 	remoteRaw, err := client.Output(manifestCmd)
 	if err != nil {
 		return 0, 0, err
 	}
-	remote, err := sync.DecodeManifest([]byte(remoteRaw))
+	remoteManifest, err := sync.DecodeManifest([]byte(remoteRaw))
 	if err != nil {
 		return 0, 0, fmt.Errorf("bad remote manifest: %w", err)
 	}
@@ -65,10 +66,10 @@ func pushChanges(client execer, invoke, root string, exclude []string, remoteDir
 	if err != nil {
 		return 0, 0, err
 	}
-	changed := sync.Changed(local, remote)
+	changed := sync.Changed(local, remoteManifest)
 	var deletes []string
 	if del {
-		deletes = sync.Deleted(local, remote)
+		deletes = sync.Deleted(local, remoteManifest)
 	}
 	if len(changed) == 0 && len(deletes) == 0 {
 		return 0, 0, nil

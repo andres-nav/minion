@@ -80,6 +80,15 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, detach bool) i
 	// dependency packages) up first. Dependency build order is Brazil's job
 	// (brazil-recursive-cmd) — minion just gets the edited sources there.
 	if !rt.local {
+		// Push local dirs (e.g. ~/.midway) to the same remote path first, so the
+		// remote has fresh credentials before the build runs.
+		for _, p := range r.Template.Push {
+			pn, _, perr := pushChanges(rt.exec, rt.invoke, expandLocalHome(p), nil, p, false)
+			if perr != nil {
+				return errf("push %s: %v", p, perr)
+			}
+			fmt.Fprintf(os.Stderr, "pushed %s (%d file(s))\n", p, pn)
+		}
 		for _, need := range r.Template.Needs {
 			needLocal := filepath.Join(filepath.Dir(r.Root), need)
 			needRemote := remoteDirFor(r.Template.RemoteDir, rt.host.RemoteDir, needLocal)

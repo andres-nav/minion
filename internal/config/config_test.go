@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -174,6 +175,48 @@ func TestOrderedTasks(t *testing.T) {
 		if got[i].Name != name {
 			t.Fatalf("task[%d] = %q, want %q (order: %+v)", i, got[i].Name, name, got)
 		}
+	}
+}
+
+// fullTemplate sets every field to a distinct value derived from prefix.
+func fullTemplate(p string) Template {
+	return Template{
+		Detect: []string{p + "-detect"}, Host: p + "-host", RemoteDir: p + "-rd",
+		Needs: []string{p + "-needs"}, Push: []string{p + "-push"}, Exclude: []string{p + "-excl"},
+		Env: []string{p + "=1"}, Before: []string{p + "-before"},
+		OnSuccess: []string{p + "-succ"}, OnFailure: []string{p + "-fail"}, Always: []string{p + "-always"},
+		Fetch: []string{p + "-fetch"}, Build: p + "-build", Test: p + "-test",
+		Run: p + "-run", Lint: p + "-lint", Clean: p + "-clean",
+		Tasks: map[string]string{"shared": p + "-shared", p + "-only": p + "-only"},
+	}
+}
+
+// Guards against drift: a new Template field not wired into mergeTemplate would
+// leave out.Field == base.Field and fail here. Env/Tasks merge specially.
+func TestMergeTemplateOverridesEveryField(t *testing.T) {
+	base, over := fullTemplate("base"), fullTemplate("over")
+	out := mergeTemplate(base, over)
+
+	bv, tv := reflect.ValueOf(base), reflect.ValueOf(out)
+	for i := 0; i < tv.NumField(); i++ {
+		if reflect.DeepEqual(tv.Field(i).Interface(), bv.Field(i).Interface()) {
+			t.Errorf("field %s not overridden", tv.Type().Field(i).Name)
+		}
+	}
+	if want := []string{"base=1", "over=1"}; !reflect.DeepEqual(out.Env, want) {
+		t.Errorf("Env = %v, want %v (additive)", out.Env, want)
+	}
+	wantTasks := map[string]string{"shared": "over-shared", "base-only": "base-only", "over-only": "over-only"}
+	if !reflect.DeepEqual(out.Tasks, wantTasks) {
+		t.Errorf("Tasks = %v, want %v", out.Tasks, wantTasks)
+	}
+}
+
+// Zero-valued override fields are ignored.
+func TestMergeTemplateEmptyOverrideKeepsBase(t *testing.T) {
+	base := fullTemplate("base")
+	if out := mergeTemplate(base, Template{}); !reflect.DeepEqual(out, base) {
+		t.Errorf("empty override changed base:\n got %+v\nwant %+v", out, base)
 	}
 }
 

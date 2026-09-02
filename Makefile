@@ -25,8 +25,12 @@ cross: ## cross-compile agent binaries for remote platforms (bin/minion-<os>-<ar
 
 install: build cross ## install the host binary to $(PREFIX)/bin, agents to $(PREFIX)/libexec/minion
 	@mkdir -p $(PREFIX)/bin $(PREFIX)/libexec/minion
-	@cp bin/minion $(PREFIX)/bin/minion
-	@cp bin/minion-linux-* $(PREFIX)/libexec/minion/
+	@# install atomically (temp + mv): overwriting a binary in place invalidates
+	@# its code signature on macOS and the kernel SIGKILLs it at launch.
+	@cp bin/minion $(PREFIX)/bin/.minion.tmp && mv -f $(PREFIX)/bin/.minion.tmp $(PREFIX)/bin/minion
+	@for a in bin/minion-linux-*; do \
+	  cp $$a $(PREFIX)/libexec/minion/.tmp && mv -f $(PREFIX)/libexec/minion/.tmp $(PREFIX)/libexec/minion/$$(basename $$a); \
+	done
 	@echo "installed → $(PREFIX)/bin/minion (agents in $(PREFIX)/libexec/minion)"
 
 test: ## run tests and vet

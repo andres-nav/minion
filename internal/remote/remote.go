@@ -20,8 +20,8 @@ type Job struct {
 	Always    []string
 }
 
-// sq single-quotes s for safe use as a shell argument.
-func sq(s string) string {
+// ShellQuote single-quotes s for safe use as a shell argument.
+func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
@@ -58,15 +58,21 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 	b.WriteString("start=$(date +%s)\n")
 	// record start time and task so `ps` can report them (the id is a random name).
 	fmt.Fprintf(&b, "echo \"$start\" > %s/started\n", jobDir)
-	fmt.Fprintf(&b, "printf %%s %s > %s/task\n", sq(m.Task), jobDir)
+	fmt.Fprintf(&b, "printf %%s %s > %s/task\n", ShellQuote(m.Task), jobDir)
+	fmt.Fprintf(&b, "basename \"$PWD\" > %s/repo\n", jobDir) // for `ps` per-package filtering
 
 	// Commands run in ( ) subshells so a task calling exit/cd can't terminate
-	// the wrapper before it records the status.
-	b.WriteString("fail() { ")
+	// the wrapper before it records the status. teardown() runs the `always`
+	// hooks and is invoked on the normal path, on before-failure, and on signal.
+	b.WriteString("teardown() { ")
 	for _, c := range j.Always {
 		fmt.Fprintf(&b, "( %s ); ", c)
 	}
-	fmt.Fprintf(&b, "echo \"$1\" > %s/status; exit \"$1\"; }\n", jobDir)
+	b.WriteString(":; }\n")
+	fmt.Fprintf(&b, "fail() { teardown; echo \"$1\" > %s/status; exit \"$1\"; }\n", jobDir)
+	// On kill/hangup, record a status (128+SIGTERM) and note the log, so the job
+	// doesn't stay "running" forever and the log shows it was killed.
+	fmt.Fprintf(&b, "trap 'echo \"[minion] killed\"; teardown; echo 143 > %s/status; exit 143' TERM INT HUP\n", jobDir)
 
 	for _, c := range j.Before {
 		fmt.Fprintf(&b, "( %s ) || fail $?\n", c)
@@ -83,15 +89,13 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 		fmt.Fprintf(&b, "  ( %s )\n", c)
 	}
 	b.WriteString("fi\n")
-	for _, c := range j.Always {
-		fmt.Fprintf(&b, "( %s )\n", c)
-	}
+	b.WriteString("teardown\n")
 	fmt.Fprintf(&b, "echo \"$ec\" > %s/status\n", jobDir)
 	// Values go in as shell-quoted printf args (not baked into the format), so a
 	// % or ' in a task/host/git string can't corrupt the JSON.
 	fmt.Fprintf(&b,
 		"printf '{\"id\":\"%%s\",\"task\":\"%%s\",\"host\":\"%%s\",\"git\":\"%%s\",\"dirty\":%%s,\"start\":%%s,\"end\":%%s,\"exit\":%%s}\\n' %s %s %s %s %s \"$start\" \"$(date +%%s)\" \"$ec\" > %s/run.json\n",
-		sq(m.ID), sq(m.Task), sq(m.Host), sq(m.Git), sq(strconv.FormatBool(m.Dirty)), jobDir)
+		ShellQuote(m.ID), ShellQuote(m.Task), ShellQuote(m.Host), ShellQuote(m.Git), ShellQuote(strconv.FormatBool(m.Dirty)), jobDir)
 	b.WriteString("exit \"$ec\"\n")
 	return b.String()
 }
@@ -121,7 +125,10 @@ func AttachCommand(jobDir string) string {
 func KillCommand(jobDir string) string {
 	return fmt.Sprintf(
 		"p=$(cat %[1]s/pid 2>/dev/null); "+
-			"if [ -n \"$p\" ]; then kill -- -$p 2>/dev/null; kill $p 2>/dev/null; echo \"killed $p\"; "+
+			"if [ -n \"$p\" ]; then kill -- -$p 2>/dev/null; kill $p 2>/dev/null; "+
+			"echo '[minion] killed' >> %[1]s/log 2>/dev/null; "+
+			"[ -e %[1]s/status ] || echo 143 > %[1]s/status; "+ // ensure it's not stuck "running"
+			"echo \"killed $p\"; "+
 			"else echo 'minion: no pid' >&2; exit 1; fi",
 		jobDir)
 }
@@ -131,11 +138,11 @@ func LatestJobCommand() string {
 	return fmt.Sprintf("ls -1t ~/%s 2>/dev/null | head -1", jobsDir)
 }
 
-// PsCommand lists jobs as tab-separated id, task, started-epoch, and status.
+// PsCommand lists jobs as tab-separated id, task, started-epoch, status, repo.
 func PsCommand() string {
 	return fmt.Sprintf(
 		"for d in ~/%s/*/; do [ -d \"$d\" ] || continue; id=$(basename \"$d\"); "+
 			"if [ -e \"$d/status\" ]; then st=\"exit $(cat \"$d/status\")\"; else st=running; fi; "+
-			"printf '%%s\\t%%s\\t%%s\\t%%s\\n' \"$id\" \"$(cat \"$d/task\" 2>/dev/null)\" \"$(cat \"$d/started\" 2>/dev/null)\" \"$st\"; done",
+			"printf '%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n' \"$id\" \"$(cat \"$d/task\" 2>/dev/null)\" \"$(cat \"$d/started\" 2>/dev/null)\" \"$st\" \"$(cat \"$d/repo\" 2>/dev/null)\"; done",
 		jobsDir)
 }

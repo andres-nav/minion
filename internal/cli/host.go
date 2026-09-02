@@ -74,6 +74,16 @@ func executorFor(override string) (execer, string, error) {
 	return ssh.New(alias), alias, nil
 }
 
+// expandLocalHome expands a leading ~ using the local home directory.
+func expandLocalHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
+}
+
 // remoteDirFor computes the remote destination directory, expanding {repo}. A
 // template's remote_dir (e.g. a workspace slot) takes precedence over the host's.
 func remoteDirFor(tmplDir, hostDir, root string) string {

@@ -57,11 +57,18 @@ type Client struct {
 	ssh  func(command string) *exec.Cmd
 }
 
+// sshOpts disable creating a ControlMaster: minion's ssh reuses an existing
+// master if one is live (fast) but never daemonizes into one, which would
+// inherit and hold minion's stdout pipe (with ControlPersist) and hang Wait().
+var sshOpts = []string{"-o", "ControlMaster=no"}
+
 func New(host string) *Client {
 	host = strings.TrimSpace(host)
 	return &Client{
 		Host: host,
-		ssh:  func(command string) *exec.Cmd { return exec.Command("ssh", host, command) },
+		ssh: func(command string) *exec.Cmd {
+			return exec.Command("ssh", append(append([]string{}, sshOpts...), host, command)...)
+		},
 	}
 }
 
@@ -72,14 +79,7 @@ func (c *Client) Run(command string, stdin io.Reader, stdout, stderr io.Writer) 
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	err := cmd.Run()
-	if err == nil {
-		return 0, nil
-	}
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode(), nil
-	}
-	return -1, err
+	return exitCode(cmd.Run())
 }
 
 // RunStdout runs command and hands its stdout stream to consume, returning the
@@ -99,26 +99,25 @@ func (c *Client) RunStdout(command string, stderr io.Writer, consume func(io.Rea
 	if cErr != nil {
 		return -1, cErr
 	}
-	if wErr == nil {
-		return 0, nil
-	}
-	if ee, ok := wErr.(*exec.ExitError); ok {
-		return ee.ExitCode(), nil
-	}
-	return -1, wErr
+	return exitCode(wErr)
 }
 
 // Interactive opens an interactive ssh session with a tty, wiring the real
 // terminal. If command is non-empty it runs instead of the default login shell.
 // Returns the session's exit code.
 func (c *Client) Interactive(command string) (int, error) {
-	a := []string{"-t", c.Host}
+	a := append(append([]string{}, sshOpts...), "-t", c.Host)
 	if command != "" {
 		a = append(a, command)
 	}
 	cmd := exec.Command("ssh", a...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	err := cmd.Run()
+	return exitCode(cmd.Run())
+}
+
+// exitCode maps an exec error to (code, err): nil→(0,nil), non-zero exit→(code,nil),
+// failure to run→(-1,err).
+func exitCode(err error) (int, error) {
 	if err == nil {
 		return 0, nil
 	}

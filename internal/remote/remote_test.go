@@ -37,10 +37,12 @@ func TestScript(t *testing.T) {
 	for _, want := range []string{
 		"cd ~/work || exit 1",
 		`export PATH="$HOME/.toolbox/bin:$PATH"`,
+		"teardown() { ( cleanup ); :; }",
+		"trap ",
+		"> ~/.minion/jobs/j1/status; exit 143'",
 		"( mwinit -f ) || fail $?",
 		"( make x )\nec=$?",
 		"( notify fail )",
-		"( cleanup )",
 		`echo "$ec" > ~/.minion/jobs/j1/status`,
 	} {
 		if !strings.Contains(s, want) {
