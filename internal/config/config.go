@@ -27,6 +27,7 @@ type Template struct {
 	Detect    []string `json:"detect"`
 	Host      string   `json:"host"`
 	RemoteDir string   `json:"remote_dir"` // overrides the host's remote_dir (e.g. a workspace slot)
+	Needs     []string `json:"needs"`      // sibling packages to sync first (e.g. Brazil deps)
 	Exclude   []string `json:"exclude"`
 	Env       []string `json:"env"` // KEY=VALUE, exported before the command/hooks
 	Before    []string `json:"before"`

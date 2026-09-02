@@ -1,0 +1,85 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: linux,  goarch: amd64 }
+          - { goos: linux,  goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # full history + tags so the Makefile's `git describe` sees the tag
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build (nix dev shell → make)
+        run: |
+          set -eu
+          # Toolchain (go/make/git) comes from flake.nix; the Makefile injects
+          # VERSION from `git describe` via -ldflags. CGO off → static, pure-Go
+          # cross-compiles cleanly from the Linux runner.
+          #
+          # Linux agent binaries minion bootstraps onto remotes (bin/minion-linux-*).
+          nix develop --command make cross
+          # Host binary for this matrix platform (bin/minion).
+          nix develop --command env \
+            GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' CGO_ENABLED=0 \
+            make build
+
+      - name: Package
+        run: |
+          set -eu
+          archive="minion-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+          tar -C bin -czf "$archive" minion minion-linux-amd64 minion-linux-arm64
+          echo "packaged → $archive"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: minion-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: minion-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: artifacts
+        run: sha256sum *.tar.gz > checksums.txt
+
+      - name: Create release
+        working-directory: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$TAG" *.tar.gz checksums.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --generate-notes

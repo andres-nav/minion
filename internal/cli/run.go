@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/andres-nav/minion/internal/config"
@@ -75,8 +76,19 @@ func cmdTask(verb string, args []string) int {
 func runRemote(rt *remoteTarget, taskName string, job remote.Job, detach bool) int {
 	r := rt.resolved
 
-	// Local runs happen in place; remote runs sync the project up first.
+	// Local runs happen in place; remote runs sync the project (and any sibling
+	// dependency packages) up first. Dependency build order is Brazil's job
+	// (brazil-recursive-cmd) — minion just gets the edited sources there.
 	if !rt.local {
+		for _, need := range r.Template.Needs {
+			needLocal := filepath.Join(filepath.Dir(r.Root), need)
+			needRemote := remoteDirFor(r.Template.RemoteDir, rt.host.RemoteDir, needLocal)
+			dn, _, derr := pushChanges(rt.exec, rt.invoke, needLocal, r.Template.Exclude, needRemote, false)
+			if derr != nil {
+				return errf("dependency %s: %v", need, derr)
+			}
+			fmt.Fprintf(os.Stderr, "synced dep %s (%d file(s)) to %s:%s\n", need, dn, rt.alias, needRemote)
+		}
 		n, _, err := pushChanges(rt.exec, rt.invoke, r.Root, r.Template.Exclude, rt.dir, false)
 		if err != nil {
 			return errf("%v", err)

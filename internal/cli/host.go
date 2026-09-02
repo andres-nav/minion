@@ -92,7 +92,8 @@ type remoteTarget struct {
 	exec     execer
 	invoke   string // remote minion invocation ("" for local)
 	alias    string
-	dir      string // working/destination directory
+	host     config.Host // resolved host (for computing dependency dirs)
+	dir      string      // working/destination directory
 	local    bool
 	resolved *config.Resolved
 }
@@ -118,6 +119,7 @@ func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remot
 		exec:     client,
 		invoke:   invoke,
 		alias:    alias,
+		host:     host,
 		dir:      remoteDirFor(r.Template.RemoteDir, host.RemoteDir, r.Root),
 		resolved: r,
 	}, nil

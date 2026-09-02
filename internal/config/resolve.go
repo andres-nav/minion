@@ -141,6 +141,9 @@ func mergeTemplate(base, over Template) Template {
 	if over.RemoteDir != "" {
 		out.RemoteDir = over.RemoteDir
 	}
+	if len(over.Needs) > 0 {
+		out.Needs = over.Needs
+	}
 	if len(over.Exclude) > 0 {
 		out.Exclude = over.Exclude
 	}
