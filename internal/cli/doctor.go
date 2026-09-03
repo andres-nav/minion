@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 
+	"github.com/andres-nav/minion/internal/config"
+	"github.com/andres-nav/minion/internal/remote"
 	"github.com/andres-nav/minion/internal/ssh"
 )
 
@@ -13,12 +16,13 @@ import (
 // bootstraps. It replaces the old ad-hoc reachability check.
 func cmdDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	host := fs.String("host", "", "check only this host")
+	host := hostFlag(fs)
+	notify := fs.Bool("notify", false, "also send a test notification email (from --host or the template's default host)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 
-	cfg, _, err := resolveContext()
+	cfg, r, err := resolveContext()
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -84,9 +88,52 @@ func cmdDoctor(args []string) int {
 		fmt.Printf("host %-14s OK    %s, agent %s\n", n, unm, invoke)
 	}
 
+	// optional end-to-end notification check (toggle: --notify)
+	if *notify {
+		if code := sendNotifyTest(cfg, r, *host); code != 0 {
+			problems++
+		}
+	}
+
 	if problems > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d problem(s)\n", problems)
 		return 1
 	}
 	return 0
+}
+
+// sendNotifyTest sends a synthetic notification through the resolved email
+// config from the target host, verifying credentials and connectivity end to
+// end. Invoked by `doctor --notify`. Returns a process exit code (0 on success).
+func sendNotifyTest(cfg *config.Config, r *config.Resolved, host string) int {
+	n := cfg.NotifyFor(r.Template)
+	if n == nil || n.Email == nil {
+		return errf("no email notify configured (add a notify.email block to the template or global config)")
+	}
+
+	rt, err := dialRemote(cfg, r, host)
+	if err != nil {
+		return errf("%v", err)
+	}
+	defer rt.close()
+
+	invoke := notifyInvoke(rt)
+	var b strings.Builder
+	// synthetic job env so the message reads like a real (successful) run.
+	b.WriteString("export MINION_JOB_ID=notify-test MINION_TASK=notify-test MINION_HOST=")
+	b.WriteString(remote.ShellQuote(rt.alias))
+	b.WriteString(" MINION_EXIT=0 MINION_DURATION=0\n")
+	if pass := resolveSecret(n.Email.Pass); pass != "" {
+		fmt.Fprintf(&b, "export MINION_SMTP_PASS=%s\n", remote.ShellQuote(pass))
+	}
+	b.WriteString(emailInvoke(invoke, "", n.Email))
+
+	code, err := rt.exec.Run(b.String(), nil, os.Stdout, os.Stderr)
+	if err != nil {
+		return errf("notify-test: %v", err)
+	}
+	if code == 0 {
+		fmt.Fprintf(os.Stderr, "sent test email to %s via %s\n", n.Email.To, rt.alias)
+	}
+	return code
 }

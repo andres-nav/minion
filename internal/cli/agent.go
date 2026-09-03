@@ -3,6 +3,7 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -120,18 +121,34 @@ func splitList(s string) []string {
 	return out
 }
 
-// tailFile returns the last n lines of path, or "" if it can't be read.
+// tailFile returns roughly the last n lines of path, or "" if it can't be read.
+// It reads only the tail of the file (bounded by maxTail), so a job that emits a
+// huge log doesn't get slurped entirely into memory just to quote a few lines.
 func tailFile(path string, n int) string {
 	if path == "" {
 		return ""
 	}
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
-	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	const maxTail = 64 << 10 // enough for n normal-length lines
+	start := int64(0)
+	if fi.Size() > maxTail {
+		start = fi.Size() - maxTail
+	}
+	buf := make([]byte, fi.Size()-start)
+	if _, err := f.ReadAt(buf, start); err != nil && err != io.EOF {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(buf), "\n"), "\n")
 	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+		lines = lines[len(lines)-n:] // drop a possibly-partial first line too
 	}
 	return strings.Join(lines, "\n")
 }

@@ -13,7 +13,7 @@ import (
 // locally for a localhost alias). It does not bootstrap the agent.
 func cmdSSH(args []string) int {
 	fs := flag.NewFlagSet("ssh", flag.ContinueOnError)
-	host := fs.String("host", "", "host (a hosts-map name or ssh alias)")
+	host := hostFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}

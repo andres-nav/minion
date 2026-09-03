@@ -19,7 +19,7 @@ type psRow struct {
 
 func cmdPs(args []string) int {
 	fs := flag.NewFlagSet("ps", flag.ContinueOnError)
-	host := fs.String("host", "", "host")
+	host := hostFlag(fs)
 	all := fs.Bool("all", false, "show all jobs on the host, not just this package's")
 	if err := fs.Parse(args); err != nil {
 		return 2

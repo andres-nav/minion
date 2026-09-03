@@ -6,6 +6,7 @@ package notify
 
 import (
 	"fmt"
+	"net"
 	"net/smtp"
 	"strconv"
 	"strings"
@@ -104,21 +105,21 @@ func buildMessage(from string, to []string, subject, body string) []byte {
 	b.WriteString("MIME-Version: 1.0\r\n")
 	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	b.WriteString("\r\n")
-	// normalize body to CRLF and dot-stuff so a lone "." can't end the DATA phase.
+	// Normalize the body to CRLF. Do NOT dot-stuff here: smtp.SendMail writes the
+	// message through textproto.DotWriter, which already escapes leading dots on
+	// the wire — stuffing again would double every '.'-leading line in delivered mail.
 	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
-		if strings.HasPrefix(line, ".") {
-			line = "." + line
-		}
 		b.WriteString(line)
 		b.WriteString("\r\n")
 	}
 	return []byte(b.String())
 }
 
-// splitHostPort splits host:port, requiring both parts (SMTP needs an explicit port).
+// splitHostPort splits host:port, requiring both parts (SMTP needs an explicit
+// port). Uses net.SplitHostPort so bracketed IPv6 literals ([::1]:587) parse.
 func splitHostPort(addr string) (host, port string, err error) {
-	host, port, ok := strings.Cut(addr, ":")
-	if !ok || host == "" || port == "" {
+	host, port, err = net.SplitHostPort(addr)
+	if err != nil || host == "" || port == "" {
 		return "", "", fmt.Errorf("email: smtp address %q must be host:port", addr)
 	}
 	return host, port, nil

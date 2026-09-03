@@ -10,13 +10,9 @@ import (
 
 func cmdAttach(args []string) int {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
-	host := fs.String("host", "", "host")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-
-	id := fs.Arg(0) // "" if none → most recent job below
-	if err := reparseTrailingFlags(fs); err != nil {
+	host := hostFlag(fs)
+	id, err := parsePositional(fs, args) // "" if none → most recent job below
+	if err != nil {
 		return 2
 	}
 

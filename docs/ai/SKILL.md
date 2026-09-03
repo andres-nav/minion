@@ -5,7 +5,7 @@ description: >
   on a remote SSH host (dev desktop, GPU box). Invoke whenever you would run a
   build/test command in a repo, or need to sync code to and run something on a
   remote and get results back. minion is the uniform entry point: prefer
-  `minion build`/`minion test`/`minion run <task>` over calling brazil-build,
+  `minion run <task>` (e.g. `run build`, `run test`) over calling brazil-build,
   make, latexmk, pytest, etc. directly. Triggers: build, test, run, sync,
   deploy to remote/dev-dsk/GPU, run experiment, fetch results, attach to a job.
 ---
@@ -32,11 +32,12 @@ This prints the resolved `template`, `host`, `remote_dir`, and available
 
 ## Core commands
 
-- `minion build` / `minion test` — run the template's build/test task.
-- `minion run <task>` — run any task by name (e.g. `run lint`, `run sweep`).
-- `minion build --host <name>` — override where it runs (a hosts-map name, an
-  ssh alias, or `localhost`). Default is the template/repo's host.
-- `minion build --host localhost` — run on this machine (in place, no ssh).
+- `minion run <task>` — run any task by name: `run build`, `run test`,
+  `run lint`, or a freeform task like `run sweep`. (There are no bare `build`/
+  `test` commands; everything goes through `run`.)
+- `minion run <task> --host <name>` — override where it runs (a hosts-map name,
+  an ssh alias, or `localhost`). Default is the template/repo's host.
+- `minion run <task> --host localhost` — run on this machine (in place, no ssh).
 - `minion run <task> --detach` — launch without attaching; prints the job id.
 - `minion sync [--delete]` — push modified files only (git-aware); no run.
 - `minion fetch [<id>]` — pull result files back (into `fetch_into` if set).
@@ -46,18 +47,19 @@ This prints the resolved `template`, `host`, `remote_dir`, and available
   `--all` for every job on the host.
 - `minion kill <id>` — stop a running job.
 - `minion ssh` — interactive shell on the host, in the project's remote dir.
-- `minion doctor` — validate config + check hosts (reachable + agent).
+- `minion doctor [--notify]` — validate config + check hosts (reachable +
+  agent); `--notify` also sends a test email through the configured sink.
 
 Flags can follow the positional arg (`minion attach my_job --host gpu`).
 
 ## How runs work
 
-- A `build`/`test`/`run` on a remote host: **sync → launch detached → attach
+- A `minion run <task>` on a remote host: **sync → launch detached → attach
   (live output) → auto-fetch results**. It survives disconnects; hooks run on
   the remote.
 - Jobs get friendly ids (`brave_otter`). Inspect state with `minion ps`, watch
   with `minion attach`, stop with `minion kill`.
-- Exit codes propagate: `minion build` returns the task's exit code. Read a
+- Exit codes propagate: `minion run <task>` returns the task's exit code. Read a
   failed job's log with `minion attach <id>`.
 - Results land where `fetch_into` says (e.g. `results/{ts}-{id}/`), so each run
   is preserved.

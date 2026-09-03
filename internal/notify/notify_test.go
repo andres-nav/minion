@@ -28,10 +28,15 @@ func TestBodyIncludesLogTail(t *testing.T) {
 	}
 }
 
-func TestBuildMessageDotStuffing(t *testing.T) {
+func TestBuildMessageLeavesDotStuffingToSendMail(t *testing.T) {
+	// smtp.SendMail writes through textproto.DotWriter, which dot-stuffs on the
+	// wire. buildMessage must NOT stuff leading dots itself, or they'd be doubled.
 	msg := string(buildMessage("a@x", []string{"b@x"}, "subj", "normal\n.hidden command"))
-	if !strings.Contains(msg, "\r\n..hidden command\r\n") {
-		t.Errorf("leading dot not stuffed:\n%q", msg)
+	if !strings.Contains(msg, "\r\n.hidden command\r\n") {
+		t.Errorf("leading dot should be left intact for SendMail to stuff:\n%q", msg)
+	}
+	if strings.Contains(msg, "..hidden command") {
+		t.Errorf("buildMessage double-stuffs; DotWriter will stuff again:\n%q", msg)
 	}
 	if !strings.Contains(msg, "Subject: subj\r\n") || !strings.Contains(msg, "To: b@x\r\n") {
 		t.Errorf("headers malformed:\n%q", msg)
@@ -39,6 +44,16 @@ func TestBuildMessageDotStuffing(t *testing.T) {
 	// header/body separated by a blank CRLF line.
 	if !strings.Contains(msg, "\r\n\r\nnormal\r\n") {
 		t.Errorf("missing header/body separator:\n%q", msg)
+	}
+}
+
+func TestSplitHostPortIPv6(t *testing.T) {
+	host, port, err := splitHostPort("[::1]:587")
+	if err != nil || host != "::1" || port != "587" {
+		t.Errorf("splitHostPort(\"[::1]:587\") = %q, %q, %v", host, port, err)
+	}
+	if _, _, err := splitHostPort("hostonly"); err == nil {
+		t.Error("expected error for address without a port")
 	}
 }
 

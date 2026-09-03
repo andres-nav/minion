@@ -16,13 +16,10 @@ import (
 
 func cmdFetch(args []string) int {
 	fs := flag.NewFlagSet("fetch", flag.ContinueOnError)
-	hostFlag := fs.String("host", "", "override the host")
+	host := hostFlag(fs)
 	into := fs.String("into", "", "local destination (overrides fetch_into)")
-	if err := fs.Parse(args); err != nil {
-		return 2
-	}
-	id := fs.Arg(0) // optional job id for {id}/{ts}; "" → latest
-	if err := reparseTrailingFlags(fs); err != nil {
+	id, err := parsePositional(fs, args) // optional job id for {id}/{ts}; "" → latest
+	if err != nil {
 		return 2
 	}
 
@@ -30,7 +27,7 @@ func cmdFetch(args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
-	rt, err := dialRemote(cfg, r, *hostFlag)
+	rt, err := dialRemote(cfg, r, *host)
 	if err != nil {
 		return errf("%v", err)
 	}

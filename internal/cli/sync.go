@@ -12,7 +12,7 @@ import (
 
 func cmdSync(args []string) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
-	hostFlag := fs.String("host", "", "override the host")
+	host := hostFlag(fs)
 	del := fs.Bool("delete", false, "delete remote files not present locally (mirror)")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -22,7 +22,7 @@ func cmdSync(args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
-	rt, err := dialRemote(cfg, r, *hostFlag)
+	rt, err := dialRemote(cfg, r, *host)
 	if err != nil {
 		return errf("%v", err)
 	}

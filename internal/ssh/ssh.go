@@ -55,19 +55,29 @@ const (
 // Client runs commands on a remote host via the system ssh binary, inheriting
 // the user's ~/.ssh/config (ProxyJump, ControlMaster, ProxyCommand, …).
 type Client struct {
-	Host    string
-	ctlPath string    // control-master socket path
-	opts    []string  // ssh options shared by every command
-	master  *exec.Cmd // the control-master process, if Open()ed
-	ssh     func(command string) *exec.Cmd
+	Host       string
+	ctlPath    string        // control-master socket path
+	opts       []string      // ssh options shared by every command
+	master     *exec.Cmd     // the control-master process, if Open()ed
+	masterDone chan struct{} // closed when the master process exits (its Wait is owned by Open)
+	ssh        func(command string) *exec.Cmd
 }
 
-// controlPath returns a short, per-process control-socket path for host (kept
-// short to stay under the ~104-byte unix socket limit).
+// controlDir returns a private (0700) per-user directory for control sockets, so
+// the socket is not created in a world-writable /tmp location another user could
+// pre-empt. Kept directly under /tmp (not os.TempDir, which is long on macOS) to
+// stay well under the ~104-byte unix socket path limit.
+func controlDir() string {
+	dir := fmt.Sprintf("/tmp/minion-%d", os.Getuid())
+	_ = os.MkdirAll(dir, 0o700)
+	return dir
+}
+
+// controlPath returns a short, per-process control-socket path for host.
 func controlPath(host string) string {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(host))
-	return fmt.Sprintf("/tmp/mcm-%x-%d", h.Sum32(), os.Getpid())
+	return filepath.Join(controlDir(), fmt.Sprintf("cm-%x-%d", h.Sum32(), os.Getpid()))
 }
 
 func New(host string) *Client {
@@ -102,23 +112,39 @@ func (c *Client) Open() {
 		return
 	}
 	c.master = m
+
+	// The master runs non-interactively (stdio → /dev/null), so a host needing a
+	// password/2FA makes `ssh -N` exit right away. Watch for that exit so we fall
+	// back to direct connections immediately instead of polling out the deadline.
+	// This goroutine owns m.Wait(); Close() reaps via the channel, never Wait().
+	c.masterDone = make(chan struct{})
+	go func() { _ = m.Wait(); close(c.masterDone) }()
+
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if exec.Command("ssh", "-o", "ControlPath="+c.ctlPath, "-O", "check", c.Host).Run() == nil {
 			return // master is up; commands will reuse it
 		}
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-c.masterDone:
+			c.master = nil // master died; commands will connect directly
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 }
 
-// Close tears down the control master opened by Open (no-op otherwise).
+// Close tears down the control master opened by Open (no-op otherwise). It reaps
+// the process by waiting on masterDone (Open's goroutine owns Wait) and removes
+// the socket so a crash doesn't strand it.
 func (c *Client) Close() {
 	if c.master == nil {
 		return
 	}
 	_ = exec.Command("ssh", "-o", "ControlPath="+c.ctlPath, "-O", "exit", c.Host).Run()
 	_ = c.master.Process.Kill()
-	_ = c.master.Wait()
+	<-c.masterDone
+	_ = os.Remove(c.ctlPath)
 	c.master = nil
 }
 
