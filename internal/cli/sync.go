@@ -26,6 +26,7 @@ func cmdSync(args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
+	defer rt.close()
 	if rt.local {
 		fmt.Println("nothing to sync: local host runs in place")
 		return 0

@@ -14,10 +14,12 @@ type Job struct {
 	Dir       string
 	Env       []string
 	Command   string
+	Args      string // per-run task text, exported to the command/hooks as $MINION_ARGS
 	Before    []string
 	OnSuccess []string
 	OnFailure []string
 	Always    []string
+	Notify    string // shell run once at job end (after status is recorded), with $MINION_* in the environment
 }
 
 // ShellQuote single-quotes s for safe use as a shell argument.
@@ -55,11 +57,21 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 			fmt.Fprintf(&b, "export %s\n", e)
 		}
 	}
+	if j.Args != "" {
+		// single-quoted so the task text is passed literally (no expansion/injection).
+		fmt.Fprintf(&b, "export MINION_ARGS=%s\n", ShellQuote(j.Args))
+	}
 	b.WriteString("start=$(date +%s)\n")
 	// record start time and task so `ps` can report them (the id is a random name).
 	fmt.Fprintf(&b, "echo \"$start\" > %s/started\n", jobDir)
 	fmt.Fprintf(&b, "printf %%s %s > %s/task\n", ShellQuote(m.Task), jobDir)
 	fmt.Fprintf(&b, "basename \"$PWD\" > %s/repo\n", jobDir) // for `ps` per-package filtering
+
+	// Job identity exported for hooks and notifications; MINION_EXIT/STATUS/
+	// DURATION are filled in once the command finishes (below).
+	fmt.Fprintf(&b, "export MINION_JOB_ID=%s\n", ShellQuote(m.ID))
+	fmt.Fprintf(&b, "export MINION_TASK=%s\n", ShellQuote(m.Task))
+	fmt.Fprintf(&b, "export MINION_HOST=%s\n", ShellQuote(m.Host))
 
 	// Commands run in ( ) subshells so a task calling exit/cd can't terminate
 	// the wrapper before it records the status. teardown() runs the `always`
@@ -79,6 +91,10 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 	}
 
 	fmt.Fprintf(&b, "( %s )\nec=$?\n", j.Command)
+	// Structured outcome for on_success/on_failure/always hooks and notify.
+	b.WriteString("export MINION_EXIT=\"$ec\"\n")
+	b.WriteString("if [ \"$ec\" -eq 0 ]; then export MINION_STATUS=ok; else export MINION_STATUS=fail; fi\n")
+	b.WriteString("export MINION_DURATION=\"$(( $(date +%s) - start ))\"\n")
 	// `:` keeps each branch non-empty even when a hook list is empty.
 	b.WriteString("if [ \"$ec\" -eq 0 ]; then\n  :\n")
 	for _, c := range j.OnSuccess {
@@ -96,6 +112,12 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 	fmt.Fprintf(&b,
 		"printf '{\"id\":\"%%s\",\"task\":\"%%s\",\"host\":\"%%s\",\"git\":\"%%s\",\"dirty\":%%s,\"start\":%%s,\"end\":%%s,\"exit\":%%s}\\n' %s %s %s %s %s \"$start\" \"$(date +%%s)\" \"$ec\" > %s/run.json\n",
 		ShellQuote(m.ID), ShellQuote(m.Task), ShellQuote(m.Host), ShellQuote(m.Git), ShellQuote(strconv.FormatBool(m.Dirty)), jobDir)
+	// Notify runs last, after the outcome is recorded, so a slow or failing
+	// notification never changes the job's exit status.
+	if j.Notify != "" {
+		b.WriteString(j.Notify)
+		b.WriteString("\n")
+	}
 	b.WriteString("exit \"$ec\"\n")
 	return b.String()
 }
@@ -104,7 +126,7 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 // recording its pid. The job survives ssh disconnect via setsid (or nohup).
 func LaunchCommand(jobDir string) string {
 	return fmt.Sprintf(
-		"mkdir -p %[1]s && cat > %[1]s/run.sh && chmod +x %[1]s/run.sh && "+
+		"mkdir -p %[1]s && cat > %[1]s/run.sh && chmod 700 %[1]s/run.sh && "+
 			"{ if command -v setsid >/dev/null 2>&1; then setsid sh %[1]s/run.sh </dev/null >> %[1]s/log 2>&1 & "+
 			"else nohup sh %[1]s/run.sh </dev/null >> %[1]s/log 2>&1 & fi; echo $! > %[1]s/pid; }",
 		jobDir)

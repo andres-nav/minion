@@ -21,6 +21,8 @@ func cmdTask(verb string, args []string) int {
 	fs := flag.NewFlagSet(verb, flag.ContinueOnError)
 	host := fs.String("host", "", "host to run on (a hosts-map name, ssh alias, or localhost)")
 	detach := fs.Bool("detach", false, "launch without attaching")
+	arg := fs.String("arg", "", "task text exposed to the command/hooks as $MINION_ARGS")
+	noSync := fs.Bool("no-sync", false, "don't sync local files; run against the code already on the host")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -58,6 +60,7 @@ func cmdTask(verb string, args []string) int {
 		Dir:       r.Root,
 		Env:       r.Template.Env,
 		Command:   command,
+		Args:      *arg,
 		Before:    r.Template.Before,
 		OnSuccess: r.Template.OnSuccess,
 		OnFailure: r.Template.OnFailure,
@@ -68,16 +71,18 @@ func cmdTask(verb string, args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
-	return runRemote(rt, taskName, job, *detach)
+	defer rt.close()
+	return runRemote(rt, taskName, job, cfg.NotifyFor(r.Template), *detach, *noSync)
 }
 
-func runRemote(rt *remoteTarget, taskName string, job remote.Job, detach bool) int {
+func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.Notify, detach, noSync bool) int {
 	r := rt.resolved
 
 	// Local runs happen in place; remote runs sync the project (and any sibling
 	// dependency packages) up first. Dependency build order is Brazil's job
-	// (brazil-recursive-cmd) — minion just gets the edited sources there.
-	if !rt.local {
+	// (brazil-recursive-cmd) — minion just gets the edited sources there. --no-sync
+	// skips this to run against code already on the host (e.g. a mainline checkout).
+	if !rt.local && !noSync {
 		// Push local dirs (e.g. ~/.midway) to the same remote path first, so the
 		// remote has fresh credentials before the build runs.
 		for _, p := range r.Template.Push {
@@ -107,6 +112,9 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, detach bool) i
 	ts := time.Now().Format(tsLayout)
 	jobDir := remote.JobDir(id)
 	job.Dir = rt.dir
+	if notif != nil {
+		job.Notify = buildNotify(notifyInvoke(rt), jobDir+"/log", notif)
+	}
 	sha, dirty := gitProvenance(r.Root)
 	meta := remote.Meta{ID: id, Task: taskName, Host: rt.alias, Git: sha, Dirty: dirty}
 	script := remote.Script(rt.dir, jobDir, job, meta)

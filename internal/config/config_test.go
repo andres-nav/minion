@@ -187,7 +187,8 @@ func fullTemplate(p string) Template {
 		OnSuccess: []string{p + "-succ"}, OnFailure: []string{p + "-fail"}, Always: []string{p + "-always"},
 		Fetch: []string{p + "-fetch"}, FetchInto: p + "-fetchinto", Build: p + "-build", Test: p + "-test",
 		Run: p + "-run", Lint: p + "-lint", Clean: p + "-clean",
-		Tasks: map[string]string{"shared": p + "-shared", p + "-only": p + "-only"},
+		Tasks:  map[string]string{"shared": p + "-shared", p + "-only": p + "-only"},
+		Notify: &Notify{Email: &EmailSink{SMTP: "h:587", From: p + "@x", To: p + "@x"}},
 	}
 }
 
@@ -233,5 +234,39 @@ func TestMissingGlobalConfigIsEmpty(t *testing.T) {
 	}
 	if r.TemplateName != "" {
 		t.Fatalf("template = %q, want empty (no config)", r.TemplateName)
+	}
+}
+
+func TestNotifyValidate(t *testing.T) {
+	if err := (*Notify)(nil).Validate(); err != nil {
+		t.Errorf("nil notify should validate: %v", err)
+	}
+	if err := (&Notify{On: "maybe"}).Validate(); err == nil {
+		t.Error("invalid on value should fail")
+	}
+	if err := (&Notify{Email: &EmailSink{From: "a@x"}}).Validate(); err == nil {
+		t.Error("email missing smtp/to should fail")
+	}
+	if err := (&Notify{On: "failure", Email: &EmailSink{SMTP: "h:587", From: "a@x", To: "b@x"}}).Validate(); err != nil {
+		t.Errorf("valid notify failed: %v", err)
+	}
+}
+
+func TestNotifyForFallback(t *testing.T) {
+	global := &Notify{Email: &EmailSink{SMTP: "h:587", From: "g@x", To: "g@x"}}
+	own := &Notify{Email: &EmailSink{SMTP: "h:587", From: "t@x", To: "t@x"}}
+	cfg := &Config{Notify: global}
+
+	// template without notify falls back to the global default.
+	if got := cfg.NotifyFor(Template{}); got != global {
+		t.Errorf("empty template = %v, want global default", got)
+	}
+	// template with its own notify wins.
+	if got := cfg.NotifyFor(Template{Notify: own}); got != own {
+		t.Errorf("template override = %v, want own", got)
+	}
+	// no notify anywhere → nil.
+	if got := (&Config{}).NotifyFor(Template{}); got != nil {
+		t.Errorf("no notify = %v, want nil", got)
 	}
 }

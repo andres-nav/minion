@@ -8,11 +8,78 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type Config struct {
 	Hosts     map[string]Host     `json:"hosts"`
 	Templates map[string]Template `json:"templates"`
+	Notify    *Notify             `json:"notify"` // default notification, used when a template sets none
+}
+
+// Notify describes how to announce a finished job. `on` gates when it fires
+// ("always", "failure", or "success"; default "always"). At least one transport
+// must be set. Secret fields accept ${ENV} references, resolved locally at
+// launch so credentials never live in the config or the repo.
+type Notify struct {
+	On    string     `json:"on"`
+	Email *EmailSink `json:"email,omitempty"`
+	Run   []string   `json:"run,omitempty"` // raw shell run at job end with $MINION_* in the environment
+}
+
+// EmailSink is an SMTP recipient. SMTP is host:port (e.g. smtp.gmail.com:587).
+// User defaults to From; Pass is an SMTP/app password.
+type EmailSink struct {
+	SMTP string `json:"smtp"`
+	From string `json:"from"`
+	To   string `json:"to"`
+	User string `json:"user"`
+	Pass string `json:"pass"`
+}
+
+// empty reports whether the notify block would do nothing.
+func (n *Notify) empty() bool {
+	return n == nil || (n.Email == nil && len(n.Run) == 0)
+}
+
+// Validate reports a configuration error in the notify block, if any.
+func (n *Notify) Validate() error {
+	if n == nil {
+		return nil
+	}
+	switch n.On {
+	case "", "always", "failure", "success":
+	default:
+		return fmt.Errorf("notify.on %q must be always, failure, or success", n.On)
+	}
+	if e := n.Email; e != nil {
+		var missing []string
+		if e.SMTP == "" {
+			missing = append(missing, "smtp")
+		}
+		if e.From == "" {
+			missing = append(missing, "from")
+		}
+		if e.To == "" {
+			missing = append(missing, "to")
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("notify.email missing %s", strings.Join(missing, ", "))
+		}
+	}
+	return nil
+}
+
+// NotifyFor returns the effective notify config for a template: its own block if
+// set, else the top-level default. Returns nil when neither notifies.
+func (c *Config) NotifyFor(t Template) *Notify {
+	if !t.Notify.empty() {
+		return t.Notify
+	}
+	if !c.Notify.empty() {
+		return c.Notify
+	}
+	return nil
 }
 
 // Host is a remote target; SSH is the alias passed to the system ssh binary.
@@ -37,6 +104,7 @@ type Template struct {
 	Always    []string `json:"always"`
 	Fetch     []string `json:"fetch"`
 	FetchInto string   `json:"fetch_into"` // local dest for fetched results; supports {id} {ts} {repo}
+	Notify    *Notify  `json:"notify"`     // overrides the top-level default for this template
 
 	Build string `json:"build"`
 	Test  string `json:"test"`

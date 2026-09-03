@@ -34,6 +34,7 @@ func cmdFetch(args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
+	defer rt.close()
 	if rt.local {
 		return errf("fetch is for remote hosts; local runs write results in place")
 	}

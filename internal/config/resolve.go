@@ -172,6 +172,9 @@ func mergeTemplate(base, over Template) Template {
 	if over.FetchInto != "" {
 		out.FetchInto = over.FetchInto
 	}
+	if over.Notify != nil {
+		out.Notify = over.Notify
+	}
 	if over.Build != "" {
 		out.Build = over.Build
 	}

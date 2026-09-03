@@ -3,11 +3,13 @@ package ssh
 import (
 	"bytes"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ResolveAgentBinary picks the local minion binary to upload for the remote's
@@ -53,23 +55,71 @@ const (
 // Client runs commands on a remote host via the system ssh binary, inheriting
 // the user's ~/.ssh/config (ProxyJump, ControlMaster, ProxyCommand, …).
 type Client struct {
-	Host string
-	ssh  func(command string) *exec.Cmd
+	Host    string
+	ctlPath string    // control-master socket path
+	opts    []string  // ssh options shared by every command
+	master  *exec.Cmd // the control-master process, if Open()ed
+	ssh     func(command string) *exec.Cmd
 }
 
-// sshOpts disable creating a ControlMaster: minion's ssh reuses an existing
-// master if one is live (fast) but never daemonizes into one, which would
-// inherit and hold minion's stdout pipe (with ControlPersist) and hang Wait().
-var sshOpts = []string{"-o", "ControlMaster=no"}
+// controlPath returns a short, per-process control-socket path for host (kept
+// short to stay under the ~104-byte unix socket limit).
+func controlPath(host string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(host))
+	return fmt.Sprintf("/tmp/mcm-%x-%d", h.Sum32(), os.Getpid())
+}
 
 func New(host string) *Client {
 	host = strings.TrimSpace(host)
+	cp := controlPath(host)
+	// ControlMaster=no: commands never create a master themselves (that would
+	// daemonize and hang Wait); they only multiplex over one Open() started.
+	opts := []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + cp}
 	return &Client{
-		Host: host,
+		Host:    host,
+		ctlPath: cp,
+		opts:    opts,
 		ssh: func(command string) *exec.Cmd {
-			return exec.Command("ssh", append(append([]string{}, sshOpts...), host, command)...)
+			// RequestTTY=no: some hosts (e.g. Amazon DevSpaces) force RequestTTY=yes
+			// in ~/.ssh/config, which allocates a pty and corrupts piped command I/O
+			// (the sync byte stream). Commands never need a tty. Interactive keeps -t.
+			args := append(append([]string{}, opts...), "-o", "RequestTTY=no", host, command)
+			return exec.Command("ssh", args...)
 		},
 	}
+}
+
+// Open starts a shared control master so subsequent commands multiplex over a
+// single ssh connection (one handshake instead of one per command — a big win
+// through a jumphost). Best-effort: if it fails, commands still run, each
+// connecting directly. Call Close when done.
+func (c *Client) Open() {
+	// nil stdio → /dev/null, so the master holds no command pipe and Wait never
+	// blocks on it (the bug that forced ControlMaster=no for command connections).
+	m := exec.Command("ssh", "-o", "ControlMaster=yes", "-o", "ControlPath="+c.ctlPath, "-N", c.Host)
+	if err := m.Start(); err != nil {
+		return
+	}
+	c.master = m
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if exec.Command("ssh", "-o", "ControlPath="+c.ctlPath, "-O", "check", c.Host).Run() == nil {
+			return // master is up; commands will reuse it
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// Close tears down the control master opened by Open (no-op otherwise).
+func (c *Client) Close() {
+	if c.master == nil {
+		return
+	}
+	_ = exec.Command("ssh", "-o", "ControlPath="+c.ctlPath, "-O", "exit", c.Host).Run()
+	_ = c.master.Process.Kill()
+	_ = c.master.Wait()
+	c.master = nil
 }
 
 // Run runs command on the remote, wiring the given streams, and returns its
@@ -106,7 +156,7 @@ func (c *Client) RunStdout(command string, stderr io.Writer, consume func(io.Rea
 // terminal. If command is non-empty it runs instead of the default login shell.
 // Returns the session's exit code.
 func (c *Client) Interactive(command string) (int, error) {
-	a := append(append([]string{}, sshOpts...), "-t", c.Host)
+	a := append(append([]string{}, c.opts...), "-t", c.Host)
 	if command != "" {
 		a = append(a, command)
 	}

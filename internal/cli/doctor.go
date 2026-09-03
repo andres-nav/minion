@@ -26,6 +26,10 @@ func cmdDoctor(args []string) int {
 	problems := 0
 
 	// config sanity
+	if err := cfg.Notify.Validate(); err != nil {
+		fmt.Printf("notify   %-14s FAIL  %v\n", "(default)", err)
+		problems++
+	}
 	for name, t := range cfg.Templates {
 		if len(t.OrderedTasks()) == 0 {
 			fmt.Printf("template %-14s WARN  no tasks defined\n", name)
@@ -34,6 +38,10 @@ func cmdDoctor(args []string) int {
 			if _, ok := cfg.Hosts[t.Host]; !ok {
 				fmt.Printf("template %-14s note  host %q not in hosts (used as a raw ssh alias)\n", name, t.Host)
 			}
+		}
+		if err := t.Notify.Validate(); err != nil {
+			fmt.Printf("template %-14s FAIL  %v\n", name, err)
+			problems++
 		}
 	}
 

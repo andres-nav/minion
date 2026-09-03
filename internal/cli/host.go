@@ -139,8 +139,10 @@ func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remot
 		return &remoteTarget{exec: localExec{}, alias: alias, dir: r.Root, local: true, resolved: r}, nil
 	}
 	client := ssh.New(alias)
+	client.Open() // one multiplexed connection for the whole command (incl. bootstrap)
 	invoke, err := client.EnsureAgent(version, agentBinaryFor)
 	if err != nil {
+		client.Close()
 		return nil, err
 	}
 	return &remoteTarget{
@@ -151,4 +153,11 @@ func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remot
 		dir:      remoteDirFor(r.Template.RemoteDir, host.RemoteDir, r.Root),
 		resolved: r,
 	}, nil
+}
+
+// close tears down a remote target's multiplexed ssh connection (no-op locally).
+func (rt *remoteTarget) close() {
+	if c, ok := rt.exec.(*ssh.Client); ok {
+		c.Close()
+	}
 }

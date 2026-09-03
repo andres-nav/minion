@@ -54,6 +54,8 @@ func Run(args []string) int {
 		return cmdSSH(args[1:])
 	case "doctor":
 		return cmdDoctor(args[1:])
+	case "notify-test":
+		return cmdNotifyTest(args[1:])
 	case "_agent":
 		return cmdAgent(args[1:])
 	default:
@@ -80,6 +82,7 @@ commands:
   ps            list this package's remote jobs (--all for every job) (--host)
   ssh           open an interactive shell on the host, in the project dir (--host)
   doctor        validate config and check hosts (reachable + agent) (--host)
+  notify-test   send a test notification through the configured email (--host)
   version       print the minion version
   help          show this help
 `)

@@ -51,6 +51,18 @@ func TestScript(t *testing.T) {
 	}
 }
 
+func TestScriptArgs(t *testing.T) {
+	// task text is single-quoted, so shell metacharacters stay literal (no injection).
+	s := Script("~/w", "~/.minion/jobs/x", Job{Command: `claude -p "$MINION_ARGS"`, Args: "fix it; rm -rf /"}, Meta{})
+	if !strings.Contains(s, `export MINION_ARGS='fix it; rm -rf /'`) {
+		t.Errorf("MINION_ARGS not safely exported:\n%s", s)
+	}
+	// no Args → no export line.
+	if s := Script("~/w", "~/.minion/jobs/x", Job{Command: "make"}, Meta{}); strings.Contains(s, "MINION_ARGS") {
+		t.Errorf("unexpected MINION_ARGS export with no args:\n%s", s)
+	}
+}
+
 func TestCommandBuildersReferenceJobDir(t *testing.T) {
 	jd := JobDir("abc")
 	if jd != "~/.minion/jobs/abc" {
