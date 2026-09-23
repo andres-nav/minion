@@ -7,7 +7,7 @@ detached sessions that survive disconnects, notifies on failure from the remote
 side, and fetches results back. One uniform interface across every repo, driven
 from the terminal, Emacs, or an AI agent.
 
-See [DESIGN.md](DESIGN.md) for the full design.
+See [DESIGN.md](docs/DESIGN.md) for the full design.
 
 ## Status
 
@@ -25,7 +25,7 @@ minion list [--json]                 # discover the resolved template + tasks
 ```
 
 Config lives in `~/.config/minion/config.json` (+ optional per-project
-`.minion.json`). See [DESIGN.md](DESIGN.md).
+`.minion.json`). See [DESIGN.md](docs/DESIGN.md).
 
 ## Develop
 
