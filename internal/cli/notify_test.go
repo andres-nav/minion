@@ -75,6 +75,31 @@ func TestBuildNotifyRunOnly(t *testing.T) {
 	}
 }
 
+// A run hook (e.g. a curl webhook) gets the composed summary and locally
+// resolved secrets, so tokens stay out of the config and the message matches email.
+func TestBuildNotifyRunEnvAndSummary(t *testing.T) {
+	t.Setenv("MATRIX_TOKEN", "s3cret-token")
+	n := &config.Notify{
+		On:  "always",
+		Run: []string{`curl -H "Authorization: Bearer $MATRIX_TOKEN" -d "$MINION_SUBJECT" https://matrix`},
+		Env: map[string]string{"MATRIX_TOKEN": "${MATRIX_TOKEN}"},
+	}
+	s := buildNotify("~/.minion/bin/minion", "~/.minion/jobs/j1/log", n)
+
+	for _, want := range []string{
+		"export MATRIX_TOKEN='s3cret-token'",                                     // secret resolved locally
+		`export MINION_SUBJECT="$(~/.minion/bin/minion _agent summary)"`,         // one-line summary
+		`export MINION_BODY="$(~/.minion/bin/minion _agent summary --body --log`, // full body with log tail
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("snippet missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "${MATRIX_TOKEN}") {
+		t.Errorf("secret reference leaked into snippet:\n%s", s)
+	}
+}
+
 // The notify snippet, embedded in a job script, must still be valid sh.
 func TestNotifyScriptIsValidShell(t *testing.T) {
 	t.Setenv("PW", "pw")

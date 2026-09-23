@@ -73,7 +73,7 @@ func jobStartTS(client execer, id string) string {
 
 // pullResults streams files matching patterns from remoteDir back into dest.
 func pullResults(client execer, invoke, remoteDir string, patterns []string, dest string) (int, error) {
-	cmd := invoke + " _agent send " + remoteDir
+	cmd := invoke + " _agent send " + remote.RemotePath(remoteDir)
 	for _, p := range patterns {
 		cmd += " " + remote.ShellQuote(p)
 	}

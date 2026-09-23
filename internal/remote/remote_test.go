@@ -35,7 +35,7 @@ func TestScript(t *testing.T) {
 	s := Script("~/work", "~/.minion/jobs/j1", j, Meta{ID: "j1", Task: "build", Host: "gpu"})
 
 	for _, want := range []string{
-		"cd ~/work || exit 1",
+		`cd "$HOME"/'work' || exit 1`,
 		`export PATH="$HOME/.toolbox/bin:$PATH"`,
 		"teardown() { ( cleanup ); :; }",
 		"trap ",
@@ -60,6 +60,23 @@ func TestScriptArgs(t *testing.T) {
 	// no Args → no export line.
 	if s := Script("~/w", "~/.minion/jobs/x", Job{Command: "make"}, Meta{}); strings.Contains(s, "MINION_ARGS") {
 		t.Errorf("unexpected MINION_ARGS export with no args:\n%s", s)
+	}
+}
+
+func TestRemotePath(t *testing.T) {
+	cases := map[string]string{
+		"~":            `"$HOME"`,
+		"~/work":       `"$HOME"/'work'`,
+		"~/a b/c":      `"$HOME"/'a b/c'`,      // spaces stay literal
+		"/abs path":    `'/abs path'`,          // absolute quoted whole
+		"rel/dir":      `'rel/dir'`,            // $HOME-relative quoted whole
+		"has'quote":    `'has'\''quote'`,       // embedded single quote escaped
+		"~/x;rm -rf .": `"$HOME"/'x;rm -rf .'`, // metacharacters neutralized
+	}
+	for in, want := range cases {
+		if got := RemotePath(in); got != want {
+			t.Errorf("RemotePath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

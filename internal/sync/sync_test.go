@@ -115,6 +115,51 @@ func TestWalkExcludes(t *testing.T) {
 	}
 }
 
+func TestSafeJoin(t *testing.T) {
+	root := t.TempDir()
+	// a normal relative path resolves under root.
+	if got, ok := safeJoin(root, "sub/file.txt"); !ok || got != filepath.Join(root, "sub", "file.txt") {
+		t.Fatalf("safeJoin(normal) = %q ok=%v", got, ok)
+	}
+	// path-traversal attempts are rejected.
+	for _, bad := range []string{"../escape", "sub/../../escape"} {
+		if _, ok := safeJoin(root, bad); ok {
+			t.Errorf("safeJoin(%q) accepted, want rejected", bad)
+		}
+	}
+	// an absolute-looking rel is contained under root by Join, not an escape.
+	if got, ok := safeJoin(root, "/etc/passwd"); !ok || got != filepath.Join(root, "etc", "passwd") {
+		t.Errorf("safeJoin(/etc/passwd) = %q ok=%v, want contained under root", got, ok)
+	}
+	// resolving to root itself (empty rel) is rejected — nothing to write there.
+	if _, ok := safeJoin(root, ""); ok {
+		t.Error("safeJoin(\"\") accepted, want rejected")
+	}
+}
+
+func TestExcluded(t *testing.T) {
+	cases := []struct {
+		rel      string
+		patterns []string
+		want     bool
+	}{
+		{".git", nil, true},                         // .git always excluded
+		{".git/config", nil, true},                  // and everything under it
+		{"main.go", nil, false},                     // nothing excluded by default
+		{"build", []string{"build"}, true},          // exact match
+		{"build/out.pdf", []string{"build"}, true},  // dir prefix
+		{"build/out.pdf", []string{"build/"}, true}, // trailing-slash pattern
+		{"logs/run.log", []string{"*.log"}, true},   // glob on basename
+		{"src/app.go", []string{"*.log"}, false},    // non-match
+		{"a/b/c.tmp", []string{"a/b/c.tmp"}, true},  // exact nested path
+	}
+	for _, c := range cases {
+		if got := excluded(c.rel, c.patterns); got != c.want {
+			t.Errorf("excluded(%q, %v) = %v, want %v", c.rel, c.patterns, got, c.want)
+		}
+	}
+}
+
 func TestChanged(t *testing.T) {
 	local := Manifest{
 		"same":    {Size: 1, Mtime: 100},

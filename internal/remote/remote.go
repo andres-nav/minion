@@ -27,6 +27,21 @@ func ShellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// RemotePath renders a remote path as a single shell word: a leading ~ expands to
+// $HOME, the remainder is single-quoted so spaces and shell metacharacters stay
+// literal. Absolute and $HOME-relative paths are quoted whole. This lets
+// remote_dir / repo names contain spaces without breaking the ssh command string.
+func RemotePath(p string) string {
+	if p == "~" {
+		return `"$HOME"`
+	}
+	if rest, ok := strings.CutPrefix(p, "~/"); ok {
+		// Adjacent quoted segments concatenate into one word: $HOME/<rest>.
+		return `"$HOME"/` + ShellQuote(rest)
+	}
+	return ShellQuote(p)
+}
+
 const jobsDir = ".minion/jobs"
 
 // JobDir returns the remote job directory (with ~ for the remote shell to expand).
@@ -48,7 +63,7 @@ type Meta struct {
 func Script(workDir, jobDir string, j Job, m Meta) string {
 	var b strings.Builder
 	b.WriteString("#!/bin/sh\n")
-	fmt.Fprintf(&b, "cd %s || exit 1\n", workDir)
+	fmt.Fprintf(&b, "cd %s || exit 1\n", RemotePath(workDir))
 	for _, e := range j.Env {
 		// double-quote the value so spaces survive while $VAR still expands.
 		if k, v, ok := strings.Cut(e, "="); ok {

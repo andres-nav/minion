@@ -21,6 +21,15 @@ func TestResolveAgentBinary(t *testing.T) {
 	if _, err := ResolveAgentBinary("/opt/bin/minion", "darwin/arm64", "linux/amd64", func(string) bool { return false }); err == nil {
 		t.Fatal("cross-missing: expected error")
 	}
+	// cross platform, only the installed libexec copy present (bin/../libexec/minion)
+	libexec := filepath.Join("/opt/bin", "..", "libexec", "minion", "minion-linux-arm64")
+	if got, err := ResolveAgentBinary("/opt/bin/minion", "darwin/amd64", "linux/arm64", func(p string) bool { return p == libexec }); err != nil || got != libexec {
+		t.Fatalf("libexec fallback: got %q err %v, want %q", got, err, libexec)
+	}
+	// malformed target platform → error
+	if _, err := ResolveAgentBinary("/opt/bin/minion", "darwin/arm64", "bogus", func(string) bool { return true }); err == nil {
+		t.Fatal("malformed platform: expected error")
+	}
 }
 
 func TestSplitPlatform(t *testing.T) {
@@ -34,9 +43,11 @@ func TestSplitPlatform(t *testing.T) {
 
 func TestUnameToGo(t *testing.T) {
 	cases := map[string]string{
-		"Darwin arm64":  "darwin/arm64",
-		"Linux x86_64":  "linux/amd64",
-		"Linux aarch64": "linux/arm64",
+		"Darwin arm64":    "darwin/arm64",
+		"Linux x86_64":    "linux/amd64",
+		"Linux aarch64":   "linux/arm64",
+		"Linux amd64":     "linux/amd64",     // already-Go arch passes through
+		"FreeBSD riscv64": "freebsd/riscv64", // unknown os+arch lower-cased/passed through
 	}
 	for in, want := range cases {
 		if got := unameToGo(in); got != want {

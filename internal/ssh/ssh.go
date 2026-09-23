@@ -155,7 +155,7 @@ func (c *Client) Run(command string, stdin io.Reader, stdout, stderr io.Writer) 
 	cmd.Stdin = stdin
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	return exitCode(cmd.Run())
+	return ExitCode(cmd.Run())
 }
 
 // RunStdout runs command and hands its stdout stream to consume, returning the
@@ -175,7 +175,7 @@ func (c *Client) RunStdout(command string, stderr io.Writer, consume func(io.Rea
 	if cErr != nil {
 		return -1, cErr
 	}
-	return exitCode(wErr)
+	return ExitCode(wErr)
 }
 
 // Interactive opens an interactive ssh session with a tty, wiring the real
@@ -188,12 +188,12 @@ func (c *Client) Interactive(command string) (int, error) {
 	}
 	cmd := exec.Command("ssh", a...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return exitCode(cmd.Run())
+	return ExitCode(cmd.Run())
 }
 
-// exitCode maps an exec error to (code, err): nil→(0,nil), non-zero exit→(code,nil),
-// failure to run→(-1,err).
-func exitCode(err error) (int, error) {
+// ExitCode maps an exec error to (code, err): nil→(0,nil), non-zero exit→(code,nil),
+// failure to run→(-1,err). Shared by the ssh and local executors.
+func ExitCode(err error) (int, error) {
 	if err == nil {
 		return 0, nil
 	}

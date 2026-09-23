@@ -51,7 +51,7 @@ func pushChanges(client execer, invoke, root string, exclude []string, remoteDir
 	// Pass excludes so the remote manifest is filtered the same way as the local
 	// one — otherwise --delete would treat excluded remote files (build output,
 	// etc.) as stale and remove them.
-	manifestCmd := invoke + " _agent manifest " + remoteDir
+	manifestCmd := invoke + " _agent manifest " + remote.RemotePath(remoteDir)
 	for _, e := range exclude {
 		manifestCmd += " " + remote.ShellQuote(e)
 	}
@@ -79,7 +79,7 @@ func pushChanges(client execer, invoke, root string, exclude []string, remoteDir
 	pr, pw := io.Pipe()
 	go func() { pw.CloseWithError(sync.Send(pw, root, changed, deletes)) }()
 
-	code, err := client.Run(invoke+" _agent recv "+remoteDir, pr, io.Discard, os.Stderr)
+	code, err := client.Run(invoke+" _agent recv "+remote.RemotePath(remoteDir), pr, io.Discard, os.Stderr)
 	if err != nil {
 		return 0, 0, err
 	}

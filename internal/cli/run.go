@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -176,8 +177,10 @@ func gitOut(dir string, args ...string) string {
 // buildNotify assembles the shell run at the end of a job's script. It resolves
 // ${ENV} secrets on this machine (so credentials never touch the config file or
 // the repo), gates on the configured `on`, invokes the agent for the email sink,
-// and appends any raw `run` commands. invoke is the minion binary to call on the
-// target; logPath is the job's log file (passed to the agent for a body tail).
+// and appends any `run` commands (e.g. a curl webhook). Run hooks additionally
+// see $MINION_SUBJECT / $MINION_BODY (the job summary) and any notify.env vars.
+// invoke is the minion binary to call on the target; logPath is the job's log
+// file (passed to the agent for a body tail).
 func buildNotify(invoke, logPath string, n *config.Notify) string {
 	if n.Email == nil && len(n.Run) == 0 {
 		return ""
@@ -188,7 +191,17 @@ func buildNotify(invoke, logPath string, n *config.Notify) string {
 			fmt.Fprintf(&b, "export MINION_SMTP_PASS=%s\n", remote.ShellQuote(pass))
 		}
 	}
+	// notify.env: resolve ${ENV} on this machine and export for the run hooks, so
+	// tokens/keys never land in the config or on the remote's disk.
+	for _, k := range sortedKeys(n.Env) {
+		fmt.Fprintf(&b, "export %s=%s\n", k, remote.ShellQuote(resolveSecret(n.Env[k])))
+	}
 	fmt.Fprintf(&b, "if %s; then\n", gate(n.On))
+	if len(n.Run) > 0 {
+		// Compose the summary once (same text as email) for the run hooks to send.
+		fmt.Fprintf(&b, "  export MINION_SUBJECT=\"$(%s)\"\n", summaryInvoke(invoke, "", false))
+		fmt.Fprintf(&b, "  export MINION_BODY=\"$(%s)\"\n", summaryInvoke(invoke, logPath, true))
+	}
 	if n.Email != nil {
 		fmt.Fprintf(&b, "  %s || echo '[minion] notify: email failed' >&2\n", emailInvoke(invoke, logPath, n.Email))
 	}
@@ -197,6 +210,29 @@ func buildNotify(invoke, logPath string, n *config.Notify) string {
 	}
 	b.WriteString("fi")
 	return b.String()
+}
+
+// summaryInvoke is the agent call that prints the job summary: the one-line
+// subject by default, or the full body (with a log tail) when body is set.
+func summaryInvoke(invoke, logPath string, body bool) string {
+	parts := []string{invoke, "_agent", "summary"}
+	if body {
+		parts = append(parts, "--body")
+		if logPath != "" {
+			parts = append(parts, "--log", logPath) // unquoted so the remote shell expands ~
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// sortedKeys returns the map keys in a stable order (deterministic scripts).
+func sortedKeys(m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // emailInvoke is the agent call that sends the email. Non-secret fields are

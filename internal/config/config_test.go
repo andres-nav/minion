@@ -161,6 +161,64 @@ func TestPerRepoOverride(t *testing.T) {
 	}
 }
 
+// A .minion.json may define the template it uses, plus a local host, without
+// any global config entry.
+func TestLocalTemplateResolves(t *testing.T) {
+	cfg := loadGlobal(t)
+	root := mkRepo(t)
+	repoJSON := `{
+  "use": "ai",
+  "hosts": { "ds-ai": { "ssh": "ds-ai-box", "remote_dir": "~/workspace" } },
+  "templates": {
+    "ai": { "host": "ds-ai", "tasks": { "ai": "claude -p go" } }
+  }
+}`
+	if err := os.WriteFile(filepath.Join(root, ".minion.json"), []byte(repoJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := cfg.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.TemplateName != "ai" {
+		t.Fatalf("template = %q, want ai", r.TemplateName)
+	}
+	if r.HostName != "ds-ai" || r.Host.SSH != "ds-ai-box" {
+		t.Fatalf("host = %q ssh=%q, want ds-ai/ds-ai-box", r.HostName, r.Host.SSH)
+	}
+	if cmd, ok := r.Template.Lookup("ai"); !ok || cmd != "claude -p go" {
+		t.Fatalf("local task = %q ok=%v", cmd, ok)
+	}
+	// The global config must be untouched by the local merge.
+	if _, ok := cfg.Templates["ai"]; ok {
+		t.Fatal("local template leaked into the global config")
+	}
+}
+
+// A local template with the same name as a global one wins.
+func TestLocalTemplateOverridesGlobal(t *testing.T) {
+	cfg := loadGlobal(t)
+	root := mkRepo(t)
+	repoJSON := `{
+  "use": "python-gpu",
+  "templates": { "python-gpu": { "host": "gpu01", "test": "local-test" } }
+}`
+	if err := os.WriteFile(filepath.Join(root, ".minion.json"), []byte(repoJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := cfg.Resolve(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd, _ := r.Template.Lookup("test"); cmd != "local-test" {
+		t.Fatalf("test = %q, want local-test (local override)", cmd)
+	}
+	if r.HostName != "gpu01" {
+		t.Fatalf("host = %q, want gpu01", r.HostName)
+	}
+}
+
 func TestOrderedTasks(t *testing.T) {
 	cfg := loadGlobal(t)
 	tmpl := cfg.Templates["python-gpu"]
@@ -221,8 +279,31 @@ func TestMergeTemplateEmptyOverrideKeepsBase(t *testing.T) {
 	}
 }
 
+func TestUnknownUseErrors(t *testing.T) {
+	cfg := loadGlobal(t)
+	root := mkRepo(t)
+	repoJSON := `{ "use": "nope" }`
+	if err := os.WriteFile(filepath.Join(root, ".minion.json"), []byte(repoJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cfg.Resolve(root); err == nil {
+		t.Fatal("use of an undefined template should error")
+	}
+	// an inline .minion.json with no `use` is still valid (name stays empty).
+	if err := os.WriteFile(filepath.Join(root, ".minion.json"), []byte(`{ "build": "make" }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := cfg.Resolve(root)
+	if err != nil {
+		t.Fatalf("inline config without use should not error: %v", err)
+	}
+	if cmd, _ := r.Template.Lookup("build"); cmd != "make" {
+		t.Fatalf("inline build = %q, want make", cmd)
+	}
+}
+
 func TestMissingGlobalConfigIsEmpty(t *testing.T) {
-	t.Setenv("MINION_CONFIG", filepath.Join(t.TempDir(), "does-not-exist.toml"))
+	t.Setenv("MINION_CONFIG", filepath.Join(t.TempDir(), "does-not-exist.json"))
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("Load of missing config should not error: %v", err)

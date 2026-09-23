@@ -61,6 +61,8 @@ func cmdAgent(args []string) int {
 		return 0
 	case "notify":
 		return agentNotify(args[1:])
+	case "summary":
+		return agentSummary(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "minion _agent: unknown subcommand %q\n", args[0])
 		return 2
@@ -100,6 +102,33 @@ func agentNotify(args []string) int {
 	if err := sink.Send(res.Subject(), res.Body()); err != nil {
 		fmt.Fprintf(os.Stderr, "minion _agent notify: %v\n", err)
 		return 1
+	}
+	return 0
+}
+
+// agentSummary prints the job summary composed from the MINION_* env — the same
+// text the email transport uses — so run hooks (e.g. a curl webhook) can send a
+// consistent message via $MINION_SUBJECT / $MINION_BODY. Default prints the
+// one-line subject; --body prints the full body (with --log tailed into it).
+func agentSummary(args []string) int {
+	fs := flag.NewFlagSet("summary", flag.ContinueOnError)
+	body := fs.Bool("body", false, "print the full body instead of the one-line subject")
+	logPath := fs.String("log", "", "job log file, tailed into the body")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	res := notify.Result{
+		JobID:    os.Getenv("MINION_JOB_ID"),
+		Task:     os.Getenv("MINION_TASK"),
+		Host:     os.Getenv("MINION_HOST"),
+		Exit:     atoiOr(os.Getenv("MINION_EXIT"), -1),
+		Duration: atoiOr(os.Getenv("MINION_DURATION"), 0),
+	}
+	if *body {
+		res.LogTail = tailFile(*logPath, 30)
+		fmt.Print(res.Body())
+	} else {
+		fmt.Println(res.Subject())
 	}
 	return 0
 }

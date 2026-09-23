@@ -17,7 +17,7 @@ import (
 func cmdDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	host := hostFlag(fs)
-	notify := fs.Bool("notify", false, "also send a test notification email (from --host or the template's default host)")
+	notify := fs.Bool("notify", false, "also fire a test notification (email and/or run hooks) from --host or the template's default host")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -102,13 +102,14 @@ func cmdDoctor(args []string) int {
 	return 0
 }
 
-// sendNotifyTest sends a synthetic notification through the resolved email
-// config from the target host, verifying credentials and connectivity end to
-// end. Invoked by `doctor --notify`. Returns a process exit code (0 on success).
+// sendNotifyTest fires a synthetic notification through the resolved config
+// (email and/or run hooks) from the target host, verifying credentials and
+// connectivity end to end. Invoked by `doctor --notify`. Returns a process exit
+// code (0 on success).
 func sendNotifyTest(cfg *config.Config, r *config.Resolved, host string) int {
 	n := cfg.NotifyFor(r.Template)
-	if n == nil || n.Email == nil {
-		return errf("no email notify configured (add a notify.email block to the template or global config)")
+	if n == nil {
+		return errf("no notify configured (add a notify.email or notify.run block to the template or global config)")
 	}
 
 	rt, err := dialRemote(cfg, r, host)
@@ -123,17 +124,18 @@ func sendNotifyTest(cfg *config.Config, r *config.Resolved, host string) int {
 	b.WriteString("export MINION_JOB_ID=notify-test MINION_TASK=notify-test MINION_HOST=")
 	b.WriteString(remote.ShellQuote(rt.alias))
 	b.WriteString(" MINION_EXIT=0 MINION_DURATION=0\n")
-	if pass := resolveSecret(n.Email.Pass); pass != "" {
-		fmt.Fprintf(&b, "export MINION_SMTP_PASS=%s\n", remote.ShellQuote(pass))
-	}
-	b.WriteString(emailInvoke(invoke, "", n.Email))
+	// Force the gate open (a synthetic exit=0 would otherwise skip an on:failure
+	// notify) so the test always exercises the configured transports.
+	test := *n
+	test.On = "always"
+	b.WriteString(buildNotify(invoke, "", &test))
 
 	code, err := rt.exec.Run(b.String(), nil, os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("notify-test: %v", err)
 	}
 	if code == 0 {
-		fmt.Fprintf(os.Stderr, "sent test email to %s via %s\n", n.Email.To, rt.alias)
+		fmt.Fprintf(os.Stderr, "fired test notification via %s\n", rt.alias)
 	}
 	return code
 }

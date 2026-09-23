@@ -22,9 +22,10 @@ type Config struct {
 // must be set. Secret fields accept ${ENV} references, resolved locally at
 // launch so credentials never live in the config or the repo.
 type Notify struct {
-	On    string     `json:"on"`
-	Email *EmailSink `json:"email,omitempty"`
-	Run   []string   `json:"run,omitempty"` // raw shell run at job end with $MINION_* in the environment
+	On    string            `json:"on"`
+	Email *EmailSink        `json:"email,omitempty"`
+	Run   []string          `json:"run,omitempty"` // shell run at job end with $MINION_* in the environment (e.g. a curl webhook)
+	Env   map[string]string `json:"env,omitempty"` // extra vars exported for the run hooks; values accept ${ENV}, resolved locally (keep tokens out of the config)
 }
 
 // EmailSink is an SMTP recipient. SMTP is host:port (e.g. smtp.gmail.com:587).
@@ -117,9 +118,41 @@ type Template struct {
 
 // RepoConfig is a per-project .minion.json: it picks a template via `use` and
 // may override any Template field (embedded fields sit at the JSON top level).
+// It may also define its own `templates` and `hosts`, merged over the global
+// config before resolution (local wins on key collision) — so a project can
+// `use` a template defined right in its .minion.json, no global config needed.
 type RepoConfig struct {
-	Use string `json:"use"`
+	Use       string              `json:"use"`
+	Hosts     map[string]Host     `json:"hosts,omitempty"`
+	Templates map[string]Template `json:"templates,omitempty"`
 	Template
+}
+
+// withLocal returns c overlaid with the repo config's local hosts and templates
+// (local definitions win on key collision). The receiver is never mutated; when
+// the repo defines nothing local, c is returned unchanged.
+func (c *Config) withLocal(rc *RepoConfig) *Config {
+	if len(rc.Hosts) == 0 && len(rc.Templates) == 0 {
+		return c
+	}
+	merged := &Config{
+		Hosts:     make(map[string]Host, len(c.Hosts)+len(rc.Hosts)),
+		Templates: make(map[string]Template, len(c.Templates)+len(rc.Templates)),
+		Notify:    c.Notify,
+	}
+	for k, v := range c.Hosts {
+		merged.Hosts[k] = v
+	}
+	for k, v := range rc.Hosts {
+		merged.Hosts[k] = v
+	}
+	for k, v := range c.Templates {
+		merged.Templates[k] = v
+	}
+	for k, v := range rc.Templates {
+		merged.Templates[k] = v
+	}
+	return merged
 }
 
 var StdVerbs = []string{"build", "test", "run", "lint", "clean"}

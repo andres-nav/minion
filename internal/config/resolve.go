@@ -56,7 +56,17 @@ func (c *Config) Resolve(dir string) (*Resolved, error) {
 			if uErr := json.Unmarshal(b, rc); uErr != nil {
 				return nil, fmt.Errorf("parse %s: %w", rcPath, uErr)
 			}
-			return c.finish(cur, gr, rc, rcPath), nil
+			// Merge in any project-local templates/hosts so `use` can name a
+			// template defined right here in the .minion.json.
+			cfg := c.withLocal(rc)
+			// A `use` that names no template resolves to an empty template and
+			// only fails later with a confusing "no task" error — fail loudly here.
+			if rc.Use != "" {
+				if _, ok := cfg.Templates[rc.Use]; !ok {
+					return nil, fmt.Errorf("%s: use %q is not a defined template", rcPath, rc.Use)
+				}
+			}
+			return cfg.finish(cur, gr, rc, rcPath), nil
 		case !errors.Is(err, fs.ErrNotExist):
 			return nil, err
 		}

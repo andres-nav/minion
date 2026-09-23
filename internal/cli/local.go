@@ -6,6 +6,8 @@ import (
 	"io"
 	"os/exec"
 	"strings"
+
+	"github.com/andres-nav/minion/internal/ssh"
 )
 
 // execer runs shell commands somewhere — remotely via ssh, or on this machine.
@@ -23,7 +25,7 @@ type localExec struct{}
 func (localExec) Run(command string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
-	return exitCode(cmd.Run())
+	return ssh.ExitCode(cmd.Run())
 }
 
 func (localExec) Output(command string) (string, error) {
@@ -51,17 +53,7 @@ func (localExec) RunStdout(command string, stderr io.Writer, consume func(io.Rea
 	if cErr != nil {
 		return -1, cErr
 	}
-	return exitCode(wErr)
-}
-
-func exitCode(err error) (int, error) {
-	if err == nil {
-		return 0, nil
-	}
-	if ee, ok := err.(*exec.ExitError); ok {
-		return ee.ExitCode(), nil
-	}
-	return -1, err
+	return ssh.ExitCode(wErr)
 }
 
 // isLocalAlias reports whether an ssh alias means "run on this machine".

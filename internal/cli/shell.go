@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/andres-nav/minion/internal/remote"
 	"github.com/andres-nav/minion/internal/ssh"
 )
 
@@ -36,7 +37,7 @@ func cmdSSH(args []string) int {
 		cmd := exec.Command(shell, "-l")
 		cmd.Dir = r.Root
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-		code, cerr := exitCode(cmd.Run())
+		code, cerr := ssh.ExitCode(cmd.Run())
 		if cerr != nil {
 			return errf("%v", cerr)
 		}
@@ -45,7 +46,7 @@ func cmdSSH(args []string) int {
 
 	dir := remoteDirFor(r.Template.RemoteDir, h.RemoteDir, r.Root)
 	fmt.Fprintf(os.Stderr, "%s: opening shell in %s\n", alias, dir)
-	code, err := ssh.New(alias).Interactive(fmt.Sprintf("cd %s 2>/dev/null; exec ${SHELL:-sh} -l", dir))
+	code, err := ssh.New(alias).Interactive(fmt.Sprintf("cd %s 2>/dev/null; exec ${SHELL:-sh} -l", remote.RemotePath(dir)))
 	if err != nil {
 		return errf("%v", err)
 	}
