@@ -14,7 +14,7 @@ One verb works in every repo (`minion run <task>`, resolving build/test/lint/cle
 
 JSON, parsed with `encoding/json`. Global `~/.config/minion/config.json` (honors `MINION_CONFIG`, `XDG_CONFIG_HOME`), optionally overridden by a per-project `.minion.json`.
 
-- **`hosts`**: name → `{ ssh, remote_dir }`. `ssh` is the alias passed to the system `ssh` (so `~/.ssh/config` — ProxyJump, ControlMaster, etc. — is inherited). `remote_dir` supports `{repo}`.
+- **`hosts`**: name → `{ ssh, remote_dir }`. `ssh` is the alias passed to the system `ssh` (so `~/.ssh/config` — ProxyJump, ControlMaster, etc. — is inherited). If a master from the user's own `ControlPath` is already running (`ssh -O check <alias>`), minion multiplexes over it instead of opening its own, so hosts that need interactive 2FA work after one manual `ssh <alias>`. `remote_dir` supports `{repo}`, a leading `~`, and `$VAR` / `${VAR}` expanded by the **remote** shell (e.g. `/scratch/$USER/{repo}`); an unset or empty variable fails the command instead of resolving to another directory.
 - **`templates`**: name → a repo-type:
   - `detect`: filename markers; a template matches if **any** is present.
   - `host`: default host (a `hosts` key or raw ssh alias). **No global default** — if a remote op needs a host and none is set, minion fails loudly.

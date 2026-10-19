@@ -5,6 +5,7 @@ package remote
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -28,18 +29,40 @@ func ShellQuote(s string) string {
 }
 
 // RemotePath renders a remote path as a single shell word: a leading ~ expands to
-// $HOME, the remainder is single-quoted so spaces and shell metacharacters stay
-// literal. Absolute and $HOME-relative paths are quoted whole. This lets
-// remote_dir / repo names contain spaces without breaking the ssh command string.
+// $HOME and $NAME / ${NAME} references expand on the remote (e.g. /scratch/$USER);
+// everything else is single-quoted so spaces and shell metacharacters stay
+// literal. This lets remote_dir / repo names contain spaces without breaking the
+// ssh command string.
 func RemotePath(p string) string {
 	if p == "~" {
 		return `"$HOME"`
 	}
 	if rest, ok := strings.CutPrefix(p, "~/"); ok {
 		// Adjacent quoted segments concatenate into one word: $HOME/<rest>.
-		return `"$HOME"/` + ShellQuote(rest)
+		return `"$HOME"/` + quoteExpandingVars(rest)
 	}
-	return ShellQuote(p)
+	return quoteExpandingVars(p)
+}
+
+var envRef = regexp.MustCompile(`\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)`)
+
+// quoteExpandingVars single-quotes s except for variable references, which become
+// "${NAME:?}": expanded by the remote shell, and an error if unset or empty so a
+// missing variable can't silently turn the path into a different directory.
+func quoteExpandingVars(s string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range envRef.FindAllStringIndex(s, -1) {
+		if m[0] > last {
+			b.WriteString(ShellQuote(s[last:m[0]]))
+		}
+		b.WriteString(`"${` + strings.Trim(s[m[0]+1:m[1]], "{}") + `:?}"`)
+		last = m[1]
+	}
+	if last == 0 || last < len(s) {
+		b.WriteString(ShellQuote(s[last:]))
+	}
+	return b.String()
 }
 
 const jobsDir = ".minion/jobs"

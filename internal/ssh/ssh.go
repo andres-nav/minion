@@ -56,7 +56,8 @@ const (
 // the user's ~/.ssh/config (ProxyJump, ControlMaster, ProxyCommand, …).
 type Client struct {
 	Host       string
-	ctlPath    string        // control-master socket path
+	ctlPath    string        // control-master socket path ("" when reusing the user's master)
+	reuse      bool          // multiplexing over a master the user already opened
 	opts       []string      // ssh options shared by every command
 	master     *exec.Cmd     // the control-master process, if Open()ed
 	masterDone chan struct{} // closed when the master process exits (its Wait is owned by Open)
@@ -82,22 +83,32 @@ func controlPath(host string) string {
 
 func New(host string) *Client {
 	host = strings.TrimSpace(host)
-	cp := controlPath(host)
+	c := &Client{Host: host}
 	// ControlMaster=no: commands never create a master themselves (that would
-	// daemonize and hang Wait); they only multiplex over one Open() started.
-	opts := []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + cp}
-	return &Client{
-		Host:    host,
-		ctlPath: cp,
-		opts:    opts,
-		ssh: func(command string) *exec.Cmd {
-			// RequestTTY=no: some hosts (e.g. Amazon DevSpaces) force RequestTTY=yes
-			// in ~/.ssh/config, which allocates a pty and corrupts piped command I/O
-			// (the sync byte stream). Commands never need a tty. Interactive keeps -t.
-			args := append(append([]string{}, opts...), "-o", "RequestTTY=no", host, command)
-			return exec.Command("ssh", args...)
-		},
+	// daemonize and hang Wait); they only multiplex over an existing one.
+	if userMasterRunning(host) {
+		// Reuse the master from the user's ~/.ssh/config (e.g. opened by an
+		// interactive login on a 2FA host, which a non-interactive master can't pass).
+		c.reuse = true
+		c.opts = []string{"-o", "ControlMaster=no"}
+	} else {
+		c.ctlPath = controlPath(host)
+		c.opts = []string{"-o", "ControlMaster=no", "-o", "ControlPath=" + c.ctlPath}
 	}
+	c.ssh = func(command string) *exec.Cmd {
+		// RequestTTY=no: some hosts (e.g. Amazon DevSpaces) force RequestTTY=yes
+		// in ~/.ssh/config, which allocates a pty and corrupts piped command I/O
+		// (the sync byte stream). Commands never need a tty. Interactive keeps -t.
+		args := append(append([]string{}, c.opts...), "-o", "RequestTTY=no", host, command)
+		return exec.Command("ssh", args...)
+	}
+	return c
+}
+
+// userMasterRunning reports whether the user's ~/.ssh/config ControlPath has a
+// live master for host. Local socket check only: it never opens a connection.
+func userMasterRunning(host string) bool {
+	return exec.Command("ssh", "-O", "check", host).Run() == nil
 }
 
 // Open starts a shared control master so subsequent commands multiplex over a
@@ -105,6 +116,9 @@ func New(host string) *Client {
 // through a jumphost). Best-effort: if it fails, commands still run, each
 // connecting directly. Call Close when done.
 func (c *Client) Open() {
+	if c.reuse {
+		return // already multiplexing over the user's master
+	}
 	// nil stdio → /dev/null, so the master holds no command pipe and Wait never
 	// blocks on it (the bug that forced ControlMaster=no for command connections).
 	m := exec.Command("ssh", "-o", "ControlMaster=yes", "-o", "ControlPath="+c.ctlPath, "-N", c.Host)
