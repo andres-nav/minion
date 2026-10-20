@@ -46,23 +46,13 @@ func RemotePath(p string) string {
 
 var envRef = regexp.MustCompile(`\$(\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)`)
 
-// quoteExpandingVars single-quotes s except for variable references, which become
-// "${NAME:?}": expanded by the remote shell, and an error if unset or empty so a
-// missing variable can't silently turn the path into a different directory.
+// quoteExpandingVars single-quotes s, then reopens the quotes around each variable
+// reference as "${NAME:?}": expanded by the remote shell, and an error if unset or
+// empty so a missing variable can't silently turn the path into another directory.
 func quoteExpandingVars(s string) string {
-	var b strings.Builder
-	last := 0
-	for _, m := range envRef.FindAllStringIndex(s, -1) {
-		if m[0] > last {
-			b.WriteString(ShellQuote(s[last:m[0]]))
-		}
-		b.WriteString(`"${` + strings.Trim(s[m[0]+1:m[1]], "{}") + `:?}"`)
-		last = m[1]
-	}
-	if last == 0 || last < len(s) {
-		b.WriteString(ShellQuote(s[last:]))
-	}
-	return b.String()
+	return envRef.ReplaceAllStringFunc(ShellQuote(s), func(ref string) string {
+		return `'"${` + strings.Trim(ref[1:], "{}") + `:?}"'`
+	})
 }
 
 const jobsDir = ".minion/jobs"

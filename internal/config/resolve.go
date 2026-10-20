@@ -23,6 +23,7 @@ type Resolved struct {
 	Template     Template
 	RepoFile     string
 	Ambiguous    []string // other templates that also matched at Root
+	Config       *Config  // effective config: global plus the .minion.json hosts/templates
 }
 
 func gitRoot(dir string) string {
@@ -121,6 +122,7 @@ func (c *Config) build(root, gr, name string, ambiguous []string, rc *RepoConfig
 		Template:     tmpl,
 		RepoFile:     rcPath,
 		Ambiguous:    ambiguous,
+		Config:       c,
 	}
 }
 

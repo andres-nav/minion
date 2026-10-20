@@ -17,7 +17,8 @@ func errf(format string, a ...any) int {
 	return 1
 }
 
-// resolveContext loads the global config and resolves the repo for cwd.
+// resolveContext loads the global config and resolves the repo for cwd. The returned
+// config includes the repo's .minion.json hosts/templates, so lookups see them.
 func resolveContext() (*config.Config, *config.Resolved, error) {
 	cfg, err := config.Load()
 	if err != nil {
@@ -31,7 +32,7 @@ func resolveContext() (*config.Config, *config.Resolved, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return cfg, r, nil
+	return r.Config, r, nil
 }
 
 // resolveHost picks the ssh alias: an explicit override wins, else the resolved
