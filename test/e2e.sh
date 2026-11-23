@@ -56,7 +56,7 @@ cat > "$T/proj/.minion.json" << EOF
   "use": "energy",
   "templates": {"energy": {
     "tasks": {"energy": "energy-runner queue $R \$MINION_ARGS"},
-    "always": ["energy-runner restore $R"],
+    "always": ["energy-runner reap $R", "energy-runner restore $R"],
     "fetch": ["results"],
     "fetch_into": "$T/fetched/{ts}/{id}"
   }}
@@ -194,13 +194,14 @@ check_detach() {
   exists "$T/fetched/*/$id/results/energy/slow-*/events.jsonl" || fail "fetch: no events.jsonl"
   exists "$T/fetched/*/$id/_minion/log" || fail "fetch: no job log"
 
-  # A runner killed mid-run, without restoring: the always hook restores.
-  queue crash 1 "$PERF" '"slow": {"cmd": ["sleep", "10"]}'
+  # A runner killed mid-run: its workload dies, and the always hooks reap and restore.
+  queue crash 1 "$PERF" '"slow": {"cmd": ["sh", "-c", "sleep 1001 & sleep 1002"]}'
   crash=$(minion run energy --host fake --arg crash.json --detach) || fail "minion run --detach"
-  wait_for 20 grep -qx performance "$gov"
+  wait_for 20 pgrep -x -f "sleep 1001"
   pkill -9 -f "energy-runner queue .*crash.json" || fail "no runner to kill"
   wait_for 20 test -e "$T/state/jobs/$crash/status"
   [ "$(cat "$T/state/jobs/$crash/status")" = 137 ] || fail "crashed job: want status 137"
+  ! pgrep -a -f "^sleep 100[12]$" || fail "the workload outlived its runner"
   machine_clean
 
   queue next 1 "$PERF" "$OK"
