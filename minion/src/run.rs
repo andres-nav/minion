@@ -229,7 +229,8 @@ pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, Stri
     if measured.is_err() {
         let _ = fs::remove_file(out); // ours, and still empty
     }
-    let (run, status) = measured?;
+    let (mut run, status) = measured?;
+    run.as_object_mut().unwrap().remove("leftovers"); // the command shares our process group
     serde_json::to_writer_pretty(file, &run)
         .map_err(|e| format!("write {}: {e}", out.display()))?;
     Ok(status.code().unwrap_or(128 + status.signal().unwrap_or(0)) as u8)

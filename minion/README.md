@@ -51,7 +51,9 @@ zone: counters, joules and mean watts, corrected for one counter wrap), the sett
 before and after, and `drift` if they differ. It is created before the command starts and never
 overwritten. Zones whose `energy_uj` can't be read (root-only by default) are listed as
 `unreadable`. A zone's joules are left out, with a warning, when the run was long enough to wrap
-its counter twice at the zone's highest power limit, or when the zone has no power limit.
+its counter twice at the zone's highest power limit, or when the zone has no power limit. The
+command stays in the runner's process group, so Ctrl-C reaches it, and what it leaves running is
+left alone (a queue kills it).
 
 ## Queue
 
