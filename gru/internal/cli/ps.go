@@ -4,7 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -16,7 +15,7 @@ type job struct {
 	start                  time.Time
 }
 
-// jobs lists t's jobs of this host, newest first; with all, of every project.
+// jobs lists t's jobs of this host, newest launch first; with all, of every project.
 func jobs(t *target, all bool) ([]job, error) {
 	out, err := t.Output(remote.PsCommand(t.state))
 	if err != nil {
@@ -31,7 +30,6 @@ func jobs(t *target, all bool) ([]job, error) {
 		start, _ := idTime(f[0])
 		js = append(js, job{id: f[0], status: f[1], repo: f[2], task: f[3], start: start})
 	}
-	sort.SliceStable(js, func(i, j int) bool { return js[i].start.After(js[j].start) })
 	return js, nil
 }
 

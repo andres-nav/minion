@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andres-nav/minion/gru/internal/config"
 	"github.com/andres-nav/minion/gru/internal/ssh"
@@ -82,17 +83,23 @@ func flagSet() *flag.FlagSet {
 	return fs
 }
 
-// The latest job is this project's newest by start time, whatever the dirs' mtimes.
+// The latest job is this project's last launched on the host, even within one
+// second (ids have seconds), whatever the job dirs' mtimes.
 func TestJobsNewestFirst(t *testing.T) {
 	state := t.TempDir()
 	host, _ := os.Hostname()
-	for id, repo := range map[string]string{"a-20261123T100000Z": "proj", "b-20261123T110000Z": "other", "c-20261123T090000Z": "proj"} {
+	now := time.Now()
+	for i, id := range []string{"a-20261123T100000Z", "b-20261123T100000Z", "c-20261123T100000Z"} {
 		d := filepath.Join(state, "jobs", id)
+		repo := map[bool]string{true: "other", false: "proj"}[id[0] == 'b']
 		os.MkdirAll(d, 0o700)
 		os.WriteFile(filepath.Join(d, "hostname"), []byte(host+"\n"), 0o600)
 		os.WriteFile(filepath.Join(d, "repo"), []byte(repo), 0o600)
 		os.WriteFile(filepath.Join(d, "task"), []byte("t"), 0o600)
 		os.WriteFile(filepath.Join(d, "status"), []byte("0\n"), 0o600)
+		launched := now.Add(time.Duration(i) * 10 * time.Millisecond)
+		os.Chtimes(filepath.Join(d, "hostname"), launched, launched)
+		os.Chtimes(d, now.Add(-time.Duration(i)*time.Second), now)
 	}
 	tg := &target{Client: ssh.Local(), state: state, r: &config.Resolved{Root: "/x/proj"}}
 	ids := func(all bool) (out []string) {
@@ -105,13 +112,13 @@ func TestJobsNewestFirst(t *testing.T) {
 		}
 		return out
 	}
-	if got := strings.Join(ids(false), ","); got != "a-20261123T100000Z exit 0,c-20261123T090000Z exit 0" {
+	if got := strings.Join(ids(false), ","); got != "c-20261123T100000Z exit 0,a-20261123T100000Z exit 0" {
 		t.Errorf("jobs = %s", got)
 	}
 	if got := len(ids(true)); got != 3 {
 		t.Errorf("all jobs = %d", got)
 	}
-	if id, err := jobID(tg, ""); id != "a-20261123T100000Z" || err != nil {
+	if id, err := jobID(tg, ""); id != "c-20261123T100000Z" || err != nil {
 		t.Errorf("latest = %q %v", id, err)
 	}
 	if _, err := jobID(tg, "../x"); err == nil {

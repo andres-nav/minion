@@ -169,13 +169,13 @@ func KillCommand(jobDir string) string {
 		jobDir, onThisHost(jobDir))
 }
 
-// PsCommand lists this host's jobs as tab-separated id, status, repo and task.
-// A job without a status whose wrapper is gone is "lost".
+// PsCommand lists this host's jobs, newest launch first, as tab-separated id,
+// status, repo and task. A job without a status whose wrapper is gone is "lost".
 func PsCommand(stateDir string) string {
 	return fmt.Sprintf(
-		"for d in %s/*/; do [ -d \"$d\" ] && %s || continue; "+
+		"cd %s 2>/dev/null && for h in $(ls -1t */hostname 2>/dev/null); do d=${h%%/hostname}; %s || continue; "+
 			"if [ -e \"$d/status\" ]; then st=\"exit $(cat \"$d/status\")\"; "+
 			"elif kill -0 \"$(cat \"$d/pid\" 2>/dev/null)\" 2>/dev/null; then st=running; else st=lost; fi; "+
-			"printf '%%s\\t%%s\\t%%s\\t%%s\\n' \"$(basename \"$d\")\" \"$st\" \"$(cat \"$d/repo\" 2>/dev/null)\" \"$(cat \"$d/task\" 2>/dev/null)\"; done",
+			"printf '%%s\\t%%s\\t%%s\\t%%s\\n' \"$d\" \"$st\" \"$(cat \"$d/repo\" 2>/dev/null)\" \"$(cat \"$d/task\" 2>/dev/null)\"; done; true",
 		JobsDir(stateDir), onThisHost(`"$d"`))
 }
