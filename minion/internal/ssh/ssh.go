@@ -217,8 +217,15 @@ func (c *Client) Output(command string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-// agentDir is where the agent lives under a host's state dir, as one shell word.
+// agentDir is where the agents live under a host's state dir, as one shell word.
 func agentDir(stateDir string) string { return remote.RemotePath(stateDir) + "/bin" }
+
+// agentPath is the agent of one version and platform, as one shell word. Each
+// build has its own file, so bootstrapping one host never replaces the agent
+// another host sharing the state dir runs.
+func agentPath(stateDir, version, platform string) string {
+	return agentDir(stateDir) + "/" + remote.ShellQuote("minion-"+version+"-"+strings.ReplaceAll(platform, "/", "-"))
+}
 
 // RemotePlatform returns the remote's GOOS/GOARCH (via `uname -sm`).
 func (c *Client) RemotePlatform() (string, error) {
@@ -235,7 +242,11 @@ func (c *Client) RemotePlatform() (string, error) {
 // hosts (e.g. a darwin laptop bootstrapping a linux box) work. A "dev" version
 // is always re-uploaded.
 func (c *Client) EnsureAgent(stateDir, version string, binaryFor func(platform string) (string, error)) (string, error) {
-	invoke := agentDir(stateDir) + "/minion"
+	platform, err := c.RemotePlatform()
+	if err != nil {
+		return "", err
+	}
+	invoke := agentPath(stateDir, version, platform)
 
 	// "dev" and "-dirty" builds vary without the version string changing, so
 	// always re-upload them; only tagged/clean versions use the fast path.
@@ -245,15 +256,11 @@ func (c *Client) EnsureAgent(stateDir, version string, binaryFor func(platform s
 		}
 	}
 
-	platform, err := c.RemotePlatform()
-	if err != nil {
-		return "", err
-	}
 	bin, err := binaryFor(platform)
 	if err != nil {
 		return "", err
 	}
-	if err := c.upload(stateDir, bin); err != nil {
+	if err := c.upload(stateDir, bin, invoke); err != nil {
 		return "", err
 	}
 
@@ -267,15 +274,17 @@ func (c *Client) EnsureAgent(stateDir, version string, binaryFor func(platform s
 	return invoke, nil
 }
 
-func (c *Client) upload(stateDir, localBinary string) error {
+// upload writes localBinary to a temp file and renames it to path, so a
+// running agent keeps its old file and nobody runs a half-written one.
+func (c *Client) upload(stateDir, localBinary, path string) error {
 	f, err := os.Open(localBinary)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	dir := agentDir(stateDir)
-	remoteCmd := fmt.Sprintf("(umask 077 && mkdir -p %[1]s) && cat > %[1]s/minion && chmod 755 %[1]s/minion", dir)
+	remoteCmd := fmt.Sprintf("(umask 077 && mkdir -p %[1]s) && t=%[1]s/.upload.$$ && "+
+		"cat > \"$t\" && chmod 755 \"$t\" && mv -f \"$t\" %[2]s || { rm -f \"$t\"; exit 1; }", agentDir(stateDir), path)
 	cmd := c.ssh(remoteCmd)
 	cmd.Stdin = f
 	var errb bytes.Buffer
