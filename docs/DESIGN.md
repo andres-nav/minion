@@ -74,10 +74,10 @@ gives Go and Rust.
 
 - **gru**: v1 works, with the changes minion needed merged (#3, #6, #7, #8, #10): a state dir
   per host, unique UTC job ids, an agent file per build, quiet attach, provenance, notify for tasks.
-- **minion**: the state engine (governor, turbo, idle states), `run` with the `time` and `rapl`
-  meters, and `queue` with the queue lock, reap and notifications are merged. `make e2e` runs them
-  through gru on a fake sysfs in CI; real RAPL and cpufreq writes, sudo, real ssh and several
-  hosts still need a real machine.
+- **minion**: the state engine, `run` and `queue` with the queue lock, reap and notifications are
+  merged ([what is built](MINION.md#what-is-built)). `make e2e` runs them through gru on a fake
+  sysfs in CI; real RAPL and cpufreq writes, sudo, real ssh and several hosts still need a real
+  machine.
 - **Next** ([plan](MINION.md#plan)): measurement quality (meters, noise record, isolation, more
   settings); the opt-in machine lock; several machines; GPU and device state; a boot unit; the
   RQ3 analysis. Open questions: [MINION.md](MINION.md#open-questions).
