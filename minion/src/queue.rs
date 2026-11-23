@@ -19,17 +19,8 @@ use crate::settings::{self, State};
 use crate::utc::{self, log, now_ns};
 use crate::{NAME, Opts};
 
-const KEYS: [&str; 9] = [
-    "name",
-    "profiles",
-    "workloads",
-    "reps",
-    "seed",
-    "settle_s",
-    "meters",
-    "out",
-    "notify",
-];
+#[rustfmt::skip]
+const KEYS: [&str; 9] = ["name", "profiles", "workloads", "reps", "seed", "settle_s", "meters", "out", "notify"];
 const SETTLE: Duration = Duration::from_secs(1);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 
