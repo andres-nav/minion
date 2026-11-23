@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# End-to-end test of minion and energy-runner on this machine, with no ssh and no
+# End-to-end test of gru and minion on this machine, with no ssh and no
 # root: test/ssh runs the "remote" commands here, and the runner works on a fake
 # sysfs and powercap tree. Everything lives in one temp dir, removed at the end.
 # Run it with `make e2e`; E2E_KEEP=1 keeps the temp dir.
 set -u
 root=$(cd "$(dirname "$0")/.." && pwd)
-for b in minion/bin/minion runner/target/release/energy-runner; do
+for b in gru/bin/gru minion/target/release/minion; do
   [ -x "$root/$b" ] || { echo "e2e: no $b, run make build" >&2; exit 2; }
 done
 
 T=$(mktemp -d)
-export TZ=Europe/Zurich HOME=$T/home MINION_CONFIG=$T/config.json PATH=$T/bin:$PATH
+export TZ=Europe/Zurich HOME=$T/home GRU_CONFIG=$T/config.json PATH=$T/bin:$PATH
 mkdir -p "$T/bin" "$HOME" "$T/proj/work"
-ln -s "$root/minion/bin/minion" "$root/runner/target/release/energy-runner" "$root/test/ssh" "$T/bin/"
+ln -s "$root/gru/bin/gru" "$root/minion/target/release/minion" "$root/test/ssh" "$T/bin/"
 printf '#!/bin/sh\necho "sudo $*" >> %s/sudo.log\nexit 1\n' "$T" > "$T/bin/sudo"
 chmod +x "$T/bin/sudo"
 
@@ -42,21 +42,21 @@ cp -r "$sys/devices" "$T/sys.orig"
 
 # The project: a queue task on the fake machine, cleaned up by the always hooks.
 R="--sysfs $sys --state-dir $T/runner --lock $T/lock"
-cat > "$MINION_CONFIG" << EOF
+cat > "$GRU_CONFIG" << EOF
 {
   "hosts": {
     "fake": {"remote_dir": "$T/remote/{repo}", "state_dir": "$T/state"},
     "localhost": {"state_dir": "$T/state-local"}
   },
-  "notify": {"run": ["echo \"\$MINION_SUBJECT\" >> $T/notify.log"]}
+  "notify": {"run": ["echo \"\$GRU_SUBJECT\" >> $T/notify.log"]}
 }
 EOF
-cat > "$T/proj/.minion.json" << EOF
+cat > "$T/proj/.gru.json" << EOF
 {
   "use": "energy",
   "templates": {"energy": {
-    "tasks": {"energy": "energy-runner queue $R \$MINION_ARGS"},
-    "always": ["energy-runner reap $R", "energy-runner restore $R"],
+    "tasks": {"energy": "minion queue $R \$GRU_ARGS"},
+    "always": ["minion reap $R", "minion restore $R"],
     "fetch": ["results"],
     "fetch_into": "$T/fetched/{ts}/{id}"
   }}
@@ -77,12 +77,12 @@ PERF='"perf": {"cpu.governor": {"policy0": "performance", "policy1": "performanc
 OK='"ok": {"cmd": ["sh", "work/ok.sh"]}'
 FAIL='"fail": {"cmd": ["sh", "-c", "echo boom >&2; exit 3"]}'
 
-# queue NAME REPS PROFILES WORKLOADS writes proj/NAME.json, which notifies through minion.
+# queue NAME REPS PROFILES WORKLOADS writes proj/NAME.json, which notifies through gru.
 queue() {
   cat > "$T/proj/$1.json" << EOF
 {"name": "$1", "reps": $2, "seed": 7, "settle_s": 0, "out": "results/energy",
  "profiles": {$3}, "workloads": {$4},
- "notify": {"cmd": ["sh", "-c", "\"\$MINION_AGENT\" _agent notify --config \"\$MINION_NOTIFY\" --subject \"\$RUNNER_EVENT \$RUNNER_QUEUE\" --body \"\$RUNNER_DETAIL\""]}}
+ "notify": {"cmd": ["sh", "-c", "\"\$GRU_AGENT\" _agent notify --config \"\$GRU_NOTIFY\" --subject \"\$MINION_EVENT \$MINION_QUEUE\" --body \"\$MINION_DETAIL\""]}}
 EOF
 }
 
@@ -105,7 +105,7 @@ exists() { ls $1 > /dev/null 2>&1; }
 gone() { ! kill -0 "$(cat "$T/state/jobs/$1/pid")"; }
 # next_second: sleeps to the start of the next second.
 next_second() { sleep "0.$(printf %03d $((999 - 10#$(date +%N) / 1000000)))"; }
-# started OUT: the job id that `minion run` printed.
+# started OUT: the job id that `gru run` printed.
 started() { sed -n 's/^started \(.*\) on .*/\1/p' "$1"; }
 
 # queue_ok DIR RUNS FAILED: a finished queue's records, with RUNS runs, FAILED failed.
@@ -144,29 +144,29 @@ machine_clean() {
 
 check_remote() {
   queue remote 2 "$BASE, $PERF" "$OK, $FAIL"
-  minion run energy --host fake --arg remote.json > "$T/remote.out" 2>&1
+  gru run energy --host fake --arg remote.json > "$T/remote.out" 2>&1
   local code=$? id v dest
   cat "$T/remote.out"
-  [ "$code" -eq 1 ] || fail "minion run: exit $code, want 1 (a workload fails)"
+  [ "$code" -eq 1 ] || fail "gru run: exit $code, want 1 (a workload fails)"
   id=$(started "$T/remote.out")
-  v=$(minion version | cut -d' ' -f2)
-  "$T"/state/bin/minion-"$v"-linux-* _agent version | grep -qx "minion $v" ||
-    fail "no agent minion-$v-linux-* in $T/state/bin"
+  v=$(gru version | cut -d' ' -f2)
+  "$T"/state/bin/gru-"$v"-linux-* _agent version | grep -qx "gru $v" ||
+    fail "no agent gru-$v-linux-* in $T/state/bin"
   dest=$(echo "$T"/fetched/*/"$id")
   queue_ok "$dest"/results/energy/remote-* 8 4
-  has "$dest"/results/energy/remote-*/queue.json "\"MINION_JOB_ID\":\"$id\""
-  has "$dest/_minion/run.json" '"exit":1'
-  [ -s "$dest/_minion/log" ] || fail "no job log fetched"
+  has "$dest"/results/energy/remote-*/queue.json "\"GRU_JOB_ID\":\"$id\""
+  has "$dest/_gru/run.json" '"exit":1'
+  [ -s "$dest/_gru/log" ] || fail "no job log fetched"
   notified remote queue_started run_done run_failed queue_done
   machine_clean
 }
 
 check_localhost() {
   queue local 1 "$BASE, $PERF" "$OK, $FAIL"
-  minion run energy --host localhost --arg local.json > "$T/local.out" 2>&1
+  gru run energy --host localhost --arg local.json > "$T/local.out" 2>&1
   local code=$?
   cat "$T/local.out"
-  [ "$code" -eq 1 ] || fail "minion run: exit $code, want 1 (a workload fails)"
+  [ "$code" -eq 1 ] || fail "gru run: exit $code, want 1 (a workload fails)"
   queue_ok results/energy/local-* 4 2
   has "$T/state-local/jobs/$(started "$T/local.out")/run.json" '"exit":1'
   notified local queue_started run_done run_failed queue_done
@@ -176,36 +176,36 @@ check_localhost() {
 check_detach() {
   queue slow 1 "$PERF" '"slow": {"cmd": ["sleep", "60"]}'
   local id code crash
-  id=$(minion run energy --host fake --arg slow.json --detach) || fail "minion run --detach"
+  id=$(gru run energy --host fake --arg slow.json --detach) || fail "gru run --detach"
   wait_for 20 grep -qx performance "$gov"
-  minion ps --host fake | tee "$T/ps.out" | grep "^$id " | grep -q running ||
-    fail "minion ps doesn't show $id running"
-  minion attach "$id" --host fake > "$T/attach.out" 2>&1 &
+  gru ps --host fake | tee "$T/ps.out" | grep "^$id " | grep -q running ||
+    fail "gru ps doesn't show $id running"
+  gru attach "$id" --host fake > "$T/attach.out" 2>&1 &
   wait_for 10 grep -q queue_started "$T/attach.out"
-  minion kill "$id" --host fake || fail "minion kill"
+  gru kill "$id" --host fake || fail "gru kill"
   wait $!
   code=$?
   cat "$T/attach.out"
-  [ "$code" -eq 143 ] || fail "minion attach: exit $code, want 143"
+  [ "$code" -eq 143 ] || fail "gru attach: exit $code, want 143"
   grep -q '"status":"stopped"' "$T/attach.out" || fail "the queue didn't stop"
   machine_clean
 
-  minion fetch "$id" --host fake || fail "minion fetch $id"
+  gru fetch "$id" --host fake || fail "gru fetch $id"
   exists "$T/fetched/*/$id/results/energy/slow-*/events.jsonl" || fail "fetch: no events.jsonl"
-  exists "$T/fetched/*/$id/_minion/log" || fail "fetch: no job log"
+  exists "$T/fetched/*/$id/_gru/log" || fail "fetch: no job log"
 
   # A runner killed mid-run: its workload dies, and the always hooks reap and restore.
   queue crash 1 "$PERF" '"slow": {"cmd": ["sh", "-c", "sleep 1001 & sleep 1002"]}'
-  crash=$(minion run energy --host fake --arg crash.json --detach) || fail "minion run --detach"
+  crash=$(gru run energy --host fake --arg crash.json --detach) || fail "gru run --detach"
   wait_for 20 pgrep -x -f "sleep 1001"
-  pkill -9 -f "energy-runner queue .*crash.json" || fail "no runner to kill"
+  pkill -9 -f "minion queue .*crash.json" || fail "no runner to kill"
   wait_for 20 test -e "$T/state/jobs/$crash/status"
   [ "$(cat "$T/state/jobs/$crash/status")" = 137 ] || fail "crashed job: want status 137"
   ! pgrep -a -f "^sleep 100[12]$" || fail "the workload outlived its runner"
   machine_clean
 
   queue next 1 "$PERF" "$OK"
-  minion run energy --host fake --arg next.json || fail "the next queue failed"
+  gru run energy --host fake --arg next.json || fail "the next queue failed"
   machine_clean
 }
 
@@ -214,20 +214,20 @@ check_two() {
   queue second 1 "$PERF" '"hold": {"cmd": ["sleep", "4"]}'
   queue third 1 "$PERF" "$OK"
   local a b c q
-  a=$(minion run energy --host fake --arg first.json --detach) || fail "minion run first"
+  a=$(gru run energy --host fake --arg first.json --detach) || fail "gru run first"
   wait_for 20 grep -q first- "$T/lock"
-  b=$(minion run energy --host fake --arg second.json --detach) || fail "minion run second"
+  b=$(gru run energy --host fake --arg second.json --detach) || fail "gru run second"
   # A waiting queue killed: its always hook runs while the first queue holds the lock.
-  c=$(minion run energy --host fake --arg third.json --detach) || fail "minion run third"
+  c=$(gru run energy --host fake --arg third.json --detach) || fail "gru run third"
   wait_for 20 grep -q "waiting for queue" "$T/state/jobs/$c/log"
-  minion kill "$c" --host fake || fail "minion kill third"
+  gru kill "$c" --host fake || fail "gru kill third"
   wait_for 20 gone "$c"
   grep -qx performance "$gov" || fail "the killed third queue's hook undid the first's profile"
   ! exists "$T/remote/proj/results/energy/third-*" || fail "the killed third queue left results"
   wait_for 30 test -e "$T/state/jobs/$a/status"
   wait_for 20 exists "$T/remote/proj/results/energy/second-*/runs/0001-*/stdout"
   # The first job's always hook, run late, must not undo the second queue's profile.
-  energy-runner restore $R || fail "late restore"
+  minion restore $R || fail "late restore"
   grep -qx performance "$gov" || fail "a late restore undid the second queue's profile"
   wait_for 30 test -e "$T/state/jobs/$b/status"
   cat "$T/state/jobs/$a/log" "$T/state/jobs/$b/log"
@@ -242,8 +242,8 @@ check_two() {
   # The same queue twice in one second: both run, each into its own dir.
   queue twice 1 "$PERF" "$OK"
   next_second
-  a=$(minion run energy --host fake --arg twice.json --detach) || fail "minion run twice"
-  b=$(minion run energy --host fake --arg twice.json --detach) || fail "minion run twice"
+  a=$(gru run energy --host fake --arg twice.json --detach) || fail "gru run twice"
+  b=$(gru run energy --host fake --arg twice.json --detach) || fail "gru run twice"
   wait_for 30 test -e "$T/state/jobs/$a/status"
   wait_for 30 test -e "$T/state/jobs/$b/status"
   cat "$T/state/jobs/$a/log" "$T/state/jobs/$b/log"
@@ -257,8 +257,8 @@ check_two() {
 # within 15 min of now.
 check_utc() {
   local t s now bad=0
-  minion ps --host fake --all > "$T/ps-fake.out"
-  minion ps --host localhost --all > "$T/ps-local.out"
+  gru ps --host fake --all > "$T/ps-fake.out"
+  gru ps --host localhost --all > "$T/ps-local.out"
   cat "$T"/ps-*.out
   now=$(date +%s)
   for t in $({
@@ -280,9 +280,9 @@ check_utc() {
 
 check_exit() {
   queue allok 1 "$BASE, $PERF" "$OK"
-  minion run energy --host fake --arg allok.json || fail "a queue that succeeds: exit $?"
+  gru run energy --host fake --arg allok.json || fail "a queue that succeeds: exit $?"
   queue failing 1 "$BASE, $PERF" "$OK, $FAIL"
-  minion run energy --host fake --arg failing.json > "$T/failing.out" 2>&1
+  gru run energy --host fake --arg failing.json > "$T/failing.out" 2>&1
   local code=$?
   cat "$T/failing.out"
   [ "$code" -eq 1 ] || fail "a queue with a failing run: exit $code, want 1"
@@ -293,7 +293,7 @@ check_exit() {
   sed 's/"performance"/"warp"/' allok.json > badvalue.json
   for f in "broken.json:EOF" 'unknown.json:unknown key "bogus"' 'badvalue.json:"warp" is not allowed' \
     "missing.json:No such file"; do
-    minion run energy --host fake --arg "${f%%:*}" > "$T/broken.out" 2>&1
+    gru run energy --host fake --arg "${f%%:*}" > "$T/broken.out" 2>&1
     code=$?
     cat "$T/broken.out"
     [ "$code" -eq 1 ] || fail "${f%%:*}: exit $code, want 1"
@@ -303,11 +303,11 @@ check_exit() {
 }
 
 check_snapshot() {
-  energy-runner snapshot > "$T/snapshot.json" || fail "energy-runner snapshot on /sys"
+  minion snapshot > "$T/snapshot.json" || fail "minion snapshot on /sys"
   cat "$T/snapshot.json"
   for k in cpu.governor cpu.turbo cpu.idle.disable; do has "$T/snapshot.json" "\"$k\":{"; done
   [ ! -d /sys/devices/system/cpu/cpu0/cpuidle/state0 ] || has "$T/snapshot.json" '"cpu0/state0":'
-  energy-runner run --out "$T/run.json" -- true || fail "energy-runner run on /sys"
+  minion run --out "$T/run.json" -- true || fail "minion run on /sys"
   has "$T/run.json" '"time":{'
 }
 
@@ -316,7 +316,7 @@ n=0
 for c in "remote:remote path through test/ssh" "localhost:--host localhost" \
   "detach:detach, ps, attach, kill, crash" "two:queues sharing the queue lock" \
   "utc:every time in UTC (TZ=$TZ)" "exit:exit codes and broken queue files" \
-  "snapshot:energy-runner snapshot and run on the real /sys"; do
+  "snapshot:minion snapshot and run on the real /sys"; do
   n=$((n + 1))
   start=$(date +%s)
   if (cd "$T/proj" && "check_${c%%:*}") > "$T/check.log" 2>&1; then

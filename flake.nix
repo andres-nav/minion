@@ -1,5 +1,5 @@
 {
-  description = "Development environment for minion — a thin remote dev-loop orchestrator";
+  description = "Development environment for gru (the laptop CLI) and minion (the host runner)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -22,7 +22,7 @@
               gopls          # language server
               gotools        # goimports, etc.
               go-tools       # staticcheck
-              cargo          # runner/
+              cargo          # minion/
               rustc
               clippy
               gnumake
@@ -30,10 +30,10 @@
             ];
 
             shellHook = ''
-              echo "minion development environment"
+              echo "gru and minion development environment"
               echo "Go version: $(go version)"
               echo ""
-              echo "Run 'make build' to compile the minion binary"
+              echo "Run 'make build' to compile gru and minion"
             '';
           };
         });
