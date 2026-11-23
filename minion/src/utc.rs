@@ -31,7 +31,6 @@ pub fn stamp(ns: u128, with_ns: bool) -> String {
     format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}{frac}Z")
 }
 
-/// Prints a log line, prefixed with the time.
 pub fn log(msg: impl Display) {
     eprintln!("{} {}: {msg}", iso(now_s()), crate::NAME);
 }

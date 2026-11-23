@@ -72,9 +72,10 @@ pub fn reap(path: &Path) -> Result<usize, String> {
         let Ok(pid) = name.parse::<i32>() else {
             continue;
         };
+        // Unreadable: not ours.
         let Ok(env) = fs::read(e.path().join("environ")) else {
             continue;
-        }; // not ours
+        };
         let mut vars = env.split(|&b| b == 0);
         let Some(queue) = vars.find_map(|v| v.strip_prefix(prefix.as_bytes())) else {
             continue;

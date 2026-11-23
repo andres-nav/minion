@@ -81,13 +81,12 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
         meters,
         events,
         id,
-        started,
         ran: 0,
         failed: 0,
     };
 
     let result = r
-        .start(&given, plan.len(), waited)
+        .start(&given, plan.len(), waited, &started)
         .and_then(|targets| r.runs(&plan, &targets));
     let restored = r.restore("end of queue");
     let sig = STOP.load(SeqCst);
@@ -115,7 +114,6 @@ struct Running<'a> {
     meters: Vec<Box<dyn Meter>>,
     events: File,
     id: String,
-    started: Vec<u64>,
     ran: usize,
     failed: usize,
 }
@@ -129,6 +127,7 @@ impl Running<'_> {
         given: &Value,
         runs: usize,
         waited: Option<String>,
+        started: &[u64],
     ) -> Result<BTreeMap<String, State>, String> {
         let reaped = lock::reap(&self.o.lock)?;
         if reaped > 0 {
@@ -152,7 +151,7 @@ impl Running<'_> {
                 "notify_timeout_s": self.q.notify_timeout.as_secs_f64(),
             },
             "start": start,
-            "time": run::edges(&[("start", &self.started)]),
+            "time": run::edges(&[("start", started)]),
             "runner": {
                 "version": env!("CARGO_PKG_VERSION"), "lock": self.o.lock,
                 "privileged": if self.o.test { "in-process" } else { "sudo" },
@@ -196,7 +195,9 @@ impl Running<'_> {
         let dir = self.dir.join("runs").join(&r.id);
         let err = |e: std::io::Error| format!("{}: {e}", dir.display());
         fs::create_dir_all(&dir).map_err(err)?;
-        let out = |name: &str| File::create_new(dir.join(name)).map_err(err);
+        let out = |name: &str| {
+            File::create_new(dir.join(name)).map_err(|e| format!("{}/{name}: {e}", dir.display()))
+        };
         let (prog, args) = self.q.workloads[&r.workload].split_first().unwrap();
         let mut cmd = workload(prog, args, &lock::mark(&self.o.lock, &self.id));
         cmd.stdout(out("stdout")?).stderr(out("stderr")?);
@@ -557,7 +558,6 @@ fn resolve(profiles: &BTreeMap<String, State>, start: &State) -> BTreeMap<String
         .collect()
 }
 
-/// Whether every object of target has its value in state.
 fn matches(state: &Value, target: &State) -> bool {
     target
         .iter()

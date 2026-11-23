@@ -84,10 +84,6 @@ impl Journal {
         sync_dir(&done)?;
         sync_dir(&self.dir)
     }
-
-    pub fn exists(&self) -> bool {
-        self.file.is_some()
-    }
 }
 
 /// Reads the journal without the lock, for status. Missing means none is open.
