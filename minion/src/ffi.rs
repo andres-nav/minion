@@ -15,6 +15,10 @@ pub const PR_SET_PDEATHSIG: i32 = 1;
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;
 pub const O_NONBLOCK: i32 = 0o4000;
+#[cfg(target_arch = "x86_64")]
+pub const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(target_arch = "aarch64")]
+pub const O_NOFOLLOW: i32 = 0o100000;
 
 #[repr(C)]
 pub struct Timespec {

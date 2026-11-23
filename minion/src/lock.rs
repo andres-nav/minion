@@ -9,7 +9,7 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::Instant;
 
-use crate::ffi::{O_NONBLOCK, SIGKILL, kill};
+use crate::ffi::{O_NOFOLLOW, O_NONBLOCK, SIGKILL, kill};
 use crate::utc::log;
 
 /// Set in each workload's environment, which its children inherit.
@@ -61,6 +61,7 @@ pub fn held_by(path: &Path) -> Result<Option<String>, String> {
 /// that died. Returns how many it killed.
 pub fn reap(path: &Path) -> Result<usize, String> {
     let keep = held_by(path)?;
+    let prefix = format!("{MARK}={}", mark(path, ""));
     let me = std::process::id().to_string();
     let mut killed = 0;
     for e in fs::read_dir("/proc")
@@ -74,14 +75,11 @@ pub fn reap(path: &Path) -> Result<usize, String> {
         let Ok(env) = fs::read(e.path().join("environ")) else {
             continue;
         }; // not ours
-        let mark = env.split(|&b| b == 0).find_map(|v| {
-            let v = String::from_utf8_lossy(v).into_owned();
-            v.strip_prefix(&format!("{MARK}=")).map(str::to_string)
-        });
-        let Some((lock, queue)) = mark.as_deref().and_then(|m| m.split_once(' ')) else {
+        let mut vars = env.split(|&b| b == 0);
+        let Some(queue) = vars.find_map(|v| v.strip_prefix(prefix.as_bytes())) else {
             continue;
         };
-        let leftover = lock == path.to_string_lossy() && keep.as_deref() != Some(queue);
+        let leftover = keep.as_deref().map(str::as_bytes) != Some(queue);
         if leftover && name != me && kill(pid, SIGKILL) == 0 {
             killed += 1;
         }
@@ -103,14 +101,14 @@ fn holder(f: &File) -> String {
 
 /// Opens the lock file, creating it writable by all. An existing file is opened
 /// without O_CREAT, which protected_regular refuses for another user's file in
-/// a sticky directory such as /run/lock; and with O_NONBLOCK, so a FIFO put
-/// there is refused instead of blocking.
+/// a sticky directory such as /run/lock; with O_NONBLOCK, so a FIFO put there
+/// is refused instead of blocking; and with O_NOFOLLOW, so a symlink is refused.
 fn open(path: &Path, write: bool) -> io::Result<File> {
     loop {
         let open = OpenOptions::new()
             .read(true)
             .write(write)
-            .custom_flags(O_NONBLOCK)
+            .custom_flags(O_NONBLOCK | O_NOFOLLOW)
             .open(path);
         match open {
             Ok(f) if f.metadata()?.is_file() => return Ok(f),

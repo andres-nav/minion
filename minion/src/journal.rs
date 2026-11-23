@@ -1,5 +1,6 @@
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -23,6 +24,7 @@ impl Journal {
             .write(true)
             .create(true)
             .truncate(false)
+            .mode(0o600)
             .open(dir.join("lock"))
             .map_err(|e| err("open lock", dir, e))?;
         lock.lock().map_err(|e| err("lock", dir, e))?;
@@ -52,7 +54,11 @@ impl Journal {
     pub fn append(&mut self, mut line: Value) -> Result<(), String> {
         let path = self.dir.join("journal.jsonl");
         if self.file.is_none() {
-            let f = OpenOptions::new().append(true).create_new(true).open(&path);
+            let f = OpenOptions::new()
+                .append(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path);
             self.file = Some(f.map_err(|e| err("create", &path, e))?);
             sync_dir(&self.dir)?;
         }
@@ -105,9 +111,10 @@ fn parse(s: &str) -> Result<Vec<Value>, String> {
         .collect()
 }
 
-/// Creates dir if missing, fsyncing its parent so the entry survives a crash.
+/// Creates dir if missing, private to its owner, fsyncing its parent so the
+/// entry survives a crash.
 fn create_dir(dir: &Path) -> Result<(), String> {
-    match fs::create_dir(dir) {
+    match DirBuilder::new().mode(0o700).create(dir) {
         Ok(()) => sync_dir(&dir.join("..")),
         Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(err("create", dir, e)),
