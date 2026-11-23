@@ -286,7 +286,8 @@ check_cli() {
   "hosts": {
     "fake2": {"ssh": "fake2-alias", "state_dir": "$T/state"},
     "homevar": {"remote_dir": "\$HOME/hv/{repo}"},
-    "unsetvar": {"remote_dir": "/tmp/\$E2E_UNSET/{repo}"}
+    "unsetvar": {"remote_dir": "/tmp/\$E2E_UNSET/{repo}"},
+    "down": {"ssh": "down.invalid"}
   },
   "templates": {"cli": {
     "host": "fake2",
@@ -296,7 +297,7 @@ check_cli() {
     "push": ["~/creds"],
     "before": ["echo before \$GREETING"],
     "on_success": ["echo success"],
-    "on_failure": ["echo failure \$GRU_EXIT"],
+    "on_failure": ["echo failure \$GRU_EXIT \$GRU_DURATION"],
     "always": ["echo always \$GRU_STATUS"],
     "fetch": ["out"],
     "fetch_into": "$T/cfetched/{id}",
@@ -304,7 +305,7 @@ check_cli() {
       "env": {"TOKEN": "\${E2E_TOKEN}"}},
     "tasks": {
       "hello": "mkdir -p out && echo \"\$GREETING \$GRU_ARGS\" | tee out/hello.txt",
-      "fail": "exit 4",
+      "fail": "sleep 1; exit 4",
       "show": "cat src/a.txt"
     }
   }}
@@ -337,17 +338,27 @@ EOF
   [ -s "$T/into/out/hello.txt" ] && [ -s "$T/into/_gru/run.json" ] || fail "fetch --into: files missing"
 
   want 4 fail gru run fail
-  grep -qx "failure 4" "$T/fail.out" && grep -qx "always fail" "$T/fail.out" || fail "run fail: hooks"
+  grep -Eqx "failure 4 [12]" "$T/fail.out" && grep -qx "always fail" "$T/fail.out" ||
+    fail "run fail: hooks, or GRU_DURATION not the job's seconds"
   grep -q "FAILED (exit 4.* tok123$" "$T/cli-notify.log" || fail "notify: no failure message with the token"
   want 1 nope gru run nope
   grep -q nope "$T/nope.out" || fail "unknown task: no message"
   want 2 none gru run
+  mkdir -p "$T/notasks" && git -C "$T/notasks" init -q
+  (cd "$T/notasks" && gru list) | grep -q "^no tasks for $T/notasks" || fail "list: no tasks message"
+  (cd "$T/notasks" && gru run x 2>&1) | grep -q "no tasks for $T/notasks" || fail "run: no tasks message"
 
   # --no-sync runs the code already there; sync sends it; --delete removes stale files.
   # (Sync compares size and mtime in seconds: a same-size edit in the same second is missed.)
   echo second > src/a.txt
   want 0 show gru run show --no-sync
   grep -qx one "$T/show.out" || fail "--no-sync synced"
+  # local is localhost: the job runs here, in the project dir, with nothing to sync or fetch.
+  want 0 here gru run show --host local --no-sync
+  grep -qx second "$T/here.out" || fail "--host local: not run in the project dir"
+  gru sync --host local | grep -q "nothing to sync" || fail "sync --host local"
+  want 1 fetchlocal gru fetch --host localhost
+  grep -q "fetch is for remote hosts" "$T/fetchlocal.out" || fail "fetch --host localhost: no clear message"
   gru sync || fail "gru sync"
   grep -qx second "$rd/src/a.txt" || fail "sync: a.txt not updated"
   echo stale > "$rd/stale.txt"
@@ -374,10 +385,14 @@ EOF
   ! grep -q energy "$T/cli-ps.out" || fail "ps: another project's jobs"
   gru ps --all | grep -q energy || fail "ps --all: no other project's jobs"
   want 2 kill gru kill
+  want 1 nojobs gru attach --host homevar
+  grep -q "no jobs of this project on homevar" "$T/nojobs.out" || fail "attach with no jobs: no clear message"
 
   # doctor, ssh, version and help.
-  gru doctor > "$T/doctor.out" || { cat "$T/doctor.out"; fail "gru doctor"; }
+  want 1 doctor gru doctor
   grep -q "^host fake2 .*OK" "$T/doctor.out" || fail "doctor: fake2 not OK"
+  grep -q "^host down .*FAIL .*down.invalid" "$T/doctor.out" || fail "doctor: down not FAIL"
+  grep -q "^1 problem" "$T/doctor.out" || fail "doctor: not 1 problem"
   gru doctor --notify --host fake2 || fail "doctor --notify"
   grep -q "notify-test on fake2-alias ok.* tok123$" "$T/cli-notify.log" || fail "doctor --notify: no message"
   echo pwd | gru ssh > "$T/ssh.out" || fail "gru ssh"
