@@ -49,8 +49,9 @@ runs are not flushed inside the window), then a short recorded settle.
 ## Every time is UTC
 
 Experiments span machines and time zones, so local time is never used. Machine fields are epoch
-seconds or nanoseconds. Readable times are ISO 8601 with `Z` (`2026-11-23T14:25:01Z`). Ids, dirs
-and file names use `20261123T142501Z`. Displays and log lines show UTC with the `Z`.
+seconds or nanoseconds, and every wall-clock epoch has an ISO 8601 `*_utc` twin
+(`2026-11-23T14:25:01Z`); monotonic times have none. Ids, dirs and file names use
+`20261123T142501Z`. Displays and log lines show UTC with the `Z`.
 
 ## Components
 
@@ -65,15 +66,14 @@ and file names use `20261123T142501Z`. Displays and log lines show UTC with the 
   and control over every wakeup: Rust has no runtime threads or garbage collector, while an idle
   Go program still wakes every minute or two (`runtime/proc.go`). The code can move to its own
   repository later.
-- **The minion job hosts the queue; no systemd units for now.** `minion run energy --detach`
-  starts a detached job (setsid, survives disconnect) whose command, `exec energy-runner queue
-  energy/turbo.json`, runs the whole queue in the foreground. One id: `minion ps`, `attach`, `kill`
-  and the log apply to the queue. The runner records `MINION_JOB_ID`, the commit and the dirty flag
-  from the environment and writes under `<remote_dir>/results/` for `minion fetch`. The
-  template's `always` hook is `sudo -n energy-runner restore --wait`: a killed wrapper can run it
-  while the runner is still restoring, so it first waits for a live owner in its own session to
-  exit, then restores any leftover. Without minion, the runner works the same under `setsid` or
-  tmux, minus the hook. The runner and `hold` treat `SIGTERM`, `SIGINT` and `SIGHUP` alike.
+- **The minion job hosts the queue; no systemd units for now.** `minion run energy --arg q.json
+  --detach` starts a detached job (setsid, survives disconnect) whose command, `energy-runner queue
+  $MINION_ARGS`, runs the whole queue in the foreground. One id: `minion ps`, `attach`, `kill` and
+  the log apply to the queue. Keep the task one command, so the shell execs the runner and the
+  wrapper's hooks run only after it exits. The runner records the `MINION_*` variables and writes
+  under `<remote_dir>/results/` for `minion fetch`. The template's `always` hook is `sudo -n
+  energy-runner restore`. Without minion, the runner works the same under `setsid` or tmux, minus
+  the hook. The runner and `hold` treat `SIGTERM`, `SIGINT` and `SIGHUP` alike.
   setsid stays in the login session's cgroup: with logind's `KillUserProcesses=yes` (upstream
   default; Ubuntu builds `no`), the job dies when minion's launch connection closes, so such a
   host needs `KillExcludeUsers=` for the user. Check each host.
@@ -104,7 +104,7 @@ JSON, like minion's config: one format for the user and no new dependency in min
   "meters": ["rapl", "nvml"],
   "others": "wait", "drift": "stop",
   "out": "results/energy",
-  "notify": { "cmd": "$MINION_AGENT _agent notify", "events": ["run_failed", "drift", "queue_done"] }
+  "notify": { "cmd": ["sh", "-c", "\"$MINION_AGENT\" _agent notify --config \"$MINION_NOTIFY\" …"] }
 }
 ```
 
@@ -134,8 +134,8 @@ trait Setting {
 }
 ```
 
-Values are per object (CPU, package, uncore domain, IRQ, unit, GPU), so CPUs that differ are restored
-exactly, where `slot.sh` has to refuse. `expect` knows what dependencies force: EPP is
+Values are per object (CPU, package, uncore domain, IRQ, unit, GPU), so CPUs that differ are
+restored exactly, where `slot.sh` has to refuse. `expect` knows what dependencies force: EPP is
 `performance` under the `performance` governor (and is not written), and the maximum frequency is
 capped under `no_turbo`. Offline CPUs (SMT off) are skipped; their cpufreq files return `EBUSY`.
 
@@ -187,15 +187,14 @@ exactly these pairs; `slot.sh` already restores uncore packages before domains.*
 One journal per machine: `/var/lib/energy-runner/journal.jsonl`, root-owned, world-readable (it
 holds no secrets) and on local disk. Every privileged verb holds an `flock` on
 `/var/lib/energy-runner/lock` while it runs, every line is `fsync`ed (the directory too, on
-create), and every line carries the `boot_id`:
+create), and every line carries the `boot_id`, `time` (epoch seconds) and `time_utc`:
 
 ```
-{"t":"open","queue":"turbo-cost-20261123T091200Z","uid":1000,"runner":{"pid":4711,"start":…},"job":"…","kernel":"…","cmdline":"…","microcode":"…","bios":"…"}
+{"t":"open","queue":"turbo-cost-20261123T091200Z","uid":1000,"job":"…","kernel":"…","cmdline":"…","microcode":"…","bios":"…"}
 {"t":"saved","state":{…every object of every plugin…}}       <- originals, before any write
 {"t":"apply","profile":"stable"}                              <- intent, before the writes
 {"t":"applied","profile":"stable","state":{…read back…}}      <- after the writes, with side effects
 {"t":"drift","state":{…objects someone else changed…}}
-{"t":"restore"}                                              <- intent, before the first write
 {"t":"restored"}
 {"t":"close"}
 ```
@@ -203,11 +202,9 @@ create), and every line carries the `boot_id`:
 - `saved` is a full snapshot at open, so it also covers settings that only change as a side effect
   of our writes. It is never overwritten. `applied` is the full read-back after each apply, with
   what the kernel derived. An incomplete last line is ignored.
-- **Owner.** The runner sends its pid and start time on stdin; under the lock the verb checks
-  that this process is alive and its ancestor, refuses otherwise, and records it as `runner`. So
-  a verb orphaned by a dead runner never opens a journal. A journal whose owner is dead, or from
-  another boot, is a *leftover*. On close it moves to `done/<queue>.jsonl` (directory `fsync`ed)
-  and the runner copies it into the results.
+- A journal open while no queue holds the [queue lock](#queue), or from another boot, is a
+  *leftover*. On close it moves to `done/<YYYYMMDDTHHMMSS.nnnnnnnnnZ>.jsonl` (directory
+  `fsync`ed) and the runner copies it into the results.
 
 ### Restore, crashes and reboots
 
@@ -215,26 +212,37 @@ Restore first reads the current state. An object that differs from both the last
 and its `saved` value was changed by someone else during the queue: it is kept, recorded, and
 reported as `restore_conflict`. Every other object gets its `saved` value, dependencies first,
 whatever the side effects. If the queue died between an `apply` intent and its `applied` snapshot,
-or during a restore (`restore` without `restored`), every object is restored. So restoring twice is
-harmless. Until the boot unit exists, a journal from another boot is never written back. Without a
-service, two things restore: the job's `always` hook, and every `queue`, `run` and `hold`, which
-restores a leftover first, once it holds the [queue lock](#queue). Read-only verbs only report it.
+every object is restored. So restoring twice is harmless. (Once settings with side effects arrive,
+such as driver mode, SMT, or turbo with frequency limits, a restore must also mark its start, or a
+second restore after an interrupted one would take those side effects for someone else's change.)
+Until the boot unit exists, a journal from another boot is never written back.
+
+Without a service, two restores cover a crash:
+- **The queue's own**, `restore --held`: at its start, under the lock, it restores a leftover
+  before anything else; at its end, or on `SIGTERM`, `SIGINT` or `SIGHUP`, it restores its own.
+- **The `always` hook's** plain `restore`, which first takes the lock without waiting. While a
+  queue holds it, it does nothing: that queue already restored any leftover at its start, so a
+  late restore would only undo its profile.
+- `apply` and `restore --held` get the caller's queue id on stdin and, holding the journal lock,
+  act only if the queue lock is held and its file names that queue. So a verb left running by a
+  runner killed with `-9` can't tune a machine nobody will restore, or undo the next queue. A
+  hand-run `apply` (no id) needs the lock free and holds it while it writes; what it leaves is a
+  leftover. *(Proposed for #9.)*
 
 | What happens | Recovery |
 |---|---|
-| `minion kill`, `SIGTERM`, `SIGHUP`, shutdown | `minion kill` signals the job's process group, so the workload gets it too (a leader keeps its ssh sessions in another group, to still reach its followers). The runner stops the run, kills what is left, restores, marks the run `aborted`, sends events and exits; the hook then finds nothing. This must fit systemd's stop timeout (90 s default); while the system is stopping, only the `restore` settings are put back, and guards and `drop` settings are left to the shutdown |
-| runner killed with `-9` or crashes, any phase | the `always` hook restores and closes the journal. Root writes no user files and sends nothing: minion's own failure notice reports it, with the restore output in the log, and `--resume` treats a run without an end record as aborted and copies the closed journal from `done/`. The workload's first process dies with the runner (`PDEATHSIG`); its children can survive until the isolation phase's cgroup, and the next queue's quiet-host check (`others`) sees them |
-| the whole job is killed, or the runner was started by hand | no hook runs; the journal stays open until the next start restores it, or someone runs `sudo -n energy-runner restore` |
+| `minion kill`, `SIGTERM`, `SIGINT`, `SIGHUP`, shutdown | `minion kill` signals the job's process group, so the workload gets it too (a leader keeps its ssh sessions in another group, to still reach its followers). The runner stops the workload, restores, sends events, releases the lock and exits; the hook then restores nothing. This must fit systemd's stop timeout (90 s default); while the system is stopping, only the `restore` settings are put back, and guards and `drop` settings are left to the shutdown |
+| runner killed with `-9` or crashes, any phase | the lock is free, so the `always` hook restores and closes the journal; if a waiting queue took the lock first, that queue restores before its first run and the hook does nothing. Root writes no user files and sends nothing: minion's own failure notice reports it, with the restore output in the log, and `--resume` treats a run without an end record as aborted and copies the closed journal from `done/`. The workload's first process dies with the runner (`PDEATHSIG`); its children can survive until the isolation phase's cgroup, and the next queue's quiet-host check (`others`) sees them |
+| the whole job is killed, or the runner was started by hand | no hook runs; the journal stays open until the next queue restores it, or someone runs `sudo -n energy-runner restore` |
 | restore fails | the journal stays open, so every later start tries again and refuses to run on a half-restored machine, and sends `restore_failed`. An admin repairs and runs `energy-runner abandon` |
 | reboot | **not covered until the boot unit** ([Plan](#plan)). The runner makes no change that survives a reboot (sysfs, `/proc`, NVML and `--runtime` systemd state only), so every setting comes back at its boot value, but values set by hand before the queue are lost. The next start sees a journal from another boot, writes nothing, records the state, closes it and sends `rebooted`, to whoever starts next. `minion ps` keeps showing the dead job as running (no status was written) |
 | someone changes a setting | caught by the end-of-run verify and by a full verify before each apply. The verify includes `HWP_REQUEST` through the `msr` verb, which catches direct MSR writes. The run is marked `drifted` with the diff. `drift: stop` (default) stops and restores; `reapply` re-applies once, for agreed slots. A change made and undone inside one run shows only through its effects |
 
-Who may do what (by `SUDO_UID` and the owner check): anyone may restore or close a leftover;
-only the live owner may `apply` or restore its own queue; admins and root may restore a live queue
-only with `restore --force`; the holder, admins, root and the expiry timer may always `unlock`.
-From phase 3, `apply` also needs its owner to hold `queue.lock` (checked in `/proc/locks`), so a
-hand-run `apply` can't leave a live owner that blocks every queue. `msr` reads only `SMI_COUNT`,
-`APERF`, `MPERF`, `THERM_STATUS` and `HWP_REQUEST`.
+The sudoers rule allows `apply`, `restore` and `restore --held`. On shared machines, `--held`
+should also check `SUDO_UID` against the journal's `uid` (admins excepted), since anyone can read
+the queue id. The holder, admins, root and the expiry timer may always `unlock` the
+[machine lock](#machine-lock-opt-in). `msr` reads only `SMI_COUNT`, `APERF`, `MPERF`,
+`THERM_STATUS` and `HWP_REQUEST`.
 
 The verbs refuse settings that are not compiled in; CPUs that don't exist; values outside the
 hardware's range (frequencies within `cpuinfo_*`, uncore within `initial_*`, RAPL limits between a
@@ -333,13 +341,12 @@ timer and a reboot also unlock.
 - **Between runs**: verify, apply the next profile's diff, verify, send events, thermal gate.
 - **Canary** (optional): a fixed workload every N rounds. If its energy drifts past a bound, the
   queue pauses and notifies, as the Green Metrics Tool does with its control workload.
-- **One queue at a time; the others wait.** Every `queue`, `run` and `hold` first takes a
-  blocking `flock` on `/var/lib/energy-runner/queue.lock` (world-readable, created at install),
-  opened `O_CLOEXEC` so a leftover workload can't inherit it, and keeps it to the end. A
-  multi-host leader takes its own lock in host-name order with its followers'. A queue never
-  starts `run` or `hold` on its own host as a child, which would wait on its lock. A waiter sleeps
-  in the kernel with no wakeups, logs which queue it waits for (from the open journal, or the
-  holder's pid in `/proc/locks`) and sends `queue_waiting`. The lock is freed when its holder dies,
+- **One queue at a time; the others wait.** Every `queue` (later `hold`) first takes a blocking
+  `flock` on `/run/lock/energy-runner.lock` and keeps it to the end. The file is created writable
+  by all, is gone at reboot, is opened `O_NONBLOCK` and `O_CLOEXEC`, and must be a regular file,
+  so a FIFO in its place can't block a restore. The holder writes its queue id into it. A
+  multi-host leader takes its own lock in host-name order with its followers'. A waiter sleeps in
+  the kernel with no wakeups and logs the holder's queue id. The lock is freed when its holder dies,
   also by `kill -9`; then all waiters wake and one wins (not first come, first served). Any local
   user can take it and block queues for as long as they hold it. This replaces hand-made "wait for
   job X" tasks.
@@ -452,10 +459,11 @@ is switched off, wall power on both). The simplest correct mechanism:
 
 The runner decides when, a command decides how. Every event goes to `events.jsonl`. Only outside
 measured windows (after a run before the thermal gate, or while waiting, starting or exiting), it
-runs `notify.cmd` once per event listed in `notify.events`, with a timeout and the event in
-`RUNNER_EVENT`, `RUNNER_QUEUE`, `RUNNER_RUN` and `RUNNER_TEXT`:
+runs `notify.cmd` (an argv) once per event, in its own process group, killed after
+`notify.timeout_s` (default 30), with the event in `RUNNER_EVENT`, `RUNNER_QUEUE`, `RUNNER_RUN`,
+`RUNNER_STATUS` and `RUNNER_DETAIL`:
 
-`queue_started`, `queue_waiting`, `run_done`, `run_failed`, `run_aborted`, `drift`,
+`queue_started` (with the wait for the lock), `run_done`, `run_failed`, `run_aborted`, `drift`,
 `others_detected`, `thermal_timeout`, `canary_drift`, `restore_ok`, `restore_conflict`,
 `restore_failed`, `rebooted`, `queue_paused`, `queue_done`, `lock_taken`, `lock_lifted` (done,
 failed, killed, expired), `lockout_check_failed`, and an optional daily `heartbeat`.
@@ -490,8 +498,9 @@ service such as Healthchecks.io alerts when a ping is late.
 
 Runs only ever go to new directories. `out` must be on local disk, like every runner path. It is
 relative to the project's `remote_dir` and under `results/`, so a `fetch` glob brings everything
-back. In UTC: the queue id ends in its start time (`20261123T091200Z`), every JSON time is epoch
-nanoseconds, and every runner log line starts with an ISO 8601 `Z` time.
+back. The queue dir ends in its start time (`20261123T091200Z`). `run.json` and `queue.json`
+hold both clocks at each edge: `CLOCK_MONOTONIC` and `CLOCK_REALTIME` in epoch ns, the latter also
+as `*_utc`. Every runner log line starts with the UTC time.
 
 ## Research questions
 
@@ -551,10 +560,10 @@ Each phase has a "done when", checked on a test machine.
    energy per zone and the three clocks, `strace` shows no runner syscall inside the window but
    the wakeup that ends it, and the state is restored after success, failure and `SIGTERM`.
 3. **Queue and the minion connection** (PR #9 open): `queue`, `plan.json`, lock waiting, restore
-   first, owner checks, the `always` hook, `notify.cmd`. Done when two queues started together run
-   one after the other, a `kill -9` of the runner at any point leaves the machine restored,
-   notifications arrive only outside windows, and `minion fetch` brings back results with job id and
-   commit.
+   first, `restore --held` and the hook's lock check, `notify.cmd`. Done when two queues started
+   together run one after the other, a `kill -9` of the runner at any point leaves the machine
+   restored, notifications arrive only outside windows, and `minion fetch` brings back results with
+   job id and commit.
 4. **Meters, noise record, isolation**: `nvml`, `wall`, `perf`, `cmd`, the thermal gate, the other
    settings, the delegated scope. Done when 2 profiles × 2 workloads × 10 reps run unattended with
    full provenance and the RQ2 overhead experiment has run; `host_baseline.sh` and `slot.sh` retire.
