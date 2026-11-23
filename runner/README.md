@@ -24,6 +24,8 @@ energy-runner status                      # what differs from the originals
 sudo -n energy-runner restore             # put the originals back
 ```
 
+By hand, `apply` and `restore` act only while no queue holds the queue lock (below).
+
 A profile has the same shape as a snapshot and lists only the objects to change:
 
 ```json
@@ -86,28 +88,41 @@ digits, `.`, `_` and `-`.
 - **Profiles.** A profile lists only what it changes. Each one is resolved over the settings at
   the start: every object that any profile sets is held at this profile's value, or else at its
   start value, so a run never inherits the settings of the run before it. A profile is applied
-  (`sudo -n energy-runner apply`, profile on stdin) only when the machine is not already in it.
-- **Machine lock.** A blocking `flock` on `/run/lock/energy-runner.lock` (world-writable, gone at
-  reboot), held to the end. The holder writes its queue id into the file; a second queue logs
-  that id and sleeps in the kernel until the lock is free, then runs.
-- **Runs.** First, a journal left open by a crash is restored (`sudo -n energy-runner restore
-  --held`).
-  Then each run: apply if needed, settle, run the workload with `run`'s meters (stdin from
-  `/dev/null`, stdout and stderr to files, in its own process group). A run whose settings
+  (`sudo -n energy-runner apply --held`) only when the machine is not already in it.
+- **Queue lock.** A blocking `flock` on `/run/lock/energy-runner.lock` (world-writable, gone at
+  reboot), held to the end. A second queue logs the holder's id and sleeps in the kernel until
+  the lock is free, then runs.
+- **Start.** In this order: take the lock; choose the queue id (`<name>-<UTC time>`, or with `-2`,
+  `-3`, ... if a queue of that name started in the same second) and write it into the lock; reap
+  the leftover workloads of a queue that died; restore a leftover journal (`sudo -n energy-runner
+  restore --held`, every time).
+- **Runs.** Each run: apply if needed, settle, run the workload with `run`'s meters (stdin from
+  `/dev/null`, stdout and stderr to files, in its own process group, killed if the runner dies,
+  and marked for reap). A run whose settings
   changed during it or differ from its profile is flagged `drift`, and the next run applies its
   profile again. A failing workload is recorded and the queue goes on.
 - **End.** At the end, or on SIGTERM, SIGINT or SIGHUP (which also stop the running workload), the
   queue restores the settings, then releases the lock. It exits 0 when every run succeeded and
   the restore worked, 128 + the signal when stopped, and 1 otherwise.
 
-`apply`, `restore` and `restore --held` need a sudoers rule that lets the user run them without a
-password; sudo finds `energy-runner` on its `secure_path`, so install it there, owned by root.
+`apply --held` and `restore --held` (from a queue) and `restore` (from the hook below) need a
+sudoers rule that lets the user run them without a password; sudo finds `energy-runner` on its
+`secure_path`, so install it there, owned by root.
 
-`restore` first takes the machine lock without waiting. While a queue holds it, `restore` does
-nothing and says so: that queue restored any leftover journal when it started, so a late restore
-would only undo its profile. `--held` tells `restore` that the caller is the queue holding the
-lock. The lock is opened with `O_NONBLOCK`, and anything but a regular file is refused, so a FIFO
-put in its place can't block a restore.
+A queue's privileged calls can outlive it: sudo starts in milliseconds, and neither
+`PR_SET_PDEATHSIG` nor an inherited fd survives its setuid exec. So `apply` and `restore` check
+the queue lock while they hold the journal lock. With `--held`, stdin names the caller's queue
+(`{"queue": ID}`, plus `"profile"` for apply), and they act only while that queue holds the
+lock. Without it, they act only while no queue does, and a `restore` then says that the queue
+holding it restored at its start. A stray call that saw a dead queue's id before the next queue
+wrote its own is undone by that queue's restore at start. The lock is opened with `O_NONBLOCK`,
+and anything but a regular file is refused, so a FIFO put in its place can't block them.
+
+`energy-runner reap` (as the user; refused as root) kills the leftover workloads of a queue that
+died: each workload has `ENERGY_RUNNER_WORKLOAD=<lock> <queue id>` in its environment, and so do
+its children, so reap kills the user's processes that name this lock and a queue other than the
+one holding it. Root never kills anything: the lock file is world-writable. A workload that
+clears its environment escapes reap; the cgroup of the isolation phase will close that.
 
 Each queue writes to a new directory, `<out>/<name>-<YYYYMMDDTHHMMSSZ>/`:
 
@@ -147,7 +162,7 @@ it. In the project's `.minion.json` (or its template):
 ```json
 {
   "tasks": {"energy": "energy-runner queue $MINION_ARGS"},
-  "always": ["sudo -n energy-runner restore"]
+  "always": ["energy-runner reap", "sudo -n energy-runner restore"]
 }
 ```
 
@@ -156,8 +171,9 @@ minion run energy --arg q.json --detach
 ```
 
 `minion kill` sends SIGTERM: the queue stops its workload and restores. If the runner dies
-without restoring (`kill -9`, a crash), the `always` hook restores. If another queue was waiting
-and took the lock first, that queue restores before its first run, and the hook does nothing.
+without restoring (`kill -9`, a crash), its workload dies with it, and the `always` hooks reap the
+workload's children and restore. If another queue was waiting and took the lock first, that queue
+reaps and restores before its first run, and the hooks leave it alone.
 
 ## Journal
 

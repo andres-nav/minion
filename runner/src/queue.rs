@@ -1,21 +1,20 @@
 use std::collections::BTreeMap;
-use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
-use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
+use std::fs::{self, File};
+use std::io::{self, ErrorKind, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
-use crate::journal;
+use crate::lock;
 use crate::run::{self, Meter, WORKLOAD};
 use crate::settings::{self, State};
 use crate::utc::{self, log, now_ns};
-use crate::{NAME, Opts, engine};
+use crate::{NAME, Opts};
 
 const KEYS: [&str; 9] = [
     "name",
@@ -30,24 +29,17 @@ const KEYS: [&str; 9] = [
 ];
 const SETTLE: Duration = Duration::from_secs(1);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(not(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-)))]
-compile_error!("O_NONBLOCK is only known here for Linux on x86_64 and aarch64");
 const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
 const SIGKILL: i32 = 9;
 const SIGTERM: i32 = 15;
+const PR_SET_PDEATHSIG: i32 = 1;
 
 unsafe extern "C" {
     fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
     safe fn kill(pid: i32, sig: i32) -> i32;
+    safe fn prctl(option: i32, arg: u64) -> i32;
+    safe fn getppid() -> i32;
 }
 
 /// The signal that stops the queue, or 0.
@@ -75,7 +67,7 @@ pub struct Run {
 }
 
 /// Runs the queue in file to its end or to a signal, then restores the settings
-/// and releases the machine lock. Returns the exit code.
+/// and releases the queue lock. Returns the exit code.
 pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     if euid == 0 {
         return Err("queue is refused as root: it runs your commands".into());
@@ -90,15 +82,12 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     }
     let meters = run::meters(&o.sysfs, &q.meters)?;
     let plan = plan(&q);
-    let id = format!("{}-{}", q.name, utc::stamp(now_ns(), false));
 
-    let (_lock, waited) = lock(&o.lock, &id)?;
+    let (lock, waited) = lock::take(&o.lock)?;
     stop_on_signals();
     let started = run::clocks()?;
-    let dir = q.out.join(&id);
-    fs::create_dir_all(&q.out)
-        .and_then(|()| fs::create_dir(&dir))
-        .map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let (id, dir) = new_dir(&q.out, &q.name)?;
+    lock::name(&lock, &id)?;
     let runs: Vec<_> = plan.iter().map(Run::json).collect();
     run::write_new(
         &dir.join("plan.json"),
@@ -139,7 +128,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     Ok(code)
 }
 
-/// A queue that holds the machine lock.
+/// A queue that holds the queue lock.
 struct Running<'a> {
     o: &'a Opts,
     q: &'a Queue,
@@ -158,15 +147,20 @@ enum Verb<'a> {
 }
 
 impl Running<'_> {
-    /// Restores a leftover journal, writes queue.json and returns each profile's target.
+    /// Kills the leftover workloads of a queue that died and restores its journal,
+    /// both after the queue named itself in the lock; then writes queue.json and
+    /// returns each profile's target.
     fn start(
         &mut self,
         given: &Value,
         runs: usize,
         waited: Option<String>,
     ) -> Result<BTreeMap<String, State>, String> {
-        let open = journal::read(&self.o.state_dir).map_or(true, |l| !l.is_empty());
-        if open && !self.restore(true) {
+        let reaped = lock::reap(&self.o.lock)?;
+        if reaped > 0 {
+            log(format!("killed {reaped} leftover workload processes"));
+        }
+        if !self.restore(true) {
             return Err("the leftover journal could not be restored".into());
         }
         let start = settings::snapshot(&self.o.sysfs)?;
@@ -227,12 +221,8 @@ impl Running<'_> {
         fs::create_dir_all(&dir).map_err(err)?;
         let out = |name: &str| File::create_new(dir.join(name)).map_err(err);
         let (prog, args) = self.q.workloads[&r.workload].split_first().unwrap();
-        let mut cmd = Command::new(prog);
-        cmd.args(args)
-            .stdin(Stdio::null())
-            .stdout(out("stdout")?)
-            .stderr(out("stderr")?)
-            .process_group(0);
+        let mut cmd = workload(prog, args, &lock::mark(&self.o.lock, &self.id));
+        cmd.stdout(out("stdout")?).stderr(out("stderr")?);
 
         let (mut rec, status) = match run::measure(&self.o.sysfs, &self.meters, cmd) {
             Ok((rec, status)) => (rec, Ok(status)),
@@ -272,7 +262,8 @@ impl Running<'_> {
         Ok(drift)
     }
 
-    /// Puts the original settings back and sends restore_ok or restore_failed.
+    /// Puts the original settings back and sends restore_ok (at the start only
+    /// if a journal was open) or restore_failed.
     fn restore(&mut self, leftover: bool) -> bool {
         let what = if leftover {
             "leftover journal"
@@ -280,8 +271,11 @@ impl Running<'_> {
             "end of queue"
         };
         match self.privileged(Verb::Restore) {
-            Ok(kept) if kept.is_empty() => self.send("restore_ok", "", "ok", what),
-            Ok(kept) => self.send("restore_ok", "", "ok", &format!("{what}; {kept}")),
+            Ok(said) if said.is_empty() && leftover => {}
+            Ok(said) if said.is_empty() => {
+                self.send("restore_ok", "", "ok", &format!("{what}: none open"))
+            }
+            Ok(said) => self.send("restore_ok", "", "ok", &format!("{what}: {said}")),
             Err(e) => {
                 self.send("restore_failed", "", "failed", &format!("{what}; {e}"));
                 return false;
@@ -290,21 +284,18 @@ impl Running<'_> {
         true
     }
 
-    /// A privileged verb: `sudo -n energy-runner <verb>` with its input on stdin,
-    /// or the engine in-process on a test tree. Returns what restore kept.
+    /// A privileged verb with this queue's id: `sudo -n energy-runner <verb> --held`
+    /// with the input on stdin, or in-process on a test tree. Returns what it says.
     fn privileged(&self, verb: Verb) -> Result<String, String> {
-        let (sys, dir) = (&self.o.sysfs, &self.o.state_dir);
-        match (self.o.test, verb) {
-            (true, Verb::Apply(p)) => engine::apply(sys, dir, p).map(|()| String::new()),
-            (true, Verb::Restore) => engine::restore(sys, dir).map(|kept| {
-                let kept: Vec<_> = kept
-                    .iter()
-                    .map(|c| format!("kept {c}: changed by someone else"))
-                    .collect();
-                kept.join("; ")
-            }),
-            (false, Verb::Apply(p)) => sudo(&["apply"], &serde_json::to_vec(p).unwrap()),
-            (false, Verb::Restore) => sudo(&["restore", "--held"], b""),
+        let (verb, input) = match verb {
+            Verb::Apply(p) => ("apply", json!({"queue": self.id, "profile": p})),
+            Verb::Restore => ("restore", json!({"queue": self.id})),
+        };
+        let input = input.to_string();
+        if self.o.test {
+            crate::privileged(self.o, verb, true, input.as_bytes())
+        } else {
+            sudo(&[verb, "--held"], input.as_bytes())
         }
     }
 
@@ -368,28 +359,71 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Opti
     Ok((!killed).then_some(status))
 }
 
+/// A workload: stdin from /dev/null, in its own process group, with MARK set,
+/// and killed if the runner dies. Its own children are left to reap.
+pub fn workload(prog: &str, args: &[String], mark: &str) -> Command {
+    let mut c = Command::new(prog);
+    c.args(args)
+        .env(lock::MARK, mark)
+        .stdin(Stdio::null())
+        .process_group(0);
+    let runner = std::process::id() as i32;
+    // SAFETY: prctl and getppid are async-signal-safe.
+    unsafe {
+        c.pre_exec(move || {
+            if prctl(PR_SET_PDEATHSIG, SIGKILL as u64) != 0 || getppid() != runner {
+                return Err(io::Error::other("the runner is gone"));
+            }
+            Ok(())
+        });
+    }
+    c
+}
+
 pub fn sudo_command(args: &[&str]) -> Command {
     let mut c = Command::new("sudo");
     c.args(["-n", NAME])
         .args(args)
         .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     c
 }
 
-/// Runs a privileged verb through sudo. Returns its stderr.
+/// Runs a privileged verb through sudo. Returns what it says on stdout.
 fn sudo(args: &[&str], input: &[u8]) -> Result<String, String> {
     let mut child = sudo_command(args)
         .spawn()
         .map_err(|e| format!("sudo: {e}"))?;
     let _ = child.stdin.take().unwrap().write_all(input); // a failure shows in the exit status
     let out = child.wait_with_output().map_err(|e| format!("sudo: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !out.status.success() {
+        let text = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let cmd = args.join(" ");
         return Err(format!("sudo -n {NAME} {cmd}: {}: {text}", out.status));
     }
-    Ok(text)
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// Creates <out>/<name>-<UTC time>, with -2, -3, ... if a queue of that name
+/// started in the same second. Returns the queue id and the dir.
+fn new_dir(out: &Path, name: &str) -> Result<(String, PathBuf), String> {
+    fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
+    let base = format!("{name}-{}", utc::stamp(now_ns(), false));
+    for n in 1..=100 {
+        let id = if n == 1 {
+            base.clone()
+        } else {
+            format!("{base}-{n}")
+        };
+        let dir = out.join(&id);
+        match fs::create_dir(&dir) {
+            Ok(()) => return Ok((id, dir)),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(format!("create {}: {e}", dir.display())),
+        }
+    }
+    Err(format!("{base}: 100 queues of that name in one second"))
 }
 
 /// Checks a queue file. Unknown keys, bad values and names that are not plain
@@ -557,75 +591,6 @@ fn matches(state: &Value, target: &State) -> bool {
     target
         .iter()
         .all(|(id, values)| values.iter().all(|(obj, v)| state[id][obj] == *v))
-}
-
-/// Takes the machine lock, sleeping in the kernel while another queue holds it,
-/// and writes id into it. Returns the lock and, if it waited, for whom.
-fn lock(path: &Path, id: &str) -> Result<(File, Option<String>), String> {
-    let err = |e: std::io::Error| format!("lock {}: {e}", path.display());
-    let f = open_lock(path, true).map_err(err)?;
-    let waited = match f.try_lock() {
-        Ok(()) => None,
-        Err(TryLockError::WouldBlock) => {
-            let mut holder = String::new();
-            let _ = (&f).read_to_string(&mut holder);
-            log(format!(
-                "waiting for queue {holder:?}, which holds {}",
-                path.display()
-            ));
-            let t = Instant::now();
-            f.lock().map_err(err)?;
-            let secs = t.elapsed().as_secs_f64();
-            Some(format!("waited {secs:.0} s for queue {holder:?}"))
-        }
-        Err(TryLockError::Error(e)) => return Err(err(e)),
-    };
-    f.set_len(0)
-        .and_then(|()| f.write_all_at(id.as_bytes(), 0))
-        .map_err(err)?;
-    Ok((f, waited))
-}
-
-/// The machine lock if no queue holds it, without waiting. Root calls this, so
-/// it never writes the file.
-pub fn try_lock(path: &Path) -> Result<Option<File>, String> {
-    let err = |e: std::io::Error| format!("lock {}: {e}", path.display());
-    let f = open_lock(path, false).map_err(err)?;
-    match f.try_lock() {
-        Ok(()) => Ok(Some(f)),
-        Err(TryLockError::WouldBlock) => Ok(None),
-        Err(TryLockError::Error(e)) => Err(err(e)),
-    }
-}
-
-/// Opens the lock file, creating it writable by all. An existing file is opened
-/// without O_CREAT, which protected_regular refuses for another user's file in
-/// a sticky directory such as /run/lock; and with O_NONBLOCK, so a FIFO put
-/// there is refused instead of blocking.
-fn open_lock(path: &Path, write: bool) -> std::io::Result<File> {
-    loop {
-        let open = OpenOptions::new()
-            .read(true)
-            .write(write)
-            .custom_flags(O_NONBLOCK)
-            .open(path);
-        match open {
-            Ok(f) if f.metadata()?.is_file() => return Ok(f),
-            Ok(_) => return Err(std::io::Error::other("not a regular file")),
-            Err(e) if e.kind() == ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-        let new = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(path);
-        match new {
-            Ok(f) => return f.set_permissions(Permissions::from_mode(0o666)).map(|()| f),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
 }
 
 extern "C" fn on_signal(sig: i32) {
