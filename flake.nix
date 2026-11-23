@@ -22,6 +22,8 @@
               gopls          # language server
               gotools        # goimports, etc.
               go-tools       # staticcheck
+              cargo          # runner/
+              rustc
               gnumake
               git
             ];
