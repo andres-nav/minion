@@ -20,9 +20,8 @@ backports, so each must still be checked on the host.
 - **No source measures the smallest detectable energy regression on one machine**, or how many runs
   it takes. EnergyTrackr's own preprint says it has no ground truth. A/A and injected-regression
   modes turn RQ3 into a number per machine and workload.
-- **Order and repetition need care on bare metal.** Run order could change the conclusion in 72% of
-  cases on 1,700+ servers (Duplyakin 2023, measured). The runs needed for a ±1% median confidence
-  interval differ more than 10× between setups (Maricq 2018, measured).
+- **Order and repetition need care on bare metal** (Duplyakin 2023, Maricq 2018; numbers in
+  [section 3](#3-methodology)).
 - **Linux facts that changed the design** (details in [section 2](#2-linux-mechanisms)):
   - restore order is "dependencies first", not reverse;
   - cpuset partitions conflict with systemd and are missing on 5.15;
