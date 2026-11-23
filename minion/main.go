@@ -4,7 +4,7 @@ package main
 import (
 	"os"
 
-	"github.com/andres-nav/minion/internal/cli"
+	"github.com/andres-nav/minion/minion/internal/cli"
 )
 
 func main() {

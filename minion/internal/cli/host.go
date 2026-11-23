@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/andres-nav/minion/internal/config"
-	"github.com/andres-nav/minion/internal/ssh"
+	"github.com/andres-nav/minion/minion/internal/config"
+	"github.com/andres-nav/minion/minion/internal/ssh"
 )
 
 var errNoHost = errors.New("no host configured (set host in the template or .minion.json, or pass --host; use --host localhost to run on this machine)")

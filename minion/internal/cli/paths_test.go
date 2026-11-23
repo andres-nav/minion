@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/andres-nav/minion/internal/config"
+	"github.com/andres-nav/minion/minion/internal/config"
 )
 
 func TestRemoteDirFor(t *testing.T) {

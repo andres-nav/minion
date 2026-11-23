@@ -6,8 +6,8 @@ import (
 	"os"
 	"os/exec"
 
-	"github.com/andres-nav/minion/internal/remote"
-	"github.com/andres-nav/minion/internal/ssh"
+	"github.com/andres-nav/minion/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/ssh"
 )
 
 // cmdSSH opens an interactive shell on the host in the project's remote dir (or

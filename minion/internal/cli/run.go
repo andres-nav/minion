@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andres-nav/minion/internal/config"
-	"github.com/andres-nav/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/config"
+	"github.com/andres-nav/minion/minion/internal/remote"
 )
 
 // cmdRun runs a task by name (the first positional argument), resolved from the

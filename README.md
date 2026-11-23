@@ -27,11 +27,22 @@ minion list [--json]                 # discover the resolved template + tasks
 Config lives in `~/.config/minion/config.json` (+ optional per-project
 `.minion.json`). See [DESIGN.md](docs/DESIGN.md).
 
+## Layout
+
+```
+minion/   the Go CLI: go.mod, main.go, internal/, Makefile
+runner/   energy-runner, a Rust crate (see runner/README.md)
+docs/     design docs
+```
+
 ## Develop
 
 ```sh
-nix develop        # or: direnv allow  (uses flake.nix)
-make build         # -> bin/minion
+nix develop        # or: direnv allow  (uses flake.nix: Go and Rust)
+make build         # -> minion/bin/minion and runner/target/release/energy-runner
 make install       # -> ~/.local/bin/minion
-make test
+make test          # go test + vet in minion/, cargo test + clippy in runner/
 ```
+
+Each folder also builds on its own: `make -C minion build` (or `make` targets inside `minion/`),
+and `cargo build` / `cargo test` inside `runner/`.

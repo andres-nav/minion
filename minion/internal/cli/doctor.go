@@ -7,9 +7,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/andres-nav/minion/internal/config"
-	"github.com/andres-nav/minion/internal/remote"
-	"github.com/andres-nav/minion/internal/ssh"
+	"github.com/andres-nav/minion/minion/internal/config"
+	"github.com/andres-nav/minion/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/ssh"
 )
 
 // cmdDoctor validates the config and checks each host: reachable + agent

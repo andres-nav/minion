@@ -7,7 +7,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/andres-nav/minion/internal/ssh"
+	"github.com/andres-nav/minion/minion/internal/ssh"
 )
 
 // execer runs shell commands somewhere — remotely via ssh, or on this machine.

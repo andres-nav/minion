@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/andres-nav/minion/internal/config"
-	"github.com/andres-nav/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/config"
+	"github.com/andres-nav/minion/minion/internal/remote"
 )
 
 func TestResolveSecret(t *testing.T) {

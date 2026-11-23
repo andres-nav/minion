@@ -1,9 +1,14 @@
 name: release
 
+# Tests and the release build run on every push and pull request; only a tag
+# or a manual dispatch publishes a release.
 on:
   push:
+    branches:
+      - '**'
     tags:
       - 'v*'
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -11,9 +16,25 @@ on:
         required: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: minion (go test, go vet)
+        run: nix develop --command make -C minion test
+
+      - name: runner (cargo test, cargo clippy)
+        run: nix develop --command sh -c 'cd runner && cargo test && cargo clippy --all-targets -- -D warnings'
+
   build:
     runs-on: ubuntu-latest
     strategy:
@@ -40,18 +61,18 @@ jobs:
           # VERSION from `git describe` via -ldflags. CGO off → static, pure-Go
           # cross-compiles cleanly from the Linux runner.
           #
-          # Linux agent binaries minion bootstraps onto remotes (bin/minion-linux-*).
-          nix develop --command make cross
-          # Host binary for this matrix platform (bin/minion).
+          # Linux agent binaries minion bootstraps onto remotes (minion/bin/minion-linux-*).
+          nix develop --command make -C minion cross
+          # Host binary for this matrix platform (minion/bin/minion).
           nix develop --command env \
             GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' CGO_ENABLED=0 \
-            make build
+            make -C minion build
 
       - name: Package
         run: |
           set -eu
           archive="minion-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
-          tar -C bin -czf "$archive" minion minion-linux-amd64 minion-linux-arm64
+          tar -C minion/bin -czf "$archive" minion minion-linux-amd64 minion-linux-arm64
           echo "packaged → $archive"
 
       - uses: actions/upload-artifact@v4
@@ -61,8 +82,11 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: build
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: [test, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:

@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/andres-nav/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/remote"
 )
 
 // takenExec reports the first n launches as taken ids.
