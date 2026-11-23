@@ -12,6 +12,9 @@ import (
 	"github.com/andres-nav/minion/minion/internal/remote"
 )
 
+// psTime shows a job's start time, in UTC.
+func psTime(t time.Time) string { return t.UTC().Format("2006-01-02 15:04Z") }
+
 type psRow struct {
 	id, task, when, age, status string
 	epoch                       int64
@@ -53,9 +56,9 @@ func cmdPs(args []string) int {
 		}
 		row := psRow{id: id, task: task, when: "?", age: "?", status: status}
 		if epoch, perr := strconv.ParseInt(started, 10, 64); perr == nil {
-			t := time.Unix(epoch, 0).Local()
+			t := time.Unix(epoch, 0)
 			row.epoch = epoch
-			row.when = t.Format("2006-01-02 15:04")
+			row.when = psTime(t)
 			row.age = humanizeAge(time.Since(t))
 		}
 		rows = append(rows, row)
@@ -63,9 +66,9 @@ func cmdPs(args []string) int {
 	// most recent first
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].epoch > rows[j].epoch })
 
-	fmt.Printf("%-30s %-10s %-17s %-6s %s\n", "NAME", "TASK", "STARTED", "AGE", "STATUS")
+	fmt.Printf("%-32s %-10s %-17s %-6s %s\n", "NAME", "TASK", "STARTED", "AGE", "STATUS")
 	for _, row := range rows {
-		fmt.Printf("%-30s %-10s %-17s %-6s %s\n", row.id, row.task, row.when, row.age, row.status)
+		fmt.Printf("%-32s %-10s %-17s %-6s %s\n", row.id, row.task, row.when, row.age, row.status)
 	}
 	if len(rows) == 0 {
 		if *all {

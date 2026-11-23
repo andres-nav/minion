@@ -25,14 +25,14 @@ func (e *takenExec) Run(string, io.Reader, io.Writer, io.Writer) (int, error) {
 func TestLaunchDrawsAnotherIDWhenTaken(t *testing.T) {
 	var ids []string
 	script := func(id, _ string) string { ids = append(ids, id); return "" }
-	id, err := launch(&takenExec{n: 2}, "~/.minion", "20261123-120000", script)
+	id, err := launch(&takenExec{n: 2}, "~/.minion", "20261123T120000Z", script)
 	if err != nil || len(ids) != 3 || id != ids[2] {
 		t.Fatalf("id %q err %v tries %v", id, err, ids)
 	}
-	if !strings.HasSuffix(id, "-20261123-120000") {
+	if !strings.HasSuffix(id, "-20261123T120000Z") {
 		t.Errorf("id %q lacks the time", id)
 	}
-	if _, err := launch(&takenExec{n: 5}, "~/.minion", "20261123-120000", script); err == nil {
+	if _, err := launch(&takenExec{n: 5}, "~/.minion", "20261123T120000Z", script); err == nil {
 		t.Error("want an error when every id is taken")
 	}
 }
