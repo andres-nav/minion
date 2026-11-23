@@ -437,16 +437,23 @@ fn overrides_are_refused_as_root() {
     for flag in ["--sysfs", "--state-dir", "--lock"] {
         let a = strings(&[flag, "/tmp/x"]);
         refused(
-            crate::parse_opts(&a, 0),
+            crate::parse_opts("restore", &a, 0),
             &format!("{flag} is refused as root"),
         );
-        assert!(crate::parse_opts(&a, 1000).unwrap().test);
+        assert!(crate::parse_opts("restore", &a, 1000).unwrap().test);
     }
     let out = strings(&["--out", "/tmp/x"]);
-    refused(crate::parse_opts(&out, 0), "--out is refused as root");
-    assert!(!crate::parse_opts(&out, 1000).unwrap().test);
-    assert!(!crate::parse_opts(&strings(&["q.json"]), 0).unwrap().test);
-    let o = crate::parse_opts(&[], 0).unwrap();
+    refused(
+        crate::parse_opts("run", &out, 0),
+        "--out is refused as root",
+    );
+    assert!(!crate::parse_opts("run", &out, 1000).unwrap().test);
+    assert!(
+        !crate::parse_opts("queue", &strings(&["q.json"]), 0)
+            .unwrap()
+            .test
+    );
+    let o = crate::parse_opts("status", &[], 0).unwrap();
     assert_eq!(
         (o.sysfs.to_str(), o.state_dir.to_str()),
         (Some("/sys"), Some("/var/lib/minion"))
@@ -562,10 +569,19 @@ fn run_refusals() {
         crate::run::run(&f.sys, &out, &[], 1000),
         "run needs a command",
     );
+    let nodir = f.root.join("nodir/run.json");
+    refused(crate::run::run(&f.sys, &nodir, &cmd, 1000), "No such file");
     fs::write(&out, "old").unwrap();
     refused(crate::run::run(&f.sys, &out, &cmd, 1000), "exists"); // never overwrite a result
     assert!(!marker.exists());
     assert_eq!(fs::read_to_string(&out).unwrap(), "old");
+    fs::remove_file(&out).unwrap();
+    let missing = strings(&["/nonexistent/cmd"]);
+    refused(
+        crate::run::run(&f.sys, &out, &missing, 1000),
+        "/nonexistent/cmd",
+    );
+    assert!(!out.exists()); // no empty result left behind
 }
 
 #[test]
@@ -917,6 +933,11 @@ fn bad_queues_are_refused_before_anything_runs() {
             "names take",
         ),
         (with("name", json!("../up")), "names take"),
+        (with("name", json!("n".repeat(65))), "up to 64"),
+        (
+            with("workloads", json!({"w".repeat(65): {"cmd": ["true"]}})),
+            "up to 64",
+        ),
         (with("reps", json!(0)), "reps: needs a positive integer"),
         (with("seed", json!(-1)), "seed: needs an unsigned integer"),
         (with("settle_s", json!(-1)), "settle_s: needs seconds >= 0"),
@@ -936,6 +957,7 @@ fn bad_queues_are_refused_before_anything_runs() {
         fs::write(&file, q.to_string()).unwrap();
         refused(crate::queue::run(&f.opts(), &file, 1000), why);
     }
+    assert!(parse(&with("name", json!("n".repeat(64)))).is_ok());
     fs::write(&file, ok.to_string()).unwrap();
     refused(
         crate::queue::run(&f.opts(), &file, 0),
@@ -951,8 +973,29 @@ fn privileged_verbs_go_through_sudo() {
     assert_eq!(c.get_program().to_str(), Some("sudo"));
     let args: Vec<_> = c.get_args().map(|a| a.to_str().unwrap()).collect();
     assert_eq!(args, ["-n", "minion", "restore", "--held"]);
-    assert!(crate::parse_opts(&strings(&["--held"]), 0).unwrap().held); // allowed as root
-    assert!(!crate::parse_opts(&[], 0).unwrap().held);
+    let held = strings(&["--held"]);
+    assert!(crate::parse_opts("restore", &held, 0).unwrap().held); // allowed as root
+    assert!(!crate::parse_opts("restore", &[], 0).unwrap().held);
+}
+
+#[test]
+fn options_and_keys_are_refused_where_they_mean_nothing() {
+    let f = Fake::new("misplaced");
+    let snapshot = strings(&["snapshot", "--sysfs", f.sys.to_str().unwrap(), "--", "true"]);
+    refused(crate::run(&snapshot), "-- CMD is only for run");
+    let (held, out) = (strings(&["--held"]), strings(&["--out", "x"]));
+    refused(
+        crate::parse_opts("status", &held, 1000),
+        "status has no option",
+    );
+    refused(
+        crate::parse_opts("snapshot", &out, 1000),
+        "snapshot has no option",
+    );
+    let apply = json!({"queue": "q-1", "profile": {}, "extra": 1});
+    refused(f.verb("apply", true, apply), r#"unknown key "extra""#);
+    let restore = json!({"queue": "q-1", "profile": {}});
+    refused(f.verb("restore", true, restore), r#"unknown key "profile""#);
 }
 
 #[test]

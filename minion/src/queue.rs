@@ -455,9 +455,9 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
         let ok = n
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b));
-        if n.is_empty() || n.starts_with('.') || !ok {
+        if n.is_empty() || n.len() > 64 || n.starts_with('.') || !ok {
             return Err(format!(
-                "{n:?}: names take letters, digits, '.', '_' and '-'"
+                "{n:?}: names take up to 64 letters, digits, '.', '_' and '-'"
             ));
         }
     }
@@ -465,7 +465,11 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
 }
 
 /// v as an object that has only the given keys.
-fn object<'a>(v: &'a Value, what: &str, keys: &[&str]) -> Result<&'a Map<String, Value>, String> {
+pub fn object<'a>(
+    v: &'a Value,
+    what: &str,
+    keys: &[&str],
+) -> Result<&'a Map<String, Value>, String> {
     let m = v.as_object().ok_or(format!("{what}: needs an object"))?;
     match m.keys().find(|k| !keys.contains(&k.as_str())) {
         Some(k) => Err(format!("{what}: unknown key {k:?}")),

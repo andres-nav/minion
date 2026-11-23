@@ -221,14 +221,17 @@ pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, Stri
         return Err("run is refused as root: it runs your command".into());
     }
     let (prog, args) = cmd.split_first().ok_or("run needs a command after --")?;
-    if out.exists() {
-        return Err(format!("{} exists", out.display()));
-    }
+    let file = File::create_new(out).map_err(|e| format!("create {}: {e}", out.display()))?;
     let meters = meters(sys, &["rapl".into()])?;
     let mut command = Command::new(prog);
     command.args(args);
-    let (run, status) = measure(sys, &meters, command)?;
-    write_new(out, &run)?;
+    let measured = measure(sys, &meters, command);
+    if measured.is_err() {
+        let _ = fs::remove_file(out); // ours, and still empty
+    }
+    let (run, status) = measured?;
+    serde_json::to_writer_pretty(file, &run)
+        .map_err(|e| format!("write {}: {e}", out.display()))?;
     Ok(status.code().unwrap_or(128 + status.signal().unwrap_or(0)) as u8)
 }
 

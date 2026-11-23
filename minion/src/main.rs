@@ -79,10 +79,11 @@ fn run(args: &[String]) -> Result<u8, String> {
         return Err(USAGE.into());
     };
     let (opts, cmd) = match rest.iter().position(|a| a == "--") {
-        Some(i) => (&rest[..i], &rest[i + 1..]),
+        Some(i) if verb == "run" => (&rest[..i], &rest[i + 1..]),
+        Some(_) => return Err(format!("-- CMD is only for run\n\n{USAGE}")),
         None => (rest, &[][..]),
     };
-    let o = parse_opts(opts, geteuid())?;
+    let o = parse_opts(verb, opts, geteuid())?;
     match (verb.as_str(), &o.args[..]) {
         ("run", []) => return run::run(&o.sysfs, &o.out, cmd, geteuid()),
         ("queue", [file]) => return queue::run(&o, Path::new(file), geteuid()),
@@ -126,6 +127,12 @@ fn privileged(o: &Opts, verb: &str, held: bool, input: &[u8]) -> Result<String, 
         _ => serde_json::from_slice(input).map_err(|e| format!("stdin: {e}"))?,
     };
     let (queue, profile) = if held {
+        let keys: &[_] = if verb == "apply" {
+            &["queue", "profile"]
+        } else {
+            &["queue"]
+        };
+        queue::object(&input, "stdin", keys)?;
         let id = input["queue"].as_str().ok_or("stdin: needs the queue id")?;
         (Some(id), &input["profile"])
     } else {
@@ -162,7 +169,7 @@ fn privileged(o: &Opts, verb: &str, held: bool, input: &[u8]) -> Result<String, 
 }
 
 /// Root must not let a caller point its reads and writes at other files.
-fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
+fn parse_opts(verb: &str, args: &[String], euid: u32) -> Result<Opts, String> {
     let mut o = Opts {
         sysfs: "/sys".into(),
         state_dir: ["/var/lib", NAME].iter().collect(),
@@ -178,8 +185,8 @@ fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
             "--sysfs" => &mut o.sysfs,
             "--state-dir" => &mut o.state_dir,
             "--lock" => &mut o.lock,
-            "--out" => &mut o.out,
-            "--held" => {
+            "--out" if verb == "run" => &mut o.out,
+            "--held" if verb == "apply" || verb == "restore" => {
                 o.held = true;
                 continue;
             }
@@ -187,7 +194,7 @@ fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
                 o.args.push(a.into());
                 continue;
             }
-            _ => return Err(format!("unknown option {flag:?}\n\n{USAGE}")),
+            _ => return Err(format!("{verb} has no option {flag:?}\n\n{USAGE}")),
         };
         if euid == 0 {
             return Err(format!("{flag} is refused as root"));
