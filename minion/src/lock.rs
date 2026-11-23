@@ -9,26 +9,11 @@ use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::Instant;
 
+use crate::ffi::{O_NONBLOCK, SIGKILL, kill};
 use crate::utc::log;
-
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(not(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-)))]
-compile_error!("O_NONBLOCK is only known here for Linux on x86_64 and aarch64");
-const SIGKILL: i32 = 9;
 
 /// Set in each workload's environment, which its children inherit.
 pub const MARK: &str = "MINION_WORKLOAD";
-
-unsafe extern "C" {
-    safe fn kill(pid: i32, sig: i32) -> i32;
-}
 
 /// Takes the queue lock, sleeping in the kernel while another queue holds it.
 /// Returns the lock and, if it waited, for whom.

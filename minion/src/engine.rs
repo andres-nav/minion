@@ -33,13 +33,10 @@ pub fn apply(j: &mut Journal, sys: &Path, profile: &State) -> Result<(), String>
     Ok(())
 }
 
-/// Puts back every saved value and closes the journal. An object that differs
-/// from both its saved and its last applied value was changed by someone else:
-/// it is kept and returned as a conflict.
+/// Puts back every saved value and closes the open journal. An object that
+/// differs from both its saved and its last applied value was changed by someone
+/// else: it is kept and returned as a conflict.
 pub fn restore(mut j: Journal, sys: &Path) -> Result<Vec<Value>, String> {
-    if !j.exists() {
-        return Ok(vec![]);
-    }
     let saved = state_of(&j.lines, "saved")?;
     let applied = match (last(&j.lines, "apply"), last(&j.lines, "applied")) {
         (None, _) => Some(saved.clone()), // nothing was written
@@ -65,7 +62,7 @@ pub fn restore(mut j: Journal, sys: &Path) -> Result<Vec<Value>, String> {
                 conflicts.push(json!({"setting": id, "object": obj, "saved": old, "now": cur}));
             }
         }
-        s.restore(sys, &back)?;
+        s.apply(sys, &back)?;
     }
     j.append(json!({"t": "restored", "conflicts": conflicts}))?;
     j.append(json!({"t": "close"}))?;

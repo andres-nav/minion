@@ -21,8 +21,7 @@ struct Fake {
 
 impl Fake {
     fn new(name: &str) -> Fake {
-        let root =
-            std::env::temp_dir().join(format!("minion-{}-{name}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("minion-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let cpu = root.join("sys/devices/system/cpu");
         for n in 0..2 {
@@ -148,7 +147,7 @@ fn restore_twice_is_harmless() {
     let before = snapshot(&f.sys).unwrap();
     apply(&f.sys, &f.state, &stable()).unwrap();
     restore(&f.sys, &f.state).unwrap();
-    assert!(restore(&f.sys, &f.state).unwrap().is_empty());
+    assert_eq!(f.verb("restore", false, Value::Null), Ok(String::new()));
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert_eq!(f.done().len(), 6);
 }

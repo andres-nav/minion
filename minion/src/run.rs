@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 
 use serde_json::{Map, Value, json};
 
+use crate::ffi::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, clock_gettime};
 use crate::{settings, utc};
 
 /// Something read at the edges of a run, never in between.
@@ -36,19 +37,6 @@ struct Zone {
     range_uj: u64,
     max_uw: Option<u64>,
 }
-
-#[repr(C)]
-struct Timespec {
-    sec: i64,
-    nsec: i64,
-}
-
-unsafe extern "C" {
-    fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
-}
-
-const CLOCK_REALTIME: i32 = 0;
-const CLOCK_MONOTONIC: i32 = 1;
 
 /// The monotonic and the realtime clock in ns, read back to back.
 pub fn clocks() -> Result<Vec<u64>, String> {

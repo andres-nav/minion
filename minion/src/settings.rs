@@ -60,10 +60,6 @@ pub trait Setting {
         }
         Ok(())
     }
-
-    fn restore(&self, sys: &Path, saved: &Values) -> Result<(), String> {
-        self.apply(sys, saved)
-    }
 }
 
 /// In write order: a setting comes before the ones whose valid range it defines.
