@@ -532,6 +532,7 @@ fn run_reports_energy_per_zone() {
     assert_eq!(zones["intel-rapl:1"]["joules"], 3.0); // wrapped once
     assert_eq!(zones["intel-rapl:0:0"]["joules"], json!(null)); // no limit: can't rule out two wraps
     assert_eq!(run["state"]["before"], run["state"]["after"]);
+    assert_eq!(run.get("leftovers"), None); // its command isn't in a group of its own
 }
 
 #[test]
