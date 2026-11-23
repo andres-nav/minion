@@ -134,6 +134,7 @@ queue_ok() {
   done
   [ "$(grep -c '"event":"run_failed"' "$d/events.jsonl")" -eq "$3" ] || fail "$d: want $3 failed"
   grep -q '"event":"queue_done"' "$d/events.jsonl" || fail "$d: no queue_done"
+  grep -q '"event":"restore_ok".*end of queue' "$d/events.jsonl" || fail "$d: the queue didn't restore at its end"
 }
 
 # notified QUEUE EVENT...: the notify run hook got each event of the queue.
