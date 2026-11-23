@@ -112,7 +112,7 @@ fn sync_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| err("fsync", dir, e))
 }
 
-fn now_ns() -> u128 {
+pub fn now_ns() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()

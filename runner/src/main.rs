@@ -1,12 +1,13 @@
 mod engine;
 mod journal;
+mod queue;
 mod run;
 mod settings;
 #[cfg(test)]
 mod tests;
 
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde_json::{Value, json};
@@ -15,15 +16,17 @@ const NAME: &str = env!("CARGO_PKG_NAME");
 const USAGE: &str = concat!(
     "usage: ",
     env!("CARGO_PKG_NAME"),
-    " <verb> [--sysfs DIR] [--state-dir DIR] [--out FILE] [-- CMD...]
+    " <verb> [--sysfs DIR] [--state-dir DIR] [--lock FILE] [--out FILE] [Q.json] [-- CMD...]
 
   snapshot   print the current settings as JSON
   apply      apply a profile (JSON on stdin), saving the original settings first
   restore    put the original settings back and close the journal
   status     show the open journal and what differs from the original settings
   run        run CMD, reading the meters right before and after it, into --out (default run.json)
+  queue      run every run of the queue in Q.json under its profile, then restore
 
---sysfs and --state-dir are for tests and are refused as root."
+--sysfs, --state-dir and --lock are for tests and are refused as root. With them, queue runs
+apply and restore in-process instead of through sudo."
 );
 
 unsafe extern "C" {
@@ -33,7 +36,11 @@ unsafe extern "C" {
 struct Opts {
     sysfs: PathBuf,
     state_dir: PathBuf,
+    lock: PathBuf,
     out: PathBuf,
+    args: Vec<String>,
+    /// Set by a test override: queue then calls the privileged verbs in-process.
+    test: bool,
 }
 
 fn main() -> ExitCode {
@@ -56,8 +63,11 @@ fn run(args: &[String]) -> Result<u8, String> {
         None => (rest, &[][..]),
     };
     let o = parse_opts(opts, geteuid())?;
-    if verb == "run" {
-        return run::run(&o.sysfs, &o.out, cmd, geteuid());
+    match (verb.as_str(), &o.args[..]) {
+        ("run", []) => return run::run(&o.sysfs, &o.out, cmd, geteuid()),
+        ("queue", [file]) => return queue::run(&o, Path::new(file), geteuid()),
+        (_, []) => {}
+        _ => return Err(USAGE.into()),
     }
     match verb.as_str() {
         "snapshot" => print(json!(settings::snapshot(&o.sysfs)?)),
@@ -83,20 +93,29 @@ fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
     let mut o = Opts {
         sysfs: "/sys".into(),
         state_dir: ["/var/lib", NAME].iter().collect(),
+        lock: format!("/run/lock/{NAME}.lock").into(),
         out: "run.json".into(),
+        args: vec![],
+        test: false,
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let field = match flag.as_str() {
             "--sysfs" => &mut o.sysfs,
             "--state-dir" => &mut o.state_dir,
+            "--lock" => &mut o.lock,
             "--out" => &mut o.out,
+            a if !a.starts_with('-') => {
+                o.args.push(a.into());
+                continue;
+            }
             _ => return Err(format!("unknown option {flag:?}\n\n{USAGE}")),
         };
         if euid == 0 {
             return Err(format!("{flag} is refused as root"));
         }
         *field = it.next().ok_or(format!("{flag} needs a value"))?.into();
+        o.test |= flag != "--out";
     }
     Ok(o)
 }
