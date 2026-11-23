@@ -932,45 +932,6 @@ fn a_stop_during_the_settle_ends_the_queue_at_once() {
 }
 
 #[test]
-fn a_stop_just_before_the_workload_starts_reaches_it() {
-    let _serial = serial();
-    let f = Fake::new("stop-early");
-    let meters = crate::run::meters(&f.sys, &[]).unwrap();
-    let cmd = crate::queue::workload("sleep", &strings(&["5"]), "none");
-    crate::run::STOP.store(15, SeqCst);
-    let measured = crate::run::measure(&f.sys, &meters, cmd);
-    crate::run::STOP.store(0, SeqCst);
-    assert_eq!(measured.unwrap().1.signal(), Some(15));
-}
-
-#[test]
-fn a_failing_notify_does_not_fail_the_queue() {
-    let _serial = serial();
-    let f = Fake::new("queue-notify");
-    for (name, cmd) in [
-        ("exits", json!(["false"])),
-        ("missing", json!(["/nonexistent/notify"])),
-    ] {
-        let (code, dir) = f.queue(json!({
-            "name": name, "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}},
-            "reps": 2, "notify": {"cmd": cmd},
-        }));
-        assert_eq!(code, 0);
-        assert_eq!(
-            kinds(&dir),
-            [
-                "queue_started",
-                "run_done",
-                "run_done",
-                "restore_ok",
-                "queue_done"
-            ]
-        );
-        assert_eq!(events(&dir).pop().unwrap()["status"], "ok");
-    }
-}
-
-#[test]
 fn a_thermal_wait_holds_each_run_until_the_machine_is_back_near_its_start() {
     let _serial = serial();
     let f = Fake::new("thermal");
@@ -1047,6 +1008,45 @@ fn a_thermal_wait_holds_each_run_until_the_machine_is_back_near_its_start() {
 }
 
 #[test]
+fn a_stop_just_before_the_workload_starts_reaches_it() {
+    let _serial = serial();
+    let f = Fake::new("stop-early");
+    let meters = crate::run::meters(&f.sys, &[]).unwrap();
+    let cmd = crate::queue::workload("sleep", &strings(&["5"]), "none");
+    crate::run::STOP.store(15, SeqCst);
+    let measured = crate::run::measure(&f.sys, &meters, cmd);
+    crate::run::STOP.store(0, SeqCst);
+    assert_eq!(measured.unwrap().1.signal(), Some(15));
+}
+
+#[test]
+fn a_failing_notify_does_not_fail_the_queue() {
+    let _serial = serial();
+    let f = Fake::new("queue-notify");
+    for (name, cmd) in [
+        ("exits", json!(["false"])),
+        ("missing", json!(["/nonexistent/notify"])),
+    ] {
+        let (code, dir) = f.queue(json!({
+            "name": name, "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}},
+            "reps": 2, "notify": {"cmd": cmd},
+        }));
+        assert_eq!(code, 0);
+        assert_eq!(
+            kinds(&dir),
+            [
+                "queue_started",
+                "run_done",
+                "run_done",
+                "restore_ok",
+                "queue_done"
+            ]
+        );
+        assert_eq!(events(&dir).pop().unwrap()["status"], "ok");
+    }
+}
+
+#[test]
 fn bad_queues_are_refused_before_anything_runs() {
     let f = Fake::new("queue-refused");
     let ok = json!({
@@ -1098,18 +1098,6 @@ fn bad_queues_are_refused_before_anything_runs() {
         (with("seed", json!(-1)), "seed: needs an unsigned integer"),
         (with("settle_s", json!(-1)), "settle_s: needs seconds >= 0"),
         (
-            with("meters", json!(["time", "gpu"])),
-            r#"unknown meter "gpu""#,
-        ),
-        (
-            with("notify", json!({"cmd": ["true"], "events": []})),
-            r#"key "events""#,
-        ),
-        (
-            with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
-            "timeout_s: needs seconds",
-        ),
-        (
             with("thermal", json!({"band": 2})),
             r#"thermal: unknown key "band""#,
         ),
@@ -1120,6 +1108,18 @@ fn bad_queues_are_refused_before_anything_runs() {
         (
             with("thermal", json!({"timeout_s": "x"})),
             "thermal timeout_s: needs seconds",
+        ),
+        (
+            with("meters", json!(["time", "gpu"])),
+            r#"unknown meter "gpu""#,
+        ),
+        (
+            with("notify", json!({"cmd": ["true"], "events": []})),
+            r#"key "events""#,
+        ),
+        (
+            with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
+            "timeout_s: needs seconds",
         ),
     ] {
         fs::write(&file, q.to_string()).unwrap();
