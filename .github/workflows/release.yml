@@ -35,6 +35,19 @@ jobs:
       - name: runner (cargo test, cargo clippy)
         run: nix develop --command sh -c 'cd runner && cargo test && cargo clippy --all-targets -- -D warnings'
 
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: minion + energy-runner end to end (no ssh, no root)
+        run: nix develop --command make e2e
+
   build:
     runs-on: ubuntu-latest
     strategy:
@@ -83,7 +96,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [test, build]
+    needs: [test, e2e, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
