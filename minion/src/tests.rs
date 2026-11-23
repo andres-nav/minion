@@ -673,7 +673,7 @@ impl crate::run::Meter for Stamp {
 #[test]
 fn a_later_meter_is_read_around_the_earlier_ones() {
     let f = Fake::new("nest");
-    let mut meters = crate::run::meters(&f.sys, &[]).unwrap();
+    let mut meters = crate::run::meters(&f.sys, &[], "").unwrap();
     meters.push(Box::new(Stamp));
     let cmd = std::process::Command::new("true");
     let (run, _) = crate::run::measure(&f.sys, &meters, cmd).unwrap();
@@ -1083,7 +1083,7 @@ fn a_stop_during_the_settle_ends_the_queue_at_once() {
 fn a_stop_just_before_the_workload_starts_reaches_it() {
     let _serial = serial();
     let f = Fake::new("stop-early");
-    let meters = crate::run::meters(&f.sys, &[]).unwrap();
+    let meters = crate::run::meters(&f.sys, &[], "").unwrap();
     let cmd = crate::queue::workload("sleep", &strings(&["5"]), "none");
     crate::run::STOP.store(15, SeqCst);
     let measured = crate::run::measure(&f.sys, &meters, cmd);
@@ -1116,6 +1116,58 @@ fn a_failing_notify_does_not_fail_the_queue() {
         );
         assert_eq!(events(&dir).pop().unwrap()["status"], "ok");
     }
+}
+
+/// The run.json of a queue's only run.
+fn only_run(dir: &Path) -> Value {
+    let runs: Vec<_> = fs::read_dir(dir.join("runs")).unwrap().flatten().collect();
+    assert_eq!(runs.len(), 1);
+    read_json(&runs[0].path().join("run.json"))
+}
+
+#[test]
+fn a_cmd_meter_reads_numbers_outside_each_run() {
+    let _serial = serial();
+    let f = Fake::new("cmd-meter");
+    let n = f.root.join("n");
+    put(&n, "5");
+    let q = |meter: &str, timeout: f64| {
+        json!({"name": "cmdm", "profiles": {"p": {}}, "reps": 1,
+            "workloads": {"w": {"cmd": ["sh", "-c", format!("echo $(( $(cat {0}) + 2 )) > {0}", n.display())]}},
+            "meters": [{"cmd": ["sh", "-c", meter], "timeout_s": timeout}, "time"]})
+    };
+    let meter = format!("echo joules $(cat {}); echo; echo runs 1", n.display());
+    let (code, dir) = f.queue(q(&meter, 10.0));
+    assert_eq!(code, 0);
+    assert_eq!(
+        only_run(&dir)["meters"]["cmd"],
+        json!({"start": {"joules": 5.0, "runs": 1.0}, "end": {"joules": 7.0, "runs": 1.0},
+               "delta": {"joules": 2.0, "runs": 0.0}})
+    );
+    let names: Vec<_> = crate::run::meters(&f.sys, &[json!({"cmd": ["true"]}), json!("rapl")], "")
+        .unwrap()
+        .iter()
+        .map(|m| m.name())
+        .collect();
+    assert_eq!(names, ["time", "rapl", "cmd"]); // outermost
+
+    // A bad line, a failure or a timeout at the start edge: the run fails before its workload.
+    let t = Instant::now();
+    for (meter, why) in [
+        ("echo joules lots", r#""joules lots" is not `name number`"#),
+        ("exit 3", "exit status: 3"),
+        ("sleep 5", "killed after 200ms"),
+    ] {
+        fs::remove_dir_all(f.root.join("results")).unwrap();
+        let (code, dir) = f.queue(q(meter, 0.2));
+        assert_eq!(code, 1);
+        assert!(
+            events(&dir)[1]["detail"].as_str().unwrap().contains(why),
+            "{why}"
+        );
+    }
+    assert!(t.elapsed() < Duration::from_secs(4));
+    assert_eq!(fs::read_to_string(&n).unwrap().trim(), "7");
 }
 
 #[test]
@@ -1180,6 +1232,18 @@ fn bad_queues_are_refused_before_anything_runs() {
         (
             with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
             "timeout_s: needs seconds",
+        ),
+        (
+            with("meters", json!([{"cmd": ["true"], "every": 2}])),
+            r#"cmd meter: unknown key "every""#,
+        ),
+        (
+            with("meters", json!([{"cmd": []}])),
+            "cmd meter cmd: needs a command",
+        ),
+        (
+            with("meters", json!([{"cmd": ["true"], "timeout_s": -1}])),
+            "cmd meter timeout_s: needs seconds",
         ),
     ] {
         fs::write(&file, q.to_string()).unwrap();

@@ -465,6 +465,12 @@ check_exit() {
   ! exists "$T/remote/proj/results/energy/badvalue-*" || fail "a refused queue ran"
   machine_clean
 
+  # A cmd meter reads the fake RAPL counter around the run that adds 2 J to it.
+  queue cmdm 1 "$BASE" "$OK"
+  sed -i "s|\"out\"|\"meters\": [\"time\", {\"cmd\": [\"sh\", \"-c\", \"echo uj \$(cat $rapl/energy_uj)\"]}], \"out\"|" cmdm.json
+  want 0 cmdm gru run energy --host fake --arg cmdm.json
+  has "$(echo "$T"/remote/proj/results/energy/cmdm-*/runs/*/run.json)" '"delta":{"uj":2000000.0}'
+
   # The privileged verbs by hand, with the profile and the queue id on stdin.
   echo '{"cpu.governor": {"policy0": "performance"}}' | minion apply $R || fail "minion apply"
   grep -qx performance "$gov" || fail "apply: governor not set"
