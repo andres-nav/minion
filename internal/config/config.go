@@ -87,6 +87,7 @@ func (c *Config) NotifyFor(t Template) *Notify {
 type Host struct {
 	SSH       string `json:"ssh"`
 	RemoteDir string `json:"remote_dir"`
+	StateDir  string `json:"state_dir"` // jobs and the agent (default ~/.minion); keep it on local disk
 }
 
 // Template is a repo-type: standard verbs, freeform tasks, and the environment

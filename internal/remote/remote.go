@@ -55,10 +55,14 @@ func quoteExpandingVars(s string) string {
 	})
 }
 
-const jobsDir = ".minion/jobs"
+// JobsDir returns the jobs directory under a host's state dir, as one shell word.
+func JobsDir(stateDir string) string { return RemotePath(stateDir) + "/jobs" }
 
-// JobDir returns the remote job directory (with ~ for the remote shell to expand).
-func JobDir(id string) string { return "~/" + jobsDir + "/" + id }
+// JobDir returns a job's directory, as one shell word (ids are [a-z0-9_-]).
+func JobDir(stateDir, id string) string { return JobsDir(stateDir) + "/" + id }
+
+// IDTaken is LaunchCommand's exit code when the job's directory already exists.
+const IDTaken = 73
 
 // Meta is provenance recorded to <jobDir>/run.json for reproducibility.
 type Meta struct {
@@ -112,7 +116,8 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 	fmt.Fprintf(&b, "fail() { teardown; echo \"$1\" > %s/status; exit \"$1\"; }\n", jobDir)
 	// On kill/hangup, record a status (128+SIGTERM) and note the log, so the job
 	// doesn't stay "running" forever and the log shows it was killed.
-	fmt.Fprintf(&b, "trap 'echo \"[minion] killed\"; teardown; echo 143 > %s/status; exit 143' TERM INT HUP\n", jobDir)
+	fmt.Fprintf(&b, "killed() { echo \"[minion] killed\"; teardown; echo 143 > %s/status; exit 143; }\n", jobDir)
+	b.WriteString("trap killed TERM INT HUP\n")
 
 	for _, c := range j.Before {
 		fmt.Fprintf(&b, "( %s ) || fail $?\n", c)
@@ -150,14 +155,18 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 	return b.String()
 }
 
-// LaunchCommand saves the script (read from stdin) and starts it detached,
-// recording its pid. The job survives ssh disconnect via setsid (or nohup).
-func LaunchCommand(jobDir string) string {
+// LaunchCommand creates the job's directory (failing with IDTaken if it
+// exists), records this host's name, saves the script (read from stdin) and
+// starts it detached, recording its pid. umask 077 keeps the directory and the
+// script, which may hold secrets, private. The job survives ssh disconnect via
+// setsid (or nohup).
+func LaunchCommand(stateDir, id string) string {
 	return fmt.Sprintf(
-		"mkdir -p %[1]s && cat > %[1]s/run.sh && chmod 700 %[1]s/run.sh && "+
-			"{ if command -v setsid >/dev/null 2>&1; then setsid sh %[1]s/run.sh </dev/null >> %[1]s/log 2>&1 & "+
-			"else nohup sh %[1]s/run.sh </dev/null >> %[1]s/log 2>&1 & fi; echo $! > %[1]s/pid; }",
-		jobDir)
+		"(umask 077 && mkdir -p %[1]s && { mkdir %[2]s 2>/dev/null || exit %[3]d; } && "+
+			"uname -n > %[2]s/hostname && cat > %[2]s/run.sh) && chmod 700 %[2]s/run.sh && "+
+			"{ if command -v setsid >/dev/null 2>&1; then setsid sh %[2]s/run.sh </dev/null >> %[2]s/log 2>&1 & "+
+			"else nohup sh %[2]s/run.sh </dev/null >> %[2]s/log 2>&1 & fi; echo $! > %[2]s/pid; }",
+		JobsDir(stateDir), JobDir(stateDir, id), IDTaken)
 }
 
 // AttachCommand streams the job log from the start and follows until the job
@@ -171,28 +180,37 @@ func AttachCommand(jobDir string) string {
 		jobDir)
 }
 
-// KillCommand stops a running job (its process group, then the pid).
+// onThisHost is a shell test: the job in dir was launched on this host.
+func onThisHost(dir string) string {
+	return `[ "$(cat ` + dir + `/hostname 2>/dev/null)" = "$(uname -n)" ]`
+}
+
+// KillCommand stops a running job (its process group, then the pid). It refuses
+// a job of another host sharing the state dir: its pid means nothing here.
 func KillCommand(jobDir string) string {
 	return fmt.Sprintf(
-		"p=$(cat %[1]s/pid 2>/dev/null); "+
+		"%[2]s || { echo 'minion: no such job on this host' >&2; exit 1; }; "+
+			"p=$(cat %[1]s/pid 2>/dev/null); "+
 			"if [ -n \"$p\" ]; then kill -- -$p 2>/dev/null; kill $p 2>/dev/null; "+
 			"echo '[minion] killed' >> %[1]s/log 2>/dev/null; "+
 			"[ -e %[1]s/status ] || echo 143 > %[1]s/status; "+ // ensure it's not stuck "running"
 			"echo \"killed $p\"; "+
 			"else echo 'minion: no pid' >&2; exit 1; fi",
-		jobDir)
+		jobDir, onThisHost(jobDir))
 }
 
-// LatestJobCommand prints the most recently active job id (by mtime), if any.
-func LatestJobCommand() string {
-	return fmt.Sprintf("ls -1t ~/%s 2>/dev/null | head -1", jobsDir)
-}
-
-// PsCommand lists jobs as tab-separated id, task, started-epoch, status, repo.
-func PsCommand() string {
+// LatestJobCommand prints this host's most recently active job id (by mtime), if any.
+func LatestJobCommand(stateDir string) string {
 	return fmt.Sprintf(
-		"for d in ~/%s/*/; do [ -d \"$d\" ] || continue; id=$(basename \"$d\"); "+
+		"cd %s 2>/dev/null && for d in $(ls -1t); do %s && { echo \"$d\"; break; }; done; true",
+		JobsDir(stateDir), onThisHost(`"$d"`))
+}
+
+// PsCommand lists this host's jobs as tab-separated id, task, started-epoch, status, repo.
+func PsCommand(stateDir string) string {
+	return fmt.Sprintf(
+		"for d in %s/*/; do [ -d \"$d\" ] && %s || continue; id=$(basename \"$d\"); "+
 			"if [ -e \"$d/status\" ]; then st=\"exit $(cat \"$d/status\")\"; else st=running; fi; "+
 			"printf '%%s\\t%%s\\t%%s\\t%%s\\t%%s\\n' \"$id\" \"$(cat \"$d/task\" 2>/dev/null)\" \"$(cat \"$d/started\" 2>/dev/null)\" \"$st\" \"$(cat \"$d/repo\" 2>/dev/null)\"; done",
-		jobsDir)
+		JobsDir(stateDir), onThisHost(`"$d"`))
 }

@@ -20,11 +20,11 @@ func cmdKill(args []string) int {
 		return 2
 	}
 
-	client, _, err := executorFor(*host)
+	client, _, state, err := executorFor(*host)
 	if err != nil {
 		return errf("%v", err)
 	}
-	code, err := client.Run(remote.KillCommand(remote.JobDir(id)), nil, os.Stdout, os.Stderr)
+	code, err := client.Run(remote.KillCommand(remote.JobDir(state, id)), nil, os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("%v", err)
 	}

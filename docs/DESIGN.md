@@ -14,7 +14,7 @@ One verb works in every repo (`minion run <task>`, resolving build/test/lint/cle
 
 JSON, parsed with `encoding/json`. Global `~/.config/minion/config.json` (honors `MINION_CONFIG`, `XDG_CONFIG_HOME`), optionally overridden by a per-project `.minion.json`.
 
-- **`hosts`**: name → `{ ssh, remote_dir }`. `ssh` is the alias passed to the system `ssh` (so `~/.ssh/config` — ProxyJump, ControlMaster, etc. — is inherited). If a master from the user's own `ControlPath` is already running (`ssh -O check <alias>`), minion multiplexes over it instead of opening its own, so hosts that need interactive 2FA work after one manual `ssh <alias>`. `remote_dir` supports `{repo}`, a leading `~`, and `$VAR` / `${VAR}` expanded by the **remote** shell (e.g. `/scratch/$USER/{repo}`); an unset or empty variable fails the command instead of resolving to another directory.
+- **`hosts`**: name → `{ ssh, remote_dir, state_dir }`. `ssh` is the alias passed to the system `ssh` (so `~/.ssh/config` — ProxyJump, ControlMaster, etc. — is inherited). If a master from the user's own `ControlPath` is already running (`ssh -O check <alias>`), minion multiplexes over it instead of opening its own, so hosts that need interactive 2FA work after one manual `ssh <alias>`. `remote_dir` supports `{repo}`, a leading `~`, and `$VAR` / `${VAR}` expanded by the **remote** shell (e.g. `/scratch/$USER/{repo}`); an unset or empty variable fails the command instead of resolving to another directory. `state_dir` (default `~/.minion`, same expansion) holds the jobs and the agent; point it at local disk when the home is on NFS, so logs and job scripts stay off the network and other machines.
 - **`templates`**: name → a repo-type:
   - `detect`: filename markers; a template matches if **any** is present.
   - `host`: default host (a `hosts` key or raw ssh alias). **No global default** — if a remote op needs a host and none is set, minion fails loudly.
@@ -35,12 +35,12 @@ JSON, parsed with `encoding/json`. Global `~/.config/minion/config.json` (honors
 
 ## Execution
 
-Every run is a job (`internal/remote`) — local and remote differ only by the executor (`internal/ssh` remote, or a local `sh -c`). It's **tmux-free**: minion generates an sh wrapper (hooks run in `( )` subshells so a task's `exit`/`cd` can't kill it; order `before → command → on_success|on_failure → always`, a failing `before` still runs `always`), launches it detached via `setsid` (fallback `nohup`) with output to `~/.minion/jobs/<id>/log` and the exit code to `.../status`. Detached ⇒ **survives disconnect**; hooks and notifications run on the target, after the exit code is recorded, so a slow/failing notify never changes the job's status. Hooks and `notify` see `$MINION_EXIT`/`STATUS`/`DURATION`/`JOB_ID`/`TASK`/`HOST`.
+Every run is a job (`internal/remote`) — local and remote differ only by the executor (`internal/ssh` remote, or a local `sh -c`). It's **tmux-free**: minion generates an sh wrapper (hooks run in `( )` subshells so a task's `exit`/`cd` can't kill it; order `before → command → on_success|on_failure → always`, a failing `before` still runs `always`), launches it detached via `setsid` (fallback `nohup`) with output to `<state_dir>/jobs/<id>/log` and the exit code to `.../status`. The job dir is created with a plain `mkdir` under `umask 077` (private, since the script may export secrets); an id is a random name plus the start time (`brave_otter-20261123-142501`), and a taken id draws another name, so a job never reuses an old job's files. Each job dir records the target's `uname -n` in `hostname`. Detached ⇒ **survives disconnect**; hooks and notifications run on the target, after the exit code is recorded, so a slow/failing notify never changes the job's status. Hooks and `notify` see `$MINION_EXIT`/`STATUS`/`DURATION`/`JOB_ID`/`TASK`/`HOST`.
 
 - **Remote host:** `run` = sync → launch → attach (stream log until done, exit with the job's code) → **auto-fetch results (regardless of exit code)**. `--detach` skips attach/fetch and prints the id.
-- **`--host localhost`** (or `local`): the job runs **on this machine** with no ssh/sync/bootstrap, in the project dir; `ps`/`attach`/`kill` read the local `~/.minion/jobs`.
+- **`--host localhost`** (or `local`): the job runs **on this machine** with no ssh/sync/bootstrap, in the project dir; `ps`/`attach`/`kill` read the local `<state_dir>/jobs`.
 - **No host resolved ⇒ error** (pass `--host`; `--host localhost` to run here).
-- `attach [<id>]` replays the log and follows (defaults to the latest job); `ps` lists jobs (name/task/started/status); `kill <id>` stops the process group; each run writes `run.json` provenance (id, task, host, git SHA, dirty, start/end, exit).
+- `attach [<id>]` replays the log and follows (defaults to the latest job); `ps` lists jobs (name/task/started/status); `kill <id>` stops the process group; `ps` and the latest-job lookup (`attach`/`fetch` without an id) see only jobs launched on this host, and `kill` refuses another host's job, so machines sharing a state dir don't touch each other's jobs; each run writes `run.json` provenance (id, task, host, git SHA, dirty, start/end, exit).
 
 ## Sync (`internal/sync`)
 
@@ -53,7 +53,7 @@ Pure-Go, file-level, over the system `ssh` transport:
 
 ## Bootstrap (`internal/ssh`)
 
-`EnsureAgent` checks for a matching-version `minion` on the remote and, if missing/stale, uploads one for the **remote's** platform (`uname -sm` → GOOS/GOARCH). The running executable serves its own platform; cross-arch targets use a sibling `minion-<goos>-<goarch>` produced by `make cross`. Uploaded binaries are static (no libc dependency). `dev` builds always re-upload.
+`EnsureAgent` checks for a matching-version `minion` in `<state_dir>/bin` on the remote and, if missing/stale, uploads one for the **remote's** platform (`uname -sm` → GOOS/GOARCH). The running executable serves its own platform; cross-arch targets use a sibling `minion-<goos>-<goarch>` produced by `make cross`. Uploaded binaries are static (no libc dependency). `dev` builds always re-upload.
 
 ## Layout
 

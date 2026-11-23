@@ -56,21 +56,30 @@ func resolveHost(cfg *config.Config, r *config.Resolved, override string) (confi
 	return config.Host{}, name
 }
 
+// stateDir is where a host keeps its jobs and the agent.
+func stateDir(h config.Host) string {
+	if h.StateDir != "" {
+		return h.StateDir
+	}
+	return "~/.minion"
+}
+
 // executorFor resolves an executor for a command that doesn't bootstrap or sync
 // (attach/kill/ps): a local executor for a localhost alias, else an ssh client.
-func executorFor(override string) (execer, string, error) {
+// It also returns the host's alias and state dir.
+func executorFor(override string) (execer, string, string, error) {
 	cfg, r, err := resolveContext()
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	_, alias := resolveHost(cfg, r, override)
+	h, alias := resolveHost(cfg, r, override)
 	if alias == "" {
-		return nil, "", errNoHost
+		return nil, "", "", errNoHost
 	}
 	if isLocalAlias(alias) {
-		return localExec{}, alias, nil
+		return localExec{}, alias, stateDir(h), nil
 	}
-	return ssh.New(alias), alias, nil
+	return ssh.New(alias), alias, stateDir(h), nil
 }
 
 // remoteTarget bundles an executor (ssh or local) with its resolved context.
@@ -80,6 +89,7 @@ type remoteTarget struct {
 	alias    string
 	host     config.Host // resolved host (for computing dependency dirs)
 	dir      string      // working/destination directory
+	state    string      // the host's state dir (jobs, agent)
 	local    bool
 	resolved *config.Resolved
 }
@@ -94,11 +104,11 @@ func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remot
 	}
 	if isLocalAlias(alias) {
 		// run in the project itself; no sync, no bootstrap.
-		return &remoteTarget{exec: localExec{}, alias: alias, dir: r.Root, local: true, resolved: r}, nil
+		return &remoteTarget{exec: localExec{}, alias: alias, dir: r.Root, state: stateDir(host), local: true, resolved: r}, nil
 	}
 	client := ssh.New(alias)
 	client.Open() // one multiplexed connection for the whole command (incl. bootstrap)
-	invoke, err := client.EnsureAgent(version, agentBinaryFor)
+	invoke, err := client.EnsureAgent(stateDir(host), version, agentBinaryFor)
 	if err != nil {
 		client.Close()
 		return nil, err
@@ -109,6 +119,7 @@ func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remot
 		alias:    alias,
 		host:     host,
 		dir:      remoteDirFor(r.Template.RemoteDir, host.RemoteDir, r.Root),
+		state:    stateDir(host),
 		resolved: r,
 	}, nil
 }

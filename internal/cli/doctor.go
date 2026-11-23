@@ -64,8 +64,8 @@ func cmdDoctor(args []string) int {
 	}
 
 	for _, n := range names {
-		alias := n
-		if h, ok := cfg.Hosts[n]; ok && h.SSH != "" {
+		h, alias := cfg.Hosts[n], n
+		if h.SSH != "" {
 			alias = h.SSH
 		}
 		if isLocalAlias(alias) {
@@ -79,7 +79,7 @@ func cmdDoctor(args []string) int {
 			problems++
 			continue
 		}
-		invoke, err := c.EnsureAgent(version, agentBinaryFor)
+		invoke, err := c.EnsureAgent(stateDir(h), version, agentBinaryFor)
 		if err != nil {
 			fmt.Printf("host %-14s FAIL  agent: %v\n", n, err)
 			problems++

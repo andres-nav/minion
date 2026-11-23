@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/andres-nav/minion/internal/remote"
 )
 
 // ResolveAgentBinary picks the local minion binary to upload for the remote's
@@ -46,11 +48,6 @@ func splitPlatform(p string) (goos, goarch string, ok bool) {
 	}
 	return goos, goarch, true
 }
-
-const (
-	remoteBinDir = ".minion/bin"
-	remoteBin    = ".minion/bin/minion" // relative to remote $HOME
-)
 
 // Client runs commands on a remote host via the system ssh binary, inheriting
 // the user's ~/.ssh/config (ProxyJump, ControlMaster, ProxyCommand, …).
@@ -220,7 +217,8 @@ func (c *Client) Output(command string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-func remoteInvoke() string { return "~/" + remoteBin }
+// agentDir is where the agent lives under a host's state dir, as one shell word.
+func agentDir(stateDir string) string { return remote.RemotePath(stateDir) + "/bin" }
 
 // RemotePlatform returns the remote's GOOS/GOARCH (via `uname -sm`).
 func (c *Client) RemotePlatform() (string, error) {
@@ -231,13 +229,13 @@ func (c *Client) RemotePlatform() (string, error) {
 	return unameToGo(unm), nil
 }
 
-// EnsureAgent makes sure a minion binary matching version is present on the
-// remote and returns its invocation path. When an upload is needed it asks
+// EnsureAgent makes sure a minion binary matching version is present in the
+// remote's stateDir and returns its invocation path. When an upload is needed it asks
 // binaryFor for a local binary built for the remote's platform, so cross-arch
 // hosts (e.g. a darwin laptop bootstrapping a linux box) work. A "dev" version
 // is always re-uploaded.
-func (c *Client) EnsureAgent(version string, binaryFor func(platform string) (string, error)) (string, error) {
-	invoke := remoteInvoke()
+func (c *Client) EnsureAgent(stateDir, version string, binaryFor func(platform string) (string, error)) (string, error) {
+	invoke := agentDir(stateDir) + "/minion"
 
 	// "dev" and "-dirty" builds vary without the version string changing, so
 	// always re-upload them; only tagged/clean versions use the fast path.
@@ -255,7 +253,7 @@ func (c *Client) EnsureAgent(version string, binaryFor func(platform string) (st
 	if err != nil {
 		return "", err
 	}
-	if err := c.upload(bin); err != nil {
+	if err := c.upload(stateDir, bin); err != nil {
 		return "", err
 	}
 
@@ -269,15 +267,15 @@ func (c *Client) EnsureAgent(version string, binaryFor func(platform string) (st
 	return invoke, nil
 }
 
-func (c *Client) upload(localBinary string) error {
+func (c *Client) upload(stateDir, localBinary string) error {
 	f, err := os.Open(localBinary)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	invoke := remoteInvoke()
-	remoteCmd := fmt.Sprintf("mkdir -p ~/%s && cat > %s && chmod 755 %s", remoteBinDir, invoke, invoke)
+	dir := agentDir(stateDir)
+	remoteCmd := fmt.Sprintf("(umask 077 && mkdir -p %[1]s) && cat > %[1]s/minion && chmod 755 %[1]s/minion", dir)
 	cmd := c.ssh(remoteCmd)
 	cmd.Stdin = f
 	var errb bytes.Buffer
