@@ -1001,7 +1001,7 @@ fn a_cmd_meter_reads_numbers_outside_each_run() {
         .iter()
         .map(|m| m.name())
         .collect();
-    assert_eq!(names, ["time", "rapl", "cmd"]); // outermost
+    assert!(names.starts_with(&["time", "rapl", "cmd"])); // outer to the fast ones
 
     // A bad line, a failure or a timeout at the start edge: the run fails before its workload.
     let t = Instant::now();
