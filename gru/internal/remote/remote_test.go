@@ -186,8 +186,16 @@ func TestKilledJobRecordsAndNotifies(t *testing.T) {
 		t.Errorf("agent calls %q", b)
 	}
 	// A finished job is refused: its pid may belong to another process now.
+	other := exec.Command("sleep", "30")
+	other.Start()
+	defer other.Process.Kill()
+	os.WriteFile(filepath.Join(jd, "pid"), []byte(strconv.Itoa(other.Process.Pid)), 0o600)
 	if _, code := sh(t, KillCommand(ShellQuote(jd)), ""); code != 1 {
 		t.Errorf("kill of a finished job: exit %d, want 1", code)
+	}
+	var ws syscall.WaitStatus
+	if pid, _ := syscall.Wait4(other.Process.Pid, &ws, syscall.WNOHANG, nil); pid != 0 {
+		t.Errorf("kill signalled the pid of a finished job: %v", ws)
 	}
 	if b, _ := os.ReadFile(filepath.Join(jd, "log")); strings.Count(string(b), "killed") != 1 {
 		t.Errorf("the finished job's log changed: %q", b)
