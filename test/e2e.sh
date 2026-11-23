@@ -441,6 +441,15 @@ check_exit() {
   ! exists "$T/remote/proj/results/energy/unknown-*" || fail "a refused queue ran"
   ! exists "$T/remote/proj/results/energy/badvalue-*" || fail "a refused queue ran"
   machine_clean
+
+  # The privileged verbs by hand, with the profile and the queue id on stdin.
+  echo '{"cpu.governor": {"policy0": "performance"}}' | minion apply $R || fail "minion apply"
+  grep -qx performance "$gov" || fail "apply: governor not set"
+  minion status $R | tr -d ' \n' | grep -q '"policy0":"performance"' || fail "status: no change shown"
+  echo '{"queue": "nope"}' | minion restore --held $R 2> "$T/held.out" && fail "restore --held ran for another queue"
+  grep -q "doesn't hold the queue lock" "$T/held.out" || fail "restore --held: no clear message"
+  minion restore $R || fail "minion restore"
+  machine_clean
 }
 
 check_snapshot() {
