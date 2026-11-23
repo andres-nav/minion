@@ -397,6 +397,9 @@ EOF
   env -u GRU_CONFIG XDG_CONFIG_HOME="$T/xdg" gru list | grep -q "template: x" || fail "XDG_CONFIG_HOME not used"
   env -u GRU_CONFIG XDG_CONFIG_HOME="$T/xdg" gru sync 2> "$T/nohost.out" && fail "synced with no host"
   grep -q "no host configured" "$T/nohost.out" || fail "no host: no clear message"
+  # A template whose host is this machine lists the project dir as where tasks run.
+  echo '{"host": "localhost", "tasks": {"t": "true"}}' > .gru.json
+  gru list --json | grep -q "\"remote_dir\": \"$T/xdgproj\"" || fail "list: a local host's dir is not the project"
 }
 
 # Every name and readable time the checks above left is UTC: it ends in Z and is
