@@ -27,7 +27,7 @@ const USAGE: &str = concat!(
   snapshot   print the current settings as JSON
   apply      apply a profile (JSON on stdin), saving the original settings first
   restore    put the original settings back and close the journal
-  status     show the open journal and what differs from the original settings
+  status     show the open journal and what differs from the original settings (as root)
   run        run CMD, reading the meters right before and after it, into --out (default run.json)
   queue      run every run of the queue in Q.json under its profile, then restore
   reap       kill the leftover workloads of a queue that died (as the user, never as root)
