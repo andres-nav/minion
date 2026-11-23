@@ -19,8 +19,8 @@ func cmdList(args []string) int {
 	}
 	tm := r.Template
 	var remoteDir string
-	if tm.Host != "" {
-		remoteDir = remoteDirFor(tm.RemoteDir, r.Config.Hosts[tm.Host].RemoteDir, r.Root)
+	if t, err := aim(r, ""); err == nil {
+		remoteDir = t.dir
 	}
 
 	if *jsonOut {

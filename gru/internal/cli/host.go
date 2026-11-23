@@ -63,11 +63,10 @@ type target struct {
 	agent string
 }
 
-// dial resolves the host (override, else the template's; a name not in hosts
-// is an ssh alias) and connects. A local target runs in the project itself
-// with this executable as its agent; a remote one gets its agent bootstrapped
-// when agent is set.
-func dial(r *config.Resolved, override string, agent bool) (*target, error) {
+// aim resolves the host (override, else the template's; a name not in hosts
+// is an ssh alias) without connecting. A local target runs in the project
+// itself, with this executable as its agent.
+func aim(r *config.Resolved, override string) (*target, error) {
 	name := cmp.Or(override, r.Template.Host)
 	if name == "" {
 		return nil, errNoHost
@@ -79,7 +78,18 @@ func dial(r *config.Resolved, override string, agent bool) (*target, error) {
 		t.Client, t.dir, t.agent = ssh.Local(), r.Root, remote.ShellQuote(exe)
 		return t, err
 	}
-	t.Client, t.dir = ssh.New(t.alias), remoteDirFor(r.Template.RemoteDir, h.RemoteDir, r.Root)
+	t.dir = remoteDirFor(r.Template.RemoteDir, h.RemoteDir, r.Root)
+	return t, nil
+}
+
+// dial connects to the target aim resolves; a remote one gets its agent
+// bootstrapped when agent is set.
+func dial(r *config.Resolved, override string, agent bool) (*target, error) {
+	t, err := aim(r, override)
+	if err != nil || t.Client != nil { // local
+		return t, err
+	}
+	t.Client = ssh.New(t.alias)
 	if agent {
 		t.Open() // one multiplexed connection for the whole command
 		var err error
