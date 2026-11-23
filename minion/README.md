@@ -56,6 +56,12 @@ its counter twice at the zone's highest power limit, or when the zone has no pow
 command stays in the runner's process group, so Ctrl-C reaches it, and what it leaves running is
 left alone (a queue kills it).
 
+`meters.noise`, always there, records what else ran: it is read just outside each edge, outside
+the other meters. Per CPU, the change of each `/proc/interrupts` and `/proc/softirqs` row that
+changed; the change of `ctxt` in `/proc/stat`; the CPU time (`cpu.stat` `usage_usec`) of each
+other top-level cgroup (`cgroups_usec`); and at both edges the users with a logind session and
+the load average.
+
 ## Queue
 
 ```sh

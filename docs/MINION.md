@@ -27,7 +27,8 @@ attributing energy to tenants or processes, a benchmark framework, dashboards, a
 - Verbs: `snapshot`, `apply`, `restore`, `status`, `run`, `queue` and `reap`.
 - Meters: `time` and `rapl`.
 - Queue: randomized interleaved rounds under the queue lock, with reap, events and notify.
-- Around each run: the settings snapshot.
+- Around each run: the settings snapshot and a basic noise record (interrupts, softirqs, context
+  switches, other cgroups' CPU time, logins and load).
 - Restore: from the fsynced journal, keeping what someone else changed.
 - Between runs: the settle.
 
@@ -196,10 +197,9 @@ window.
 - `cmd`: a user command printing `name value` lines, run before the start read and after the end
   read.
 - Time series, off by default; RQ2 measures their cost.
-- The noise record, read before the start read and after the end read: other cgroups' CPU time,
-  foreign processes, logins and load; interrupt and softirq counts; per CPU the SMI count,
-  APERF/MPERF, throttle counters and temperatures, through an `msr` verb that reads only those
-  MSRs and `HWP_REQUEST`; new kernel log lines; the end-of-run verify.
+- More of the noise record, read before the start read and after the end read: foreign processes;
+  per CPU the SMI count, APERF/MPERF, throttle counters and temperatures, through an `msr` verb
+  that reads only those MSRs and `HWP_REQUEST`; new kernel log lines; the end-of-run verify.
 - `host.json` per queue: CPU model and topology, kernel, cmdline, microcode, BIOS, energy zones
   and backend (MSR, TPMI, modeled), NVML and driver versions.
 

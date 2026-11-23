@@ -2,6 +2,7 @@ mod engine;
 mod ffi;
 mod journal;
 mod lock;
+mod noise;
 mod queue;
 mod run;
 mod settings;
