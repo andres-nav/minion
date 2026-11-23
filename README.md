@@ -10,7 +10,8 @@ Two tools for running builds, tests and experiments on remote machines:
 - **minion**, on the measured host: sets machine settings for a measurement, puts the originals
   back (also after a crash), and runs queues of measured runs (see [minion/README.md](minion/README.md)).
 
-See [DESIGN.md](docs/DESIGN.md) for the full design.
+Design: [DESIGN.md](docs/DESIGN.md) for both tools, how they connect and the repo layout, then
+[GRU.md](docs/GRU.md), [MINION.md](docs/MINION.md) and [RESEARCH.md](docs/RESEARCH.md).
 
 ## Status
 
@@ -28,15 +29,7 @@ gru list [--json]                 # discover the resolved template + tasks
 ```
 
 Config lives in `~/.config/gru/config.json` (+ optional per-project
-`.gru.json`). See [DESIGN.md](docs/DESIGN.md).
-
-## Layout
-
-```
-gru/      gru, the Go CLI: go.mod, main.go, internal/, Makefile
-minion/   minion, the Rust runner (see minion/README.md)
-docs/     design docs
-```
+`.gru.json`). See [GRU.md](docs/GRU.md).
 
 ## Develop
 
