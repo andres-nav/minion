@@ -1,7 +1,7 @@
 name: release
 
 # Tests and the release build run on pull requests and on main; only a tag or
-# a manual dispatch publishes a release.
+# a manual dispatch (of an existing tag) publishes a release.
 on:
   push:
     branches:
@@ -23,80 +23,41 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: gru (go test, go vet)
-        run: nix develop --command make -C gru test
-
-      - name: minion (cargo test, cargo clippy)
-        run: nix develop --command sh -c 'cd minion && cargo test && cargo clippy --all-targets -- -D warnings'
-
-  e2e:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: gru + minion end to end (no ssh, no root)
-        run: nix develop --command make e2e
+      - name: make test e2e (unit tests, lints, end to end with no ssh or root)
+        run: nix develop --command make test e2e
 
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - { goos: darwin, goarch: amd64 }
-          - { goos: darwin, goarch: arm64 }
-          - { goos: linux,  goarch: amd64 }
-          - { goos: linux,  goarch: arm64 }
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0      # full history + tags so the Makefile's `git describe` sees the tag
+          ref: ${{ inputs.tag || github.ref }} # a dispatch builds the tag it releases
+          fetch-depth: 0 # tags, so the Makefile's `git describe` sees the version
 
       - uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
 
-      - name: Build (nix dev shell → make)
+      # Pure Go with CGO off: every platform cross-compiles from Linux. Each
+      # archive holds gru for its platform and the Linux agents it uploads.
+      - name: Build and package
         run: |
           set -eu
-          # Toolchain (go/make/git) comes from flake.nix; the Makefile injects
-          # VERSION from `git describe` via -ldflags. CGO off → static, pure-Go
-          # cross-compiles cleanly from the Linux runner.
-          #
-          # Linux agent binaries gru bootstraps onto remotes (gru/bin/gru-linux-*).
-          nix develop --command make -C gru cross
-          # Host binary for this matrix platform (gru/bin/gru).
-          nix develop --command env \
-            GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' CGO_ENABLED=0 \
-            make -C gru build
-
-      - name: Package
-        run: |
-          set -eu
-          archive="gru-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
-          tar -C gru/bin -czf "$archive" gru gru-linux-amd64 gru-linux-arm64
-          echo "packaged → $archive"
+          nix develop --command make -C gru cross PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
+          cd gru/bin
+          for p in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+            cp "gru-$p" gru
+            tar -czf "../../gru-$p.tar.gz" gru gru-linux-amd64 gru-linux-arm64
+          done
 
       - uses: actions/upload-artifact@v4
         with:
-          name: gru-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: gru-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          name: gru
+          path: gru-*.tar.gz
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [test, e2e, build]
+    needs: [test, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
