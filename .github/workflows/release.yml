@@ -1,11 +1,11 @@
 name: release
 
-# Tests and the release build run on every push and pull request; only a tag
-# or a manual dispatch publishes a release.
+# Tests and the release build run on pull requests and on main; only a tag or
+# a manual dispatch publishes a release.
 on:
   push:
     branches:
-      - '**'
+      - main
     tags:
       - 'v*'
   pull_request:
