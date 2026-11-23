@@ -8,19 +8,34 @@ use crate::settings::{self, SETTINGS, State, Values};
 /// Applies a profile. The first apply of a journal saves the full state first.
 pub fn apply(j: &mut Journal, sys: &Path, profile: &State) -> Result<(), String> {
     settings::validate(sys, profile)?;
+    let before = settings::snapshot(sys)?;
     if last(&j.lines, "saved").is_none() {
         if j.lines.is_empty() {
             j.append(json!({"t": "open"}))?;
         }
-        j.append(json!({"t": "saved", "state": settings::snapshot(sys)?}))?;
+        j.append(json!({"t": "saved", "state": before}))?;
     }
+    let ours = ours(&j.lines)?;
     j.append(json!({"t": "apply", "profile": profile}))?;
     for s in SETTINGS {
         if let Some(want) = profile.get(s.id()) {
             s.apply(sys, want)?;
         }
     }
-    let applied = settings::snapshot(sys)?;
+    let mut applied = settings::snapshot(sys)?;
+    // An object the profile leaves alone that changed since the last apply was
+    // changed by someone else: keep expecting its earlier value, so restore keeps it.
+    if let Some(ours) = &ours {
+        for (id, values) in &mut applied {
+            for (obj, v) in values.iter_mut() {
+                let set = profile.get(id).is_some_and(|p| p.contains_key(obj));
+                match ours.get(id).and_then(|o| o.get(obj)) {
+                    Some(was) if !set && before[id].get(obj) != Some(was) => *v = was.clone(),
+                    _ => {}
+                }
+            }
+        }
+    }
     j.append(json!({"t": "applied", "state": applied}))?;
     for (id, want) in profile {
         for (obj, value) in want {
@@ -38,11 +53,7 @@ pub fn apply(j: &mut Journal, sys: &Path, profile: &State) -> Result<(), String>
 /// else: it is kept and returned as a conflict.
 pub fn restore(mut j: Journal, sys: &Path) -> Result<Vec<Value>, String> {
     let saved = state_of(&j.lines, "saved")?;
-    let applied = match (last(&j.lines, "apply"), last(&j.lines, "applied")) {
-        (None, _) => Some(saved.clone()), // nothing was written
-        (Some(a), Some(b)) if b > a => Some(state_of(&j.lines, "applied")?),
-        _ => None, // died between apply and applied: restore every object
-    };
+    let applied = ours(&j.lines)?;
     let now = settings::snapshot(sys)?;
     let mut conflicts = vec![];
     for s in SETTINGS {
@@ -88,6 +99,16 @@ pub fn status(sys: &Path, dir: &Path) -> Result<Value, String> {
         })
         .collect();
     Ok(json!({"open": true, "last": end["t"], "changed": changed}))
+}
+
+/// The state minion last left: saved if nothing was written, else the last
+/// applied; None if an apply died before its read-back, so every object may be ours.
+fn ours(lines: &[Value]) -> Result<Option<State>, String> {
+    match (last(lines, "apply"), last(lines, "applied")) {
+        (None, _) => state_of(lines, "saved").map(Some),
+        (Some(a), Some(b)) if b > a => state_of(lines, "applied").map(Some),
+        _ => Ok(None),
+    }
 }
 
 fn last(lines: &[Value], t: &str) -> Option<usize> {

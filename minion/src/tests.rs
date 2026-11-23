@@ -380,6 +380,27 @@ fn conflict_is_kept_and_the_rest_restored() {
 }
 
 #[test]
+fn a_change_by_someone_else_before_a_later_apply_is_kept() {
+    let f = Fake::new("conflict-early");
+    let before = snapshot(&f.sys).unwrap();
+    apply(&f.sys, &f.state, &stable()).unwrap();
+    put(&f.file("cpu1/cpuidle/state0/disable"), "1"); // someone else, in no profile
+    let p = profile(json!({"cpu.governor": {"policy0": "powersave"}}));
+    apply(&f.sys, &f.state, &p).unwrap();
+
+    let conflicts = restore(&f.sys, &f.state).unwrap();
+    assert_eq!(
+        conflicts,
+        [json!({"setting": "cpu.idle.disable", "object": "cpu1/state0", "saved": "0", "now": "1"})]
+    );
+    let mut want = before;
+    want.get_mut("cpu.idle.disable")
+        .unwrap()
+        .insert("cpu1/state0".into(), "1".into());
+    assert_eq!(snapshot(&f.sys).unwrap(), want);
+}
+
+#[test]
 fn invalid_profiles_are_refused_before_any_write() {
     let f = Fake::new("invalid");
     let before = snapshot(&f.sys).unwrap();
