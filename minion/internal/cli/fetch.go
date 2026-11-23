@@ -80,7 +80,7 @@ func jobStartTS(client execer, state, id string) string {
 	if err != nil {
 		return ""
 	}
-	return time.Unix(epoch, 0).Local().Format(tsLayout)
+	return stamp(time.Unix(epoch, 0))
 }
 
 // pullResults streams files matching patterns from dir (one shell word) back into dest.

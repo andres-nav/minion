@@ -4,10 +4,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
-// tsLayout formats a run's start time for {ts} in fetch_into.
-const tsLayout = "20060102-150405"
+// tsLayout formats a run's start time for {ts} in fetch_into and job ids.
+const tsLayout = "20060102T150405Z"
+
+// stamp formats t for {ts} and job ids, in UTC so names don't depend on the
+// machine's time zone.
+func stamp(t time.Time) string { return t.UTC().Format(tsLayout) }
 
 // fetchDest resolves the local destination for fetched results, expanding
 // {id}/{ts}/{repo} in tmpl. Empty tmpl → root; a relative path is under root.

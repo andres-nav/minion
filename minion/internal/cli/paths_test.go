@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+	_ "time/tzdata" // Europe/Zurich wherever the tests run
 
 	"github.com/andres-nav/minion/minion/internal/config"
 )
@@ -66,5 +68,28 @@ func TestResolveHost(t *testing.T) {
 	// nothing configured → empty alias.
 	if _, alias := resolveHost(cfg, &config.Resolved{}, ""); alias != "" {
 		t.Errorf("no host alias = %q, want empty", alias)
+	}
+}
+
+// Names and displays are UTC whatever the machine's zone (TZ=Europe/Zurich).
+func TestTimesAreUTC(t *testing.T) {
+	zurich, err := time.LoadLocation("Europe/Zurich")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TZ", "Europe/Zurich")
+	local := time.Local
+	time.Local = zurich // what TZ does at process start
+	defer func() { time.Local = local }()
+
+	at := time.Date(2026, 11, 23, 14, 25, 1, 0, time.UTC).In(zurich) // 15:25 in Zurich
+	if got := stamp(at); got != "20261123T142501Z" {
+		t.Errorf("stamp = %q", got)
+	}
+	if got := psTime(time.Unix(at.Unix(), 0)); got != "2026-11-23 14:25Z" {
+		t.Errorf("ps time = %q", got)
+	}
+	if got := fetchDest("/r", "out/{ts}", "id", stamp(at), "r"); got != "/r/out/20261123T142501Z" {
+		t.Errorf("fetch dest = %q", got)
 	}
 }

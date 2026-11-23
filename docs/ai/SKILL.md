@@ -57,12 +57,13 @@ Flags can follow the positional arg (`minion attach my_job --host gpu`).
 - A `minion run <task>` on a remote host: **sync → launch detached → attach
   (live output) → auto-fetch results**. It survives disconnects; hooks run on
   the remote.
-- Jobs get friendly ids (`brave_otter-20261123-142501`). Inspect state with
-  `minion ps`, watch with `minion attach`, stop with `minion kill`.
+- Jobs get friendly ids (`brave_otter-20261123T142501Z`, the start time in
+  UTC). Inspect state with `minion ps`, watch with `minion attach`, stop with
+  `minion kill`.
 - Exit codes propagate: `minion run <task>` returns the task's exit code. Read a
   failed job's log with `minion attach <id>`.
-- Results land where `fetch_into` says (e.g. `results/{ts}-{id}/`), so each run
-  is preserved.
+- Results land where `fetch_into` says (e.g. `results/{ts}-{id}/`, with `{ts}`
+  the start time in UTC: `20261123T142501Z`), so each run is preserved.
 
 ## Config model (only if asked to change it)
 

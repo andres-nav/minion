@@ -59,7 +59,7 @@ func quoteExpandingVars(s string) string {
 // JobsDir returns the jobs directory under a host's state dir, as one shell word.
 func JobsDir(stateDir string) string { return RemotePath(stateDir) + "/jobs" }
 
-// JobDir returns a job's directory, as one shell word (ids are [a-z0-9_-]).
+// JobDir returns a job's directory, as one shell word (ids are [A-Za-z0-9_-]).
 func JobDir(stateDir, id string) string { return JobsDir(stateDir) + "/" + id }
 
 // IDTaken is LaunchCommand's exit code when the job's directory already exists.

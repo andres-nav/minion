@@ -116,7 +116,7 @@ type Template struct {
 	OnFailure []string `json:"on_failure"`
 	Always    []string `json:"always"`
 	Fetch     []string `json:"fetch"`
-	FetchInto string   `json:"fetch_into"` // local dest for fetched results; supports {id} {ts} {repo}
+	FetchInto string   `json:"fetch_into"` // local dest for fetched results; supports {id} {ts} (UTC, 20261123T142501Z) {repo}
 	Notify    *Notify  `json:"notify"`     // overrides the top-level default for this template
 
 	Build string `json:"build"`

@@ -112,7 +112,7 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.
 		fmt.Fprintf(os.Stderr, "synced %d file(s) to %s:%s\n", n, rt.alias, rt.dir)
 	}
 
-	ts := time.Now().Format(tsLayout)
+	ts := stamp(time.Now())
 	job.Dir = rt.dir
 	job.Agent = notifyInvoke(rt)
 	if notif != nil {
