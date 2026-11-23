@@ -18,11 +18,7 @@ func cmdSync(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	r, err := project()
-	if err != nil {
-		return errf("%v", err)
-	}
-	t, err := dial(r, *host, true)
+	t, err := connect(*host, true)
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -31,11 +27,11 @@ func cmdSync(args []string) int {
 		fmt.Println("nothing to sync: local host runs in place")
 		return 0
 	}
-	sent, removed, err := pushChanges(t, r.Root, r.Template.Exclude, t.dir, *del, true)
+	sent, removed, err := pushChanges(t, t.r.Root, t.r.Template.Exclude, t.dir, *del, true)
 	if err != nil {
 		return errf("%v", err)
 	}
-	fmt.Printf("synced %d file(s), removed %d: %s → %s:%s\n", sent, removed, r.Root, t.alias, t.dir)
+	fmt.Printf("synced %d file(s), removed %d: %s → %s:%s\n", sent, removed, t.r.Root, t.alias, t.dir)
 	return 0
 }
 

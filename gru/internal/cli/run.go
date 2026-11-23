@@ -91,13 +91,9 @@ func cmdRun(args []string) int {
 	// Fetch results (remote only — local runs already wrote them in place),
 	// whatever the exit code: failed runs still leave useful output.
 	if id != "" && !t.Local && len(tm.Fetch) > 0 {
-		dest := fetchDest(r.Root, tm.FetchInto, id, filepath.Base(r.Root))
-		if n, err := pullResults(t, remote.RemotePath(t.dir), tm.Fetch, dest); err != nil {
+		if err := fetchJob(t, id, fetchDest(r.Root, tm.FetchInto, id)); err != nil {
 			fmt.Fprintf(os.Stderr, "gru: fetch failed: %v\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "fetched %d file(s) to %s\n", n, dest)
 		}
-		pullJob(t, id, dest)
 	}
 	return code
 }

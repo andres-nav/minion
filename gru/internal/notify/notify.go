@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"net"
 	"net/smtp"
-	"strconv"
 	"strings"
+	"time"
 )
 
 // Result is the outcome of a finished job, used to compose the message.
@@ -22,17 +22,14 @@ type Result struct {
 	LogTail  string
 }
 
-// ok reports whether the job succeeded.
-func (r Result) ok() bool { return r.Exit == 0 }
-
 // Subject is the one-line summary (also used as the email subject).
 func (r Result) Subject() string {
 	state := "FAILED"
-	if r.ok() {
+	if r.Exit == 0 {
 		state = "ok"
 	}
 	return fmt.Sprintf("gru: %s on %s %s (exit %d, %s)",
-		r.Task, r.Host, state, r.Exit, humanDuration(r.Duration))
+		r.Task, r.Host, state, r.Exit, time.Duration(r.Duration)*time.Second)
 }
 
 // Body is the full message: the summary line, provenance, and a log tail.
@@ -46,13 +43,6 @@ func (r Result) Body() string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-func humanDuration(sec int) string {
-	if sec < 60 {
-		return strconv.Itoa(sec) + "s"
-	}
-	return fmt.Sprintf("%dm%02ds", sec/60, sec%60)
 }
 
 // Email is an SMTP transport. Addr is host:port (e.g. smtp.gmail.com:587). Auth

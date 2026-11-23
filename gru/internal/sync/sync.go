@@ -143,17 +143,10 @@ func excluded(rel string, patterns []string) bool {
 // the patterns. A pattern is a glob ("results/*.json"); a matched directory is
 // included recursively, so "build" or "results" fetches everything under it.
 func Match(root string, patterns []string) ([]string, error) {
-	seen := map[string]bool{}
 	var out []string
 	add := func(full string) {
-		rel, err := filepath.Rel(root, full)
-		if err != nil {
-			return
-		}
-		rel = filepath.ToSlash(rel)
-		if !seen[rel] {
-			seen[rel] = true
-			out = append(out, rel)
+		if rel, err := filepath.Rel(root, full); err == nil {
+			out = append(out, filepath.ToSlash(rel))
 		}
 	}
 	for _, pat := range patterns {
@@ -181,8 +174,8 @@ func Match(root string, patterns []string) ([]string, error) {
 			}
 		}
 	}
-	sort.Strings(out)
-	return out, nil
+	slices.Sort(out)
+	return slices.Compact(out), nil
 }
 
 // Changed returns the local paths absent from remote or differing in size, mtime or mode.
@@ -297,17 +290,16 @@ func writeFile(full string, hdr frame, r io.Reader) error {
 		return err
 	}
 	tmp := full + ".gru.tmp"
+	defer os.Remove(tmp) // left only by a failed write
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := io.CopyN(f, r, hdr.Size); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
+	_, err = io.CopyN(f, r, hdr.Size)
+	if cerr := f.Close(); err == nil {
+		err = cerr
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+	if err != nil {
 		return err
 	}
 	mode := os.FileMode(hdr.Mode).Perm()
@@ -316,7 +308,6 @@ func writeFile(full string, hdr frame, r io.Reader) error {
 	}
 	os.Chmod(tmp, mode)
 	if err := os.Rename(tmp, full); err != nil {
-		os.Remove(tmp)
 		return err
 	}
 	if hdr.Mtime != 0 {

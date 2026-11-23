@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"io"
@@ -40,26 +41,23 @@ func cmdFetch(args []string) int {
 	if id, err = jobID(t, id); err != nil {
 		return errf("%v", err)
 	}
-	dest := expandLocalHome(*into)
-	if dest == "" {
-		dest = fetchDest(r.Root, r.Template.FetchInto, id, filepath.Base(r.Root))
-	}
-	n, err := pullResults(t, remote.RemotePath(t.dir), r.Template.Fetch, dest)
-	if err != nil {
-		return errf("%v", err)
-	}
-	fmt.Printf("fetched %d file(s): %s:%s → %s\n", n, t.alias, t.dir, dest)
-	if id != "" {
-		pullJob(t, id, dest)
-	}
-	return 0
+	dest := cmp.Or(expandLocalHome(*into), fetchDest(r.Root, r.Template.FetchInto, id))
+	return exit(0, fetchJob(t, id, dest))
 }
 
-// pullJob fetches a job's run.json and log into dest/_gru.
-func pullJob(t *target, id, dest string) {
-	if _, err := pullResults(t, remote.JobDir(t.state, id), []string{"run.json", "log"}, filepath.Join(dest, "_gru")); err != nil {
-		fmt.Fprintf(os.Stderr, "gru: fetch job record failed: %v\n", err)
+// fetchJob pulls the fetch files from the project dir into dest and, given
+// an id, that job's run.json and log into dest/_gru.
+func fetchJob(t *target, id, dest string) error {
+	n, err := pullResults(t, remote.RemotePath(t.dir), t.r.Template.Fetch, dest)
+	if err == nil {
+		fmt.Fprintf(os.Stderr, "fetched %d file(s): %s:%s → %s\n", n, t.alias, t.dir, dest)
 	}
+	if id != "" {
+		if _, jerr := pullResults(t, remote.JobDir(t.state, id), []string{"run.json", "log"}, filepath.Join(dest, "_gru")); jerr != nil {
+			fmt.Fprintf(os.Stderr, "gru: fetch job record failed: %v\n", jerr)
+		}
+	}
+	return err
 }
 
 // pullResults streams files matching patterns from dir (one shell word) back into dest.

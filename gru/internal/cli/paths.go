@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,7 @@ func idTime(id string) (time.Time, bool) {
 
 // fetchDest resolves the local destination for fetched results, expanding
 // {id}/{ts}/{repo} in tmpl. Empty tmpl → root; a relative path is under root.
-func fetchDest(root, tmpl, id, repo string) string {
+func fetchDest(root, tmpl, id string) string {
 	if tmpl == "" {
 		return root
 	}
@@ -29,7 +30,7 @@ func fetchDest(root, tmpl, id, repo string) string {
 	if t, ok := idTime(id); ok {
 		ts = stamp(t)
 	}
-	p := expandLocalHome(strings.NewReplacer("{id}", id, "{ts}", ts, "{repo}", repo).Replace(tmpl))
+	p := expandLocalHome(strings.NewReplacer("{id}", id, "{ts}", ts, "{repo}", filepath.Base(root)).Replace(tmpl))
 	if filepath.IsAbs(p) {
 		return p
 	}
@@ -49,12 +50,5 @@ func expandLocalHome(p string) string {
 // remoteDirFor computes the remote project directory, expanding {repo}. A
 // template's remote_dir (e.g. a workspace slot) takes precedence over the host's.
 func remoteDirFor(tmplDir, hostDir, root string) string {
-	rd := tmplDir
-	if rd == "" {
-		rd = hostDir
-	}
-	if rd == "" {
-		rd = "gru/{repo}"
-	}
-	return strings.ReplaceAll(rd, "{repo}", filepath.Base(root))
+	return strings.ReplaceAll(cmp.Or(tmplDir, hostDir, "gru/{repo}"), "{repo}", filepath.Base(root))
 }

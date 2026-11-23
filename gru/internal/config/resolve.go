@@ -41,7 +41,6 @@ type Resolved struct {
 // (inclusive) or the filesystem root.
 func (c *Config) Resolve(dir string) (*Resolved, error) {
 	dir = filepath.Clean(dir)
-	gr := gitRoot(dir)
 	for cur := dir; ; cur = filepath.Dir(cur) {
 		path := filepath.Join(cur, repoFile)
 		b, err := os.ReadFile(path)
@@ -54,14 +53,13 @@ func (c *Config) Resolve(dir string) (*Resolved, error) {
 		if m := c.detect(cur); len(m) > 0 {
 			return &Resolved{Root: cur, TemplateName: m[0], Template: c.Templates[m[0]], Ambiguous: m[1:], Config: c}, nil
 		}
-		if cur == gr || cur == filepath.Dir(cur) {
-			break
+		if _, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
+			return &Resolved{Root: cur, Config: c}, nil
+		}
+		if cur == filepath.Dir(cur) {
+			return &Resolved{Root: dir, Config: c}, nil
 		}
 	}
-	if gr != "" {
-		dir = gr
-	}
-	return &Resolved{Root: dir, Config: c}, nil
 }
 
 func (c *Config) resolveRepo(root, path string, b []byte) (*Resolved, error) {
@@ -112,15 +110,4 @@ func (c *Config) detect(root string) []string {
 	}
 	slices.Sort(out)
 	return out
-}
-
-func gitRoot(dir string) string {
-	for ; ; dir = filepath.Dir(dir) {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return dir
-		}
-		if dir == filepath.Dir(dir) {
-			return ""
-		}
-	}
 }
