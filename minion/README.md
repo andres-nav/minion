@@ -20,7 +20,7 @@ This first slice handles three settings, written in this order:
 minion snapshot                    # current settings as JSON
 minion snapshot > p.json           # edit p.json down to what should change, then:
 sudo -n minion apply < p.json      # save the originals, apply, read back
-minion status                      # what differs from the originals
+sudo minion status                 # what differs from the originals
 sudo -n minion restore             # put the originals back
 ```
 
@@ -34,7 +34,7 @@ A profile has the same shape as a snapshot and lists only the objects to change:
 
 Every value is checked before anything is written: unknown settings, objects or values are
 refused. `apply` and `restore` read only stdin and `/sys`, and write only `/sys` and the journal in
-`/var/lib/minion`.
+`/var/lib/minion`, which only root can read, so `status` needs root too.
 
 ## Run
 
@@ -48,10 +48,10 @@ Meters are plugins (`time` always, `rapl` now). run.json holds the command, its 
 `meters.time` (at each edge `CLOCK_MONOTONIC` and `CLOCK_REALTIME` in ns, read back to back, the
 realtime also as `*_utc`, and the duration in seconds from the monotonic clock), `meters.rapl` (per
 zone: counters, joules and mean watts, corrected for one counter wrap), the settings snapshot
-before and after, and `drift` if they differ. It is never overwritten. Zones whose `energy_uj`
-can't be read (root-only by default) are listed as `unreadable`. A zone's joules are left out, with
-a warning, when the run was long enough to wrap its counter twice at the zone's highest power
-limit, or when the zone has no power limit.
+before and after, and `drift` if they differ. It is created before the command starts and never
+overwritten. Zones whose `energy_uj` can't be read (root-only by default) are listed as
+`unreadable`. A zone's joules are left out, with a warning, when the run was long enough to wrap
+its counter twice at the zone's highest power limit, or when the zone has no power limit.
 
 ## Queue
 
@@ -80,8 +80,8 @@ Runs a whole queue as the user, in the foreground, and puts the settings back at
 
 `seed` (default: from the clock), `settle_s` (default 1), `meters` (default `["time", "rapl"]`;
 `time` is always read) and `notify` (with `timeout_s`, default 30) are optional. Unknown keys,
-settings, objects, values and meters are refused before anything runs. Names take letters,
-digits, `.`, `_` and `-`.
+settings, objects, values and meters are refused before anything runs. Names take up to 64
+letters, digits, `.`, `_` and `-`.
 
 - **Plan.** `reps` rounds; each round runs every (profile, workload) pair once, in an order
   shuffled by Fisher-Yates with splitmix64 from the seed. The whole plan goes to plan.json first.
@@ -91,16 +91,19 @@ digits, `.`, `_` and `-`.
   (`sudo -n minion apply --held`) only when the machine is not already in it.
 - **Queue lock.** A blocking `flock` on `/run/lock/minion.lock` (world-writable, gone at
   reboot), held to the end. A second queue logs the holder's id and sleeps in the kernel until
-  the lock is free, then runs.
+  the lock is free, then runs. Where `/run/lock` is root's and 0755 (Fedora, RHEL, Amazon Linux),
+  root creates the file at boot, e.g. with the tmpfiles.d line
+  `f /run/lock/minion.lock 0666 root root -`.
 - **Start.** In this order: take the lock; choose the queue id (`<name>-<UTC time>`, or with `-2`,
   `-3`, ... if a queue of that name started in the same second) and write it into the lock; reap
   the leftover workloads of a queue that died; restore a leftover journal (`sudo -n minion
   restore --held`, every time).
 - **Runs.** Each run: apply if needed, settle, run the workload with `run`'s meters (stdin from
   `/dev/null`, stdout and stderr to files, in its own process group, killed if the runner dies,
-  and marked for reap). A run whose settings
-  changed during it or differ from its profile is flagged `drift`, and the next run applies its
-  profile again. A failing workload is recorded and the queue goes on.
+  and marked for reap). Right after the end meter read, whatever the workload left running in its
+  group is killed (`leftovers` in run.json, and a warning). A run whose settings changed during it
+  or differ from its profile is flagged `drift`, and the next run applies its profile again. A
+  failing workload is recorded and the queue goes on.
 - **End.** At the end, or on SIGTERM, SIGINT or SIGHUP (which also stop the running workload), the
   queue restores the settings, then releases the lock. It exits 0 when every run succeeded and
   the restore worked, 128 + the signal when stopped, and 1 otherwise.
@@ -115,8 +118,11 @@ the queue lock while they hold the journal lock. With `--held`, stdin names the 
 (`{"queue": ID}`, plus `"profile"` for apply), and they act only while that queue holds the
 lock. Without it, they act only while no queue does, and a `restore` then says that the queue
 holding it restored at its start. A stray call that saw a dead queue's id before the next queue
-wrote its own is undone by that queue's restore at start. The lock is opened with `O_NONBLOCK`,
-and anything but a regular file is refused, so a FIFO put in its place can't block them.
+wrote its own is undone by that queue's restore at start. The lock is opened with `O_NONBLOCK` and
+`O_NOFOLLOW`, and anything but a regular file is refused, so a FIFO or symlink put in its place
+can't block or redirect them. `apply` and `restore` ignore SIGHUP, SIGINT and SIGTERM, which reach
+them through sudo when the queue's process group is signalled, so they never stop half-way; the
+journal covers SIGKILL.
 
 `minion reap` (as the user; refused as root) kills the leftover workloads of a queue that
 died: each workload has `MINION_WORKLOAD=<lock> <queue id>` in its environment, and so do
@@ -127,14 +133,15 @@ clears its environment escapes reap; the cgroup of the isolation phase will clos
 Each queue writes to a new directory, `<out>/<name>-<YYYYMMDDTHHMMSSZ>/`:
 
 ```
-queue.json    the queue as given; the resolved seed, settle, meters and profiles; the settings
-              at the start; the queue's start on both clocks (`time`; its end is the
-              queue_done event); the runner version; the GRU_* variables (job id, task, host)
+queue.json    the queue as given; the resolved seed, settle, meters, profiles and
+              notify_timeout_s; the settings at the start; the queue's start on both clocks
+              (`time`; its end is the queue_done event); the runner's version, lock and
+              privileged (`sudo` or `in-process`); the GRU_* variables (job id, task, host)
 plan.json     the seed and every run: id, round, position, workload, profile
 events.jsonl  one line per event: event, time, time_utc, queue, run, status, detail
 runs/0001-ep-stable-r01/
-  run.json    as for `run` (cmd, exit, meters, state before and after, drift), plus the
-              queue, run id, round, position, workload and profile
+  run.json    as for `run` (cmd, exit, meters, state before and after, drift), plus
+              leftovers, the queue, run id, round, position, workload and profile
   stdout, stderr
 ```
 
@@ -142,15 +149,15 @@ runs/0001-ep-stable-r01/
 
 Each event is appended to events.jsonl and logged. Then, and only between runs, `notify.cmd` runs
 once with the event in `MINION_EVENT`, `MINION_QUEUE`, `MINION_RUN`, `MINION_STATUS` and
-`MINION_DETAIL`. It runs in its own process group, which is killed if it still runs after
-`notify.timeout_s`. A failing or killed notify command is logged and never changes the queue's
-outcome.
+`MINION_DETAIL`. It runs like a workload (in its own process group, killed if the runner dies,
+marked for reap), and its group is killed when it exits, or after `notify.timeout_s` if it still
+runs. A failing or killed notify command is logged and never changes the queue's outcome.
 
 | event | status | detail |
 |---|---|---|
 | `queue_started` | | the number of runs, and the wait for the lock |
 | `run_done`, `run_failed` | `exit N`, `signal N` or `error` | seconds, or the error |
-| `drift` | | the profile |
+| `drift` | | the settings changed or differ from profile P |
 | `restore_ok`, `restore_failed` | `ok`, `failed` | leftover journal or end of queue; what was kept, or the error |
 | `queue_done` | `ok`, `failed`, `stopped` | runs done and failed, and why it stopped |
 
@@ -171,8 +178,8 @@ gru run energy --arg q.json --detach
 ```
 
 `gru kill` sends SIGTERM: the queue stops its workload and restores. If the runner dies
-without restoring (`kill -9`, a crash), its workload dies with it, and the `always` hooks reap the
-workload's children and restore. If another queue was waiting and took the lock first, that queue
+without restoring (`kill -9`, a crash), its workload and notify die with it, and the `always` hooks
+reap their children and restore. If another queue was waiting and took the lock first, that queue
 reaps and restores before its first run, and the hooks leave it alone.
 
 ## Journal
@@ -189,7 +196,7 @@ Restoring twice is harmless.
 
 ```sh
 cargo test     # on a fake sysfs and powercap tree in a temp dir; one test reads the real /sys
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
 `--sysfs DIR`, `--state-dir DIR` and `--lock FILE` point the runner at a test tree. They are
