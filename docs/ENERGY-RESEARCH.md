@@ -15,8 +15,8 @@ backports, so each must still be checked on the host.
   and tuned, but all three keep the originals in memory or in `/run`, so none restores after a
   reboot. Most tuning tools (pyperf, LIKWID, cpupower, EnergyTrackr, partly temci) "reset" to fixed
   defaults. Only EnergyTrackr and temci shuffle the run order. The Green Metrics Tool has the best
-  checks, queue and notifications but sets almost nothing. The on-disk journal, compare and
-  restore, and recovery after a reboot are new.
+  checks, queue and notifications but sets almost nothing. The on-disk journal and compare and
+  restore are new, and so is recovery after a reboot, which comes with a later boot unit.
 - **No source measures the smallest detectable energy regression on one machine**, or how many runs
   it takes. EnergyTrackr's own preprint says it has no ground truth. A/A and injected-regression
   modes turn RQ3 into a number per machine and workload.
@@ -29,7 +29,10 @@ backports, so each must still be checked on the host.
   - `systemctl revert` also deletes the admins' settings;
   - RAPL reads on Cascade Lake interrupt the package's lowest CPU;
   - osnoise has a no-workload mode only from 6.8 on;
-  - a missing `pam_access` file aborts PAM.
+  - a missing `pam_access` file aborts PAM;
+  - without a service, `flock` (freed when the holder dies, no wakeups while waiting) and the EOF
+    sshd gives a non-pty command when the connection ends suffice for waiting queues and
+    follower hosts.
 - The ranked feature list is in [section 4](#4-features-worth-adding-ranked).
 
 ## 1. Tools
@@ -89,7 +92,7 @@ Notes, by tool (all **source** unless tagged):
   make a ready event list. [srun](https://slurm.schedmd.com/srun.html),
   [acct_gather.conf](https://slurm.schedmd.com/acct_gather.conf.html),
   [sbatch](https://slurm.schedmd.com/sbatch.html).
-- **GEOPM Service**: the closest model for the helper. When a client starts writing, it saves
+- **GEOPM Service**: the closest model for the privileged verbs. When a client starts writing, it saves
   every supported control to `/run/geopm`; it restores them when the session ends, also when the
   client process dies; one writer at a time; allowlists in `/etc/geopm`.
   [service](https://geopm.github.io/service.html).
@@ -147,6 +150,13 @@ survives a reboot unless it says so.
 | current frequency | `scaling_cur_freq`, `/proc/cpuinfo` | 6.8: APERF/MPERF from the last tick, no IPI. 5.15: an IPI to the CPU and up to 10 ms of sleep per read. | `arch/x86/kernel/cpu/aperfmperf.c` at both tags |
 | throttling, temperature | `thermal_throttle/*_count`, coretemp `temp*_input` | Throttle counters are per-CPU variables (no IPI). A coretemp read is an IPI to that core, cached 1 s. | `drivers/thermal/intel/therm_throt.c`, `drivers/hwmon/coretemp.c` |
 | NVML | `nvmlDeviceGetTotalEnergyConsumption` | mJ since the driver loaded, Volta and newer. `GetPowerUsage` is a 1 s average on Ampere and newer. Without persistence, the driver state is torn down at the last client and re-init costs seconds. Counter update rate and call cost **unverified**. | [NVML](https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlDeviceQueries.html), [persistence](https://docs.nvidia.com/deploy/driver-persistence/latest/background.html) |
+| NVML settings | `SetPowerManagementLimit`, `SetGpuLockedClocks`, `SetPersistenceMode`, `SetEccMode`, `SetMigMode` | All need root. The power limit (Kepler and newer), like persistence mode, lives only while the GPU is initialized: without persistence it is lost when the last client exits, and always at reboot or driver unload; locked clocks (Volta and newer) go back to default at reboot or driver reload and are undone by `ResetGpuLockedClocks`; persistence resets to off at every reboot. An ECC change takes effect after the next reboot; a MIG change may reset or unbind the GPU. `GetEccMode` and `GetMigMode` return current and pending. No query for the current locked clocks was found (**unverified** that none exists). `GetComputeRunningProcesses` lists compute contexts only. | [commands](https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlDeviceCommands.html), [MIG](https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlMultiInstanceGPU.html), [data persistence](https://docs.nvidia.com/deploy/driver-persistence/latest/data-persistence.html), [queries](https://docs.nvidia.com/deploy/nvml-api/latest/api/group__nvmlDeviceQueries.html) |
+| perf counting | `perf_event_open`, `sample_period` 0 | A counting event has no sample period, so no overflow samples. `inherit` counts children created after the open; `enable_on_exec` starts counting at `execve`. The man page says `inherit` doesn't work with `PERF_FORMAT_GROUP`, but v6.8 refuses only `inherit` with `PERF_SAMPLE_READ`, and `perf_read_group` sums the children. A read sums the live children, each read of an active event being an IPI to its CPU (`perf_event_read`). More events than counters are multiplexed by an hrtimer every `1000/HZ` ms by default; `time_enabled` ≠ `time_running` shows it. `perf_event_paranoid` defaults to 2 (user space only); per-CPU events need `CAP_PERFMON` or a value below 1. Ubuntu 24.04 kernels set `CONFIG_SECURITY_PERF_EVENTS_RESTRICT=y` (config annotations); its exact effect was not read (**unverified**). | [perf_event_open(2)](https://man7.org/linux/man-pages/man2/perf_event_open.2.html), `kernel/events/core.c`, [perf-security.rst](https://raw.githubusercontent.com/torvalds/linux/v6.8/Documentation/admin-guide/perf-security.rst), [Ubuntu annotations](https://kernel.ubuntu.com/git/ubuntu/ubuntu-noble.git/plain/debian.master/config/annotations) |
+| flock | `flock(fd, LOCK_EX)` | Blocks until the lock is free: the waiter sleeps on a wait queue, and a release wakes every blocked waiter, which retry (no first-come order). Works whatever the open mode. Freed when the last descriptor of the open file description closes, so also when the holder dies; kept across `fork` and `execve` unless the fd is `O_CLOEXEC`. | [flock(2)](https://man7.org/linux/man-pages/man2/flock.2.html), `fs/locks.c` |
+| subreaper, parent death | `PR_SET_CHILD_SUBREAPER`, `PR_SET_PDEATHSIG` | Orphans are reparented to the nearest living subreaper, which can `wait` for them; not inherited by children. The parent-death signal fires when the parent *thread* exits, is cleared in a forked child and on set-user-ID exec. | [PR_SET_CHILD_SUBREAPER](https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html), [PR_SET_PDEATHSIG](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html) |
+| SSH session end | sshd, `ClientAliveInterval`, `ServerAliveInterval`, `TCPKeepAlive` | When the connection ends, sshd exits and closes a non-pty command's pipes: the command sees EOF and gets no signal. With a pty, closing the master hangs the terminal up (`SIGHUP`). Both alive intervals default to 0 (no messages). `TCPKeepAlive` defaults to yes, but Linux sends the first probe after `tcp_keepalive_time`, 7200 s by default. | [session.c](https://raw.githubusercontent.com/openssh/openssh-portable/master/session.c), [serverloop.c](https://raw.githubusercontent.com/openssh/openssh-portable/master/serverloop.c), [sshd_config(5)](https://man7.org/linux/man-pages/man5/sshd_config.5.html), [ssh_config(5)](https://man7.org/linux/man-pages/man5/ssh_config.5.html), [tcp(7)](https://man7.org/linux/man-pages/man7/tcp.7.html) |
+| logout | logind `KillUserProcesses=` | `yes` kills the session scope, setsid'd processes included; `no` abandons the scope. Upstream default `yes`; Debian and Ubuntu 24.04 build with `-Ddefault-kill-user-processes=false`. | [logind.conf](https://www.freedesktop.org/software/systemd/man/255/logind.conf.html), [Ubuntu debian/rules](https://git.launchpad.net/ubuntu/+source/systemd/plain/debian/rules?h=ubuntu/noble) |
+| delegation | cgroup v2, transient scopes | Delegating to a user means giving write access to the directory and its `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`. Scopes are created only through systemd's bus API and manage processes started elsewhere. `cpu.stat` exists without the cpu controller. Creating a delegated scope for another user's process was not tried (**unverified**). | `cgroup-v2.rst`, [systemd.scope](https://www.freedesktop.org/software/systemd/man/255/systemd.scope.html) |
 | BMC | DCMI Get Power Reading; Redfish | DCMI gives integer watts over a vendor-defined window, plus a statistics period, and no energy counter. Redfish `Sensor` has `SensingInterval`, `ReadingTime`, `AveragingInterval`. In band, KCS without interrupts runs the polling `kipmid` thread. iDRAC window **unverified**. | [DCMI 1.5](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/dcmi-v1-5-rev-spec.pdf), [Sensor schema](https://redfish.dmtf.org/schemas/v1/Sensor.v1_10_0.json), `Documentation/driver-api/ipmi.rst` |
 | waiting | `pidfd_open` (5.3), `waitid(P_PIDFD)` (5.4), inotify | inotify misses changes made on other NFS clients and doesn't work on `/proc` or `/sys`. GNU `tail -f` polls every second on remote file systems. | [pidfd_open(2)](https://man7.org/linux/man-pages/man2/pidfd_open.2.html), [inotify(7)](https://man7.org/linux/man-pages/man7/inotify.7.html), [tail.c](https://raw.githubusercontent.com/coreutils/coreutils/master/src/tail.c) |
 | timer slack | `prctl(PR_SET_TIMERSLACK)` | Real-time tasks get no slack. Slack is inherited through `fork` and kept across `execve`; 0 resets to a "default" that is itself copied from the parent, so a child must set a value (init's is 50 µs). | `kernel/time/hrtimer.c`, [PR_SET_TIMERSLACK](https://man7.org/linux/man-pages/man2/PR_SET_TIMERSLACK.2const.html) |
@@ -273,6 +283,10 @@ Avoid:
   6248R and 6515P; Ubuntu backports of Granite Rapids RAPL; the NVML energy update rate and call
   cost; whether the NVML counter resets without persistence; the iDRAC averaging window.
 - Whether sshd shows pam_nologin's text to clients that log in with a key.
+- Whether NVML can read back the current locked clocks; the default `perf_event_paranoid` on the
+  hosts' Ubuntu kernels; whether a root-made transient scope can be delegated to the user's
+  running process; `KillUserProcesses` on the ETH hosts. The SSH facts come from reading OpenSSH
+  source, not from a test.
 - Prior work using OS-noise counters as covariates, energy-specific power analysis, and Cliff's
   delta: none found with the sources available (Crossref, Semantic Scholar, arXiv). This should be
   re-checked in the ACM DL, IEEE Xplore and Google Scholar.
