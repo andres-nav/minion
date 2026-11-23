@@ -125,6 +125,7 @@ queue_ok() {
   for r in "$d"/runs/*; do
     has "$r/run.json" '"time":{'
     has "$r/run.json" '"rapl":{'
+    has "$r/run.json" '"noise":{"cgroups_usec":{'
     has "$r/run.json" '"drift":false'
     case $r in
       *-ok-perf-*) grep -qx performance "$r/stdout" || fail "$r: not under its profile" ;;

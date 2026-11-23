@@ -54,6 +54,12 @@ overwritten. Zones whose `energy_uj` can't be read (root-only by default) are li
 `unreadable`. A zone's joules are left out, with a warning, when the run was long enough to wrap
 its counter twice at the zone's highest power limit, or when the zone has no power limit.
 
+`meters.noise`, always there, records what else ran: it is read just outside each edge, outside
+the other meters. Per CPU, the change of each `/proc/interrupts` and `/proc/softirqs` row that
+changed; the change of `ctxt` in `/proc/stat`; the CPU time (`cpu.stat` `usage_usec`) of each
+other top-level cgroup (`cgroups_usec`); and at both edges the users with a logind session and
+the load average.
+
 ## Queue
 
 ```sh

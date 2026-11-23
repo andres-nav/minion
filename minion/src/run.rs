@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use crate::ffi::{
     CLOCK_MONOTONIC, CLOCK_REALTIME, SIGKILL, SIGTERM, Timespec, clock_gettime, kill,
 };
+use crate::noise::Noise;
 use crate::{settings, utc};
 
 /// Something read at the edges of a run, never in between. Meters nest: the
@@ -222,6 +223,7 @@ pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, Strin
             _ => return Err(format!("unknown meter {n:?}")),
         }
     }
+    meters.push(Box::new(Noise::open(sys)));
     meters.sort_by_key(|m| m.slow());
     Ok(meters)
 }
