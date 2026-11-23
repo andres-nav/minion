@@ -1,7 +1,7 @@
 # minion/ is the Go CLI (see minion/Makefile); runner/ is the Rust energy-runner.
 .DEFAULT_GOAL := help
 
-.PHONY: help build cross install test clean
+.PHONY: help build cross install test e2e clean
 
 help: ## show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*##' $(MAKEFILE_LIST) \
@@ -20,6 +20,9 @@ install: ## install minion (see minion/Makefile)
 test: ## test and lint both
 	@$(MAKE) -C minion test
 	@cd runner && cargo test && cargo clippy --all-targets -- -D warnings
+
+e2e: build ## end-to-end test of minion + energy-runner here, with no ssh or root
+	@test/e2e.sh
 
 clean: ## remove build artifacts
 	@$(MAKE) -C minion clean

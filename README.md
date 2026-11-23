@@ -46,3 +46,18 @@ make test          # go test + vet in minion/, cargo test + clippy in runner/
 
 Each folder also builds on its own: `make -C minion build` (or `make` targets inside `minion/`),
 and `cargo build` / `cargo test` inside `runner/`.
+
+## Testing
+
+```sh
+make test          # unit tests and lints of both
+make e2e           # minion + energy-runner end to end, on this machine (test/e2e.sh)
+```
+
+`make e2e` runs real queues through `minion run` with no ssh and no root: `test/ssh` stands in for
+ssh and runs the "remote" commands here, and the runner works on a fake sysfs and powercap tree.
+It checks the remote and `--host localhost` paths, `--detach`/`ps`/`attach`/`kill`, a crashed
+runner, two queues on one machine, UTC names and times, exit codes and broken queue files, and
+`energy-runner snapshot` on the real `/sys`. Everything lives in one temp dir (`E2E_KEEP=1` keeps
+it). CI runs it on every pull request. It can't cover real RAPL and cpufreq writes, sudo, real ssh
+or several hosts: test those on a real machine.

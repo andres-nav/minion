@@ -1,0 +1,15 @@
+#!/bin/sh
+# Stands in for ssh in the e2e test: runs the remote command on this machine,
+# from $HOME and with a clean environment, as sshd would. It ignores the options
+# and the host, and has no control master (-O and -N fail).
+while [ $# -gt 0 ]; do
+  case $1 in
+    -O | -N) exit 255 ;;
+    -o | -p | -l | -i | -F | -J) shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+shift
+[ $# -gt 0 ] || exit 255
+cd "$HOME" && exec env -i HOME="$HOME" PATH="$PATH" TZ="${TZ:-}" sh -c "$*"
