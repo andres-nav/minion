@@ -37,22 +37,15 @@ jobs:
 
       - uses: cachix/install-nix-action@v30
 
-      # Pure Go with CGO off: every platform cross-compiles from Linux. Each
-      # archive holds gru for its platform and the Linux agents it uploads.
+      # Every platform cross-compiles from Linux. Each archive holds gru for its
+      # platform and the Linux agents and minion builds it uploads.
       - name: Build and package
-        run: |
-          set -eu
-          nix develop --command make -C gru cross PLATFORMS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64"
-          cd gru/bin
-          for p in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
-            cp "gru-$p" gru
-            tar -czf "../../gru-$p.tar.gz" gru gru-linux-amd64 gru-linux-arm64
-          done
+        run: nix develop --command make dist
 
       - uses: actions/upload-artifact@v4
         with:
           name: gru
-          path: gru-*.tar.gz
+          path: dist/gru-*.tar.gz
           if-no-files-found: error
 
   release:
