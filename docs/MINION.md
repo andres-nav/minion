@@ -25,7 +25,7 @@ attributing energy to tenants or processes, a benchmark framework, dashboards, a
 
 - Settings: `cpu.governor`, `cpu.turbo` and `cpu.idle.disable`.
 - Verbs: `snapshot`, `apply`, `restore`, `status`, `run`, `queue` and `reap`.
-- Meters: `time` and `rapl`.
+- Meters: `time`, `rapl` and `cmd`.
 - Queue: randomized interleaved rounds under the queue lock, with reap, events and notify.
 - Around each run: the settings snapshot.
 - Restore: from the fsynced journal, keeping what someone else changed.
@@ -193,8 +193,6 @@ window.
 - `wall`: a sampler on another machine asks the BMC once a second for the whole queue; edges are
   matched afterwards. BMC power is coarse, so it suits long runs only.
 - `perf`: hardware counters, counted and never sampled, one group read per edge.
-- `cmd`: a user command printing `name value` lines, run before the start read and after the end
-  read.
 - Time series, off by default; RQ2 measures their cost.
 - The noise record, read before the start read and after the end read: other cgroups' CPU time,
   foreign processes, logins and load; interrupt and softirq counts; per CPU the SMI count,
