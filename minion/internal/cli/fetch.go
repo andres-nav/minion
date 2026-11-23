@@ -22,6 +22,7 @@ func cmdFetch(args []string) int {
 	if err != nil {
 		return 2
 	}
+	explicit := id != "" // only then is it sure which job's record to fetch
 
 	cfg, r, err := resolveContext()
 	if err != nil {
@@ -47,12 +48,23 @@ func cmdFetch(args []string) int {
 		dest = fetchDest(r.Root, r.Template.FetchInto, id, jobStartTS(rt.exec, rt.state, id), filepath.Base(r.Root))
 	}
 
-	n, err := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, dest)
+	n, err := pullResults(rt.exec, rt.invoke, remote.RemotePath(rt.dir), r.Template.Fetch, dest)
 	if err != nil {
 		return errf("%v", err)
 	}
 	fmt.Printf("fetched %d file(s): %s:%s → %s\n", n, rt.alias, rt.dir, dest)
+	if explicit {
+		pullJob(rt, remote.JobDir(rt.state, id), dest)
+	}
 	return 0
+}
+
+// pullJob fetches a job's run.json and log into dest/_minion.
+func pullJob(rt *remoteTarget, jobDir, dest string) {
+	into := filepath.Join(dest, "_minion")
+	if _, err := pullResults(rt.exec, rt.invoke, jobDir, []string{"run.json", "log"}, into); err != nil {
+		fmt.Fprintf(os.Stderr, "minion: fetch job record failed: %v\n", err)
+	}
 }
 
 // jobStartTS reads a job's start time and formats it for {ts}, or "" on failure.
@@ -71,9 +83,9 @@ func jobStartTS(client execer, state, id string) string {
 	return time.Unix(epoch, 0).Local().Format(tsLayout)
 }
 
-// pullResults streams files matching patterns from remoteDir back into dest.
-func pullResults(client execer, invoke, remoteDir string, patterns []string, dest string) (int, error) {
-	cmd := invoke + " _agent send " + remote.RemotePath(remoteDir)
+// pullResults streams files matching patterns from dir (one shell word) back into dest.
+func pullResults(client execer, invoke, dir string, patterns []string, dest string) (int, error) {
+	cmd := invoke + " _agent send " + dir
 	for _, p := range patterns {
 		cmd += " " + remote.ShellQuote(p)
 	}

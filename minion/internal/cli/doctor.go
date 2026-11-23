@@ -118,19 +118,15 @@ func sendNotifyTest(cfg *config.Config, r *config.Resolved, host string) int {
 	}
 	defer rt.close()
 
-	invoke := notifyInvoke(rt)
-	var b strings.Builder
 	// synthetic job env so the message reads like a real (successful) run.
-	b.WriteString("export MINION_JOB_ID=notify-test MINION_TASK=notify-test MINION_HOST=")
-	b.WriteString(remote.ShellQuote(rt.alias))
-	b.WriteString(" MINION_EXIT=0 MINION_DURATION=0\n")
+	cmd := "export MINION_JOB_ID=notify-test MINION_TASK=notify-test MINION_HOST=" + remote.ShellQuote(rt.alias) +
+		" MINION_EXIT=0 MINION_DURATION=0; " + notifyInvoke(rt) + " _agent notify --config -"
 	// Force the gate open (a synthetic exit=0 would otherwise skip an on:failure
 	// notify) so the test always exercises the configured transports.
 	test := *n
 	test.On = "always"
-	b.WriteString(buildNotify(invoke, "", &test))
 
-	code, err := rt.exec.Run(b.String(), nil, os.Stdout, os.Stderr)
+	code, err := rt.exec.Run(cmd, strings.NewReader(resolvedNotify(&test)), os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("notify-test: %v", err)
 	}

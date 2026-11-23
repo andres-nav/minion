@@ -1,6 +1,7 @@
 package remote
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,5 +168,45 @@ func TestJobsOfThisHostOnly(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(other, "status")); err == nil {
 		t.Error("kill wrote another host's status")
+	}
+}
+
+// A job records its provenance, gets MINION_* and the notify file, and hands the
+// file to the agent at the end.
+func TestScriptRecordsAndNotifies(t *testing.T) {
+	dir := t.TempDir()
+	jd := filepath.Join(dir, "job")
+	os.Mkdir(jd, 0o700)
+	agent := filepath.Join(dir, "agent")
+	fake := "#!/bin/sh\ncase $2 in now) echo 1700000000123456789;; notify) echo \"$@\" > " + dir + "/notified;; esac\n"
+	os.WriteFile(agent, []byte(fake), 0o755)
+	block := `{"on":"always","run":["it's"]}`
+	j := Job{Agent: ShellQuote(agent), Notify: block, Command: `echo "$MINION_GIT $MINION_DIRTY $MINION_AGENT"; cat "$MINION_NOTIFY"`}
+	out, code := sh(t, Script(dir, ShellQuote(jd), j, Meta{ID: "j1", Task: "build", Host: "gpu", Git: "abc", Dirty: true}), "")
+	if code != 0 || out != "abc true "+agent+"\n"+block+"\n" {
+		t.Fatalf("exit %d, task saw %q", code, out)
+	}
+	if fi, err := os.Stat(filepath.Join(jd, "notify.json")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("notify.json not 0600: %v %v", fi.Mode(), err)
+	}
+	var run struct {
+		Hostname, Kernel, Git string
+		Dirty                 bool
+		StartNs               int64 `json:"start_ns"`
+		EndNs                 int64 `json:"end_ns"`
+		Exit                  int
+	}
+	b, _ := os.ReadFile(filepath.Join(jd, "run.json"))
+	if err := json.Unmarshal(b, &run); err != nil {
+		t.Fatalf("run.json: %v: %s", err, b)
+	}
+	host, _ := sh(t, "uname -n", "")
+	kernel, _ := sh(t, "uname -r", "")
+	if run.StartNs != 1700000000123456789 || run.EndNs != run.StartNs || run.Hostname+"\n" != host || run.Kernel+"\n" != kernel || run.Git != "abc" || !run.Dirty {
+		t.Errorf("run.json = %s", b)
+	}
+	want := "_agent notify --config " + jd + "/notify.json --log " + jd + "/log\n"
+	if got, _ := os.ReadFile(filepath.Join(dir, "notified")); string(got) != want {
+		t.Errorf("agent called with %q, want %q", got, want)
 	}
 }

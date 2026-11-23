@@ -71,6 +71,17 @@ func (n *Notify) Validate() error {
 	return nil
 }
 
+// Fires reports whether a job that exited with code is announced, per `on`.
+func (n *Notify) Fires(code int) bool {
+	switch n.On {
+	case "failure":
+		return code != 0
+	case "success":
+		return code == 0
+	}
+	return true
+}
+
 // NotifyFor returns the effective notify config for a template: its own block if
 // set, else the top-level default. Returns nil when neither notifies.
 func (c *Config) NotifyFor(t Template) *Notify {

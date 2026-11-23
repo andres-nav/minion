@@ -351,3 +351,19 @@ func TestNotifyForFallback(t *testing.T) {
 		t.Errorf("no notify = %v, want nil", got)
 	}
 }
+
+func TestNotifyFires(t *testing.T) {
+	cases := []struct {
+		on   string
+		code int
+		want bool
+	}{
+		{"", 1, true}, {"always", 0, true}, {"failure", 0, false}, {"failure", 2, true},
+		{"failure", -1, true}, {"success", 0, true}, {"success", 1, false},
+	}
+	for _, c := range cases {
+		if got := (&Notify{On: c.on}).Fires(c.code); got != c.want {
+			t.Errorf("on %q exit %d: fires %v, want %v", c.on, c.code, got, c.want)
+		}
+	}
+}

@@ -20,7 +20,8 @@ type Job struct {
 	OnSuccess []string
 	OnFailure []string
 	Always    []string
-	Notify    string // shell run once at job end (after status is recorded), with $MINION_* in the environment
+	Agent     string // the minion agent on the target, as one shell word
+	Notify    string // the resolved notify block as one line of JSON; the agent sends it at job end
 }
 
 // ShellQuote single-quotes s for safe use as a shell argument.
@@ -93,7 +94,9 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 		// single-quoted so the task text is passed literally (no expansion/injection).
 		fmt.Fprintf(&b, "export MINION_ARGS=%s\n", ShellQuote(j.Args))
 	}
+	fmt.Fprintf(&b, "export MINION_AGENT=%s\n", j.Agent)
 	b.WriteString("start=$(date +%s)\n")
+	b.WriteString("start_ns=$(\"$MINION_AGENT\" _agent now)\n")
 	// record start time and task so `ps` can report them (the id is a random name).
 	fmt.Fprintf(&b, "echo \"$start\" > %s/started\n", jobDir)
 	fmt.Fprintf(&b, "printf %%s %s > %s/task\n", ShellQuote(m.Task), jobDir)
@@ -104,6 +107,13 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 	fmt.Fprintf(&b, "export MINION_JOB_ID=%s\n", ShellQuote(m.ID))
 	fmt.Fprintf(&b, "export MINION_TASK=%s\n", ShellQuote(m.Task))
 	fmt.Fprintf(&b, "export MINION_HOST=%s\n", ShellQuote(m.Host))
+	fmt.Fprintf(&b, "export MINION_GIT=%s MINION_DIRTY=%t\n", ShellQuote(m.Git), m.Dirty)
+	if j.Notify != "" {
+		// A file, not the environment, so the secrets in it reach only who reads
+		// it: the agent at job end, or a task that sends its own notifications.
+		fmt.Fprintf(&b, "(umask 077 && cat > %s/notify.json) <<'MINION_EOF'\n%s\nMINION_EOF\n", jobDir, j.Notify)
+		fmt.Fprintf(&b, "export MINION_NOTIFY=%s/notify.json\n", jobDir)
+	}
 
 	// Commands run in ( ) subshells so a task calling exit/cd can't terminate
 	// the wrapper before it records the status. teardown() runs the `always`
@@ -143,13 +153,12 @@ func Script(workDir, jobDir string, j Job, m Meta) string {
 	// Values go in as shell-quoted printf args (not baked into the format), so a
 	// % or ' in a task/host/git string can't corrupt the JSON.
 	fmt.Fprintf(&b,
-		"printf '{\"id\":\"%%s\",\"task\":\"%%s\",\"host\":\"%%s\",\"git\":\"%%s\",\"dirty\":%%s,\"start\":%%s,\"end\":%%s,\"exit\":%%s}\\n' %s %s %s %s %s \"$start\" \"$(date +%%s)\" \"$ec\" > %s/run.json\n",
+		"printf '{\"id\":\"%%s\",\"task\":\"%%s\",\"host\":\"%%s\",\"hostname\":\"%%s\",\"kernel\":\"%%s\",\"git\":\"%%s\",\"dirty\":%%s,\"start_ns\":%%s,\"end_ns\":%%s,\"exit\":%%s}\\n' %s %s %s \"$(uname -n)\" \"$(uname -r)\" %s %s \"$start_ns\" \"$(\"$MINION_AGENT\" _agent now)\" \"$ec\" > %s/run.json\n",
 		ShellQuote(m.ID), ShellQuote(m.Task), ShellQuote(m.Host), ShellQuote(m.Git), ShellQuote(strconv.FormatBool(m.Dirty)), jobDir)
 	// Notify runs last, after the outcome is recorded, so a slow or failing
 	// notification never changes the job's exit status.
 	if j.Notify != "" {
-		b.WriteString(j.Notify)
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "\"$MINION_AGENT\" _agent notify --config \"$MINION_NOTIFY\" --log %s/log\n", jobDir)
 	}
 	b.WriteString("exit \"$ec\"\n")
 	return b.String()
