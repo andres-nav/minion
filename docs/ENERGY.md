@@ -71,12 +71,12 @@ seconds or nanoseconds, and every wall-clock epoch has an ISO 8601 `*_utc` twin
   $MINION_ARGS`, runs the whole queue in the foreground. One id: `minion ps`, `attach`, `kill` and
   the log apply to the queue. Keep the task one command, so the shell execs the runner and the
   wrapper's hooks run only after it exits. The runner records the `MINION_*` variables and writes
-  under `<remote_dir>/results/` for `minion fetch`. The template's `always` hook is `sudo -n
-  energy-runner restore`. Without minion, the runner works the same under `setsid` or tmux, minus
-  the hook. The runner and `hold` treat `SIGTERM`, `SIGINT` and `SIGHUP` alike.
-  setsid stays in the login session's cgroup: with logind's `KillUserProcesses=yes` (upstream
-  default; Ubuntu builds `no`), the job dies when minion's launch connection closes, so such a
-  host needs `KillExcludeUsers=` for the user. Check each host.
+  under `<remote_dir>/results/` for `minion fetch`. The template's `always` hooks are `energy-runner
+  reap` and `sudo -n energy-runner restore`. Without minion, the runner works the same under
+  `setsid` or tmux, minus the hooks. The runner and `hold` treat `SIGTERM`, `SIGINT` and `SIGHUP`
+  alike. setsid stays in the login session's cgroup: with logind's `KillUserProcesses=yes` (upstream
+  default; Ubuntu builds `no`), the job dies when minion's launch connection closes, so such a host
+  needs `KillExcludeUsers=` for the user. Check each host.
 - **Privileged verbs live in the runner binary for now**, with an allowlist like `kvm-grid` today,
   working like GEOPM Service (save before the first write, restore when the client dies). **Root
   never reads user files or runs user code**: the runner reads the queue and host profile as the
@@ -217,32 +217,41 @@ such as driver mode, SMT, or turbo with frequency limits, a restore must also ma
 second restore after an interrupted one would take those side effects for someone else's change.)
 Until the boot unit exists, a journal from another boot is never written back.
 
-Without a service, two restores cover a crash:
-- **The queue's own**, `restore --held`: at its start, under the lock, it restores a leftover
-  before anything else; at its end, or on `SIGTERM`, `SIGINT` or `SIGHUP`, it restores its own.
-- **The `always` hook's** plain `restore`, which first takes the lock without waiting. While a
-  queue holds it, it does nothing: that queue already restored any leftover at its start, so a
-  late restore would only undo its profile.
-- `apply` and `restore --held` get the caller's queue id on stdin and, holding the journal lock,
-  act only if the queue lock is held and its file names that queue. So a verb left running by a
-  runner killed with `-9` can't tune a machine nobody will restore, or undo the next queue. A
-  hand-run `apply` (no id) needs the lock free and holds it while it writes; what it leaves is a
-  leftover. *(Proposed for #9.)*
+Without a service, two paths clean up after a crash:
+- **The queue itself.** It starts in this order: take the [queue lock](#queue); choose its id and
+  write it into the lock; `reap` a dead queue's workloads; `restore --held` a leftover journal,
+  every time. Only then does it `apply --held` its profiles. At its end, or on `SIGTERM`,
+  `SIGINT` or `SIGHUP`, it stops its workload and restores its own state.
+- **The `always` hooks**, `energy-runner reap` then plain `restore`. Both act only while no queue
+  holds the lock; otherwise that queue already reaped and restored at its start, and a late
+  restore would only undo its profile.
+- **Stray calls.** A queue's `sudo` child can outlive it: sudo starts in milliseconds, and neither
+  `PR_SET_PDEATHSIG` nor an inherited fd survives its setuid exec. So `apply` and `restore` check
+  the queue lock while they hold the journal lock. With `--held`, stdin names the caller's queue
+  (`{"queue": ID}`, plus `"profile"` for apply), and they act only while that queue holds the
+  lock. Without it, they act only while no queue does; a hand-run `apply` leaves a leftover. A
+  stray call that saw a dead queue's id before the next queue wrote its own is undone by that
+  queue's restore at start.
+- **Leftover workloads.** A workload gets `PR_SET_PDEATHSIG(SIGKILL)` and
+  `ENERGY_RUNNER_WORKLOAD=<lock> <queue id>` in its environment, which its children inherit.
+  `reap`, as the user and refused as root, kills the user's processes that name this lock and a
+  queue other than the holder. Root never kills anything, since the lock file is world-writable.
+  A workload that clears its environment escapes `reap` until the isolation phase's cgroup.
 
 | What happens | Recovery |
 |---|---|
-| `minion kill`, `SIGTERM`, `SIGINT`, `SIGHUP`, shutdown | `minion kill` signals the job's process group, so the workload gets it too (a leader keeps its ssh sessions in another group, to still reach its followers). The runner stops the workload, restores, sends events, releases the lock and exits; the hook then restores nothing. This must fit systemd's stop timeout (90 s default); while the system is stopping, only the `restore` settings are put back, and guards and `drop` settings are left to the shutdown |
-| runner killed with `-9` or crashes, any phase | the lock is free, so the `always` hook restores and closes the journal; if a waiting queue took the lock first, that queue restores before its first run and the hook does nothing. Root writes no user files and sends nothing: minion's own failure notice reports it, with the restore output in the log, and `--resume` treats a run without an end record as aborted and copies the closed journal from `done/`. The workload's first process dies with the runner (`PDEATHSIG`); its children can survive until the isolation phase's cgroup, and the next queue's quiet-host check (`others`) sees them |
-| the whole job is killed, or the runner was started by hand | no hook runs; the journal stays open until the next queue restores it, or someone runs `sudo -n energy-runner restore` |
+| `minion kill`, `SIGTERM`, `SIGINT`, `SIGHUP`, shutdown | `minion kill` signals the job's process group. The workload has its own group, so the runner forwards the signal to it (a leader's ssh sessions also sit in their own groups, so it can still reach its followers). The runner stops the workload, restores, sends events, releases the lock and exits; the hooks then do nothing. This must fit systemd's stop timeout (90 s default); while the system is stopping, only the `restore` settings are put back, and guards and `drop` settings are left to the shutdown |
+| runner killed with `-9` or crashes, any phase | the workload's first process dies with the runner (`PDEATHSIG`). The lock is free, so the `always` hooks reap the workload's children and restore; if a waiting queue took the lock first, that queue reaps and restores before its first run, and the hooks leave it alone. Root writes no user files and sends nothing: minion's own failure notice reports it, with the restore output in the log, and `--resume` treats a run without an end record as aborted and copies the closed journal from `done/`. |
+| the whole job is killed, or the runner was started by hand | no hook runs; the journal stays open until the next queue reaps and restores, or someone runs `energy-runner reap; sudo -n energy-runner restore` |
 | restore fails | the journal stays open, so every later start tries again and refuses to run on a half-restored machine, and sends `restore_failed`. An admin repairs and runs `energy-runner abandon` |
 | reboot | **not covered until the boot unit** ([Plan](#plan)). The runner makes no change that survives a reboot (sysfs, `/proc`, NVML and `--runtime` systemd state only), so every setting comes back at its boot value, but values set by hand before the queue are lost. The next start sees a journal from another boot, writes nothing, records the state, closes it and sends `rebooted`, to whoever starts next. `minion ps` keeps showing the dead job as running (no status was written) |
 | someone changes a setting | caught by the end-of-run verify and by a full verify before each apply. The verify includes `HWP_REQUEST` through the `msr` verb, which catches direct MSR writes. The run is marked `drifted` with the diff. `drift: stop` (default) stops and restores; `reapply` re-applies once, for agreed slots. A change made and undone inside one run shows only through its effects |
 
-The sudoers rule allows `apply`, `restore` and `restore --held`. On shared machines, `--held`
-should also check `SUDO_UID` against the journal's `uid` (admins excepted), since anyone can read
-the queue id. The holder, admins, root and the expiry timer may always `unlock` the
-[machine lock](#machine-lock-opt-in). `msr` reads only `SMI_COUNT`, `APERF`, `MPERF`,
-`THERM_STATUS` and `HWP_REQUEST`.
+The sudoers rule allows `apply --held`, `restore --held` and `restore`. A follow-up for shared
+machines: `--held` should also check `SUDO_UID` against the journal's `uid` (admins excepted), since
+anyone can read the queue id. The holder, admins, root and the expiry timer may always `unlock` the
+[machine lock](#machine-lock-opt-in). `msr` reads only `SMI_COUNT`, `APERF`, `MPERF`, `THERM_STATUS`
+and `HWP_REQUEST`.
 
 The verbs refuse settings that are not compiled in; CPUs that don't exist; values outside the
 hardware's range (frequencies within `cpuinfo_*`, uncore within `initial_*`, RAPL limits between a
@@ -271,8 +280,8 @@ with the host profile refuses the queue before anything is written.
 - **The delegated cgroup, without a unit file** (not yet tried): the `scope` verb moves the runner
   into a transient scope in `energy.slice` (systemd's bus API, as `systemd-run --scope`), outside
   the restricted `user.slice`, with `Delegate=yes`, and gives the user its directory,
-  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`. `restore` then first kills a dead
-  queue's scope.
+  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`. `reap` then kills a dead queue's
+  scope (`cgroup.kill`), as the user, with no environment marker to escape.
 - The runner owns its delegated subtree, so placing a workload needs no root call. `AllowedCPUs`
   never moves kernel threads (they live in the root cgroup), hence the `kthreads` plugin.
 - No cgroup cpuset partitions: on 6.8 an `isolated` partition must sit directly under the root
@@ -344,7 +353,8 @@ timer and a reboot also unlock.
 - **One queue at a time; the others wait.** Every `queue` (later `hold`) first takes a blocking
   `flock` on `/run/lock/energy-runner.lock` and keeps it to the end. The file is created writable
   by all, is gone at reboot, is opened `O_NONBLOCK` and `O_CLOEXEC`, and must be a regular file,
-  so a FIFO in its place can't block a restore. The holder writes its queue id into it. A
+  so a FIFO in its place can't block a restore. The holder writes its queue id into it, chosen
+  after taking the lock (`<name>-<UTC time>`, with `-2`, `-3`, ... for a same-second name). A
   multi-host leader takes its own lock in host-name order with its followers'. A waiter sleeps in
   the kernel with no wakeups and logs the holder's queue id. The lock is freed when its holder dies,
   also by `kill -9`; then all waiters wake and one wins (not first come, first served). Any local
@@ -444,8 +454,8 @@ is switched off, wall power on both). The simplest correct mechanism:
   signal. Each leader line also sets a lease, the longest planned silence (a run's `timeout_s` or
   the thermal gate's, plus a margin), for a leader host that dies without closing the connection.
   A late reply flags the run, and the leader stops and restores everywhere. If a follower dies,
-  the leader runs `sudo -n energy-runner restore` there over a new session (it acts only on a
-  leftover and never waits on the lock).
+  the leader runs `energy-runner reap; sudo -n energy-runner restore` there over a new session
+  (they act only on a leftover and never wait on the lock).
 - **Shared edges.** The leader asks every host to read its meters at each edge, then reads its own;
   each host returns its readings and `CLOCK_REALTIME`, so the round trip (skew) and clock offset
   are recorded, with each NTP offset. A follower running part of the workload sends one line when
@@ -498,9 +508,10 @@ service such as Healthchecks.io alerts when a ping is late.
 
 Runs only ever go to new directories. `out` must be on local disk, like every runner path. It is
 relative to the project's `remote_dir` and under `results/`, so a `fetch` glob brings everything
-back. The queue dir ends in its start time (`20261123T091200Z`). `run.json` and `queue.json`
-hold both clocks at each edge: `CLOCK_MONOTONIC` and `CLOCK_REALTIME` in epoch ns, the latter also
-as `*_utc`. Every runner log line starts with the UTC time.
+back. The queue dir ends in its start time (`20261123T091200Z`, `-2` for a same-second name).
+`run.json` holds both clocks at each edge, `CLOCK_MONOTONIC` and `CLOCK_REALTIME` in epoch ns, the
+latter also as `*_utc`; `queue.json` holds the queue's start the same way, and its end is the
+`queue_done` event. Every runner log line starts with the UTC time.
 
 ## Research questions
 
@@ -560,7 +571,7 @@ Each phase has a "done when", checked on a test machine.
    energy per zone and the three clocks, `strace` shows no runner syscall inside the window but
    the wakeup that ends it, and the state is restored after success, failure and `SIGTERM`.
 3. **Queue and the minion connection** (PR #9 open): `queue`, `plan.json`, lock waiting, restore
-   first, `restore --held` and the hook's lock check, `notify.cmd`. Done when two queues started
+   first, `reap`, the queue-id checks, `notify.cmd`. Done when two queues started
    together run one after the other, a `kill -9` of the runner at any point leaves the machine
    restored, notifications arrive only outside windows, and `minion fetch` brings back results with
    job id and commit.
