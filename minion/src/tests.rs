@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::engine::{self, status};
 use crate::journal::Journal;
 use crate::queue::{SplitMix64, parse, plan};
-use crate::settings::{State, snapshot};
+use crate::settings::{State, Values, snapshot};
 use crate::utc;
 
 unsafe extern "C" {
@@ -37,6 +37,21 @@ impl Fake {
             put(
                 &p.join("scaling_available_governors"),
                 "performance powersave",
+            );
+            put(&p.join("scaling_driver"), "intel_pstate");
+            for (f, v) in [("scaling_min", "800000"), ("scaling_max", "3000000")] {
+                put(&p.join(format!("{f}_freq")), v);
+            }
+            for (f, v) in [("cpuinfo_min", "800000"), ("cpuinfo_max", "3500000")] {
+                put(&p.join(format!("{f}_freq")), v);
+            }
+            put(
+                &p.join("energy_performance_preference"),
+                "balance_performance",
+            );
+            put(
+                &p.join("energy_performance_available_preferences"),
+                "default performance balance_performance balance_power power",
             );
             for s in 0..3 {
                 put(&cpu.join(format!("cpu{n}/cpuidle/state{s}/disable")), "0");
@@ -434,7 +449,7 @@ fn invalid_profiles_are_refused_before_any_write() {
             json!({"cpu.idle.disable": {"cpu0/state1": "1\n0"}}),
             "is not allowed",
         ),
-        (json!({"cpu.freq": {"policy0": "1000"}}), "unknown setting"),
+        (json!({"cpu.bogus": {"policy0": "1000"}}), "unknown setting"),
         (
             json!({"cpu.turbo": {"no_turbo": "1"}, "cpu.governor": {"policy0": "fast"}}),
             "fast",
@@ -444,6 +459,97 @@ fn invalid_profiles_are_refused_before_any_write() {
     }
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(!f.journal().exists());
+}
+
+#[test]
+fn freq_and_epp_follow_the_kernel_rules() {
+    let f = Fake::new("freq-epp");
+    let before = snapshot(&f.sys).unwrap();
+    assert_eq!(before["cpu.freq"]["policy1/max"], "3000000");
+    assert_eq!(before["cpu.epp"]["policy0"], "balance_performance");
+    for (p, why) in [
+        (
+            json!({"cpu.freq": {"policy0/max": "4000000"}}),
+            "is not allowed",
+        ), // above cpuinfo_max_freq
+        (
+            json!({"cpu.freq": {"policy0/max": "03000000"}}),
+            "is not allowed",
+        ),
+        (
+            json!({"cpu.freq": {"policy0/min": "3200000"}}),
+            "policy0/min 3200000 is above max 3000000",
+        ),
+        (json!({"cpu.epp": {"policy0": "default"}}), "is not allowed"),
+        (
+            json!({"cpu.epp": {"policy0": "power"}, "cpu.governor": {"policy0": "performance"}}),
+            r#"cpu.epp policy0: the kernel forces "performance" here"#,
+        ),
+    ] {
+        refused(apply(&f.sys, &f.state, &profile(p)), why);
+    }
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+
+    // Under a performance governor set by hand too, but not in passive mode.
+    put(&f.file("cpufreq/policy1/scaling_governor"), "performance");
+    let power = profile(json!({"cpu.epp": {"policy1": "power"}}));
+    refused(apply(&f.sys, &f.state, &power), "forces");
+    put(&f.file("cpufreq/policy1/scaling_driver"), "intel_cpufreq");
+    let before = snapshot(&f.sys).unwrap();
+    apply(&f.sys, &f.state, &power).unwrap();
+    let up = json!({"cpu.freq": {"policy0/min": "3200000", "policy0/max": "3400000"}});
+    apply(&f.sys, &f.state, &profile(up)).unwrap();
+    assert_eq!(
+        snapshot(&f.sys).unwrap()["cpu.freq"]["policy0/min"],
+        "3200000"
+    );
+    restore(&f.sys, &f.state).unwrap();
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+
+    // min and max move so that min <= max at every step.
+    let v = |pairs: &[(&str, &str)]| -> Values {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    };
+    let now = v(&[("policy0/min", "800000"), ("policy0/max", "3000000")]);
+    let order = |want: &[(&str, &str)]| -> Vec<String> {
+        let want = v(want);
+        let order = crate::settings::freq_order(&want, &now);
+        order.iter().map(|(o, _)| o.to_string()).collect()
+    };
+    let down = [("policy0/min", "2000000"), ("policy0/max", "2500000")];
+    assert_eq!(order(&down), ["policy0/min", "policy0/max"]);
+    let up = [("policy0/min", "3200000"), ("policy0/max", "3400000")];
+    assert_eq!(order(&up), ["policy0/max", "policy0/min"]);
+}
+
+#[test]
+fn a_queue_holds_epp_at_what_the_performance_governor_forces() {
+    let _serial = serial();
+    let f = Fake::new("queue-epp");
+    let (code, dir) = f.queue(json!({
+        "name": "epp", "reps": 1, "workloads": {"w": {"cmd": ["true"]}},
+        "profiles": {"perf": {"cpu.governor": {"policy0": "performance"}}, "eco": {"cpu.epp": {"policy0": "power"}}},
+    }));
+    assert_eq!(code, 0);
+    let q = read_json(&dir.join("queue.json"));
+    let t = &q["resolved"]["profiles"];
+    assert_eq!(
+        (
+            &t["perf"]["cpu.epp"]["policy0"],
+            &t["perf"]["cpu.governor"]["policy0"]
+        ),
+        (&json!("performance"), &json!("performance"))
+    );
+    assert_eq!(
+        (
+            &t["eco"]["cpu.epp"]["policy0"],
+            &t["eco"]["cpu.governor"]["policy0"]
+        ),
+        (&json!("power"), &json!("powersave"))
+    );
 }
 
 #[test]
@@ -491,7 +597,13 @@ fn snapshot_of_the_real_sysfs() {
     let s = snapshot(Path::new("/sys")).unwrap();
     assert_eq!(
         s.keys().collect::<Vec<_>>(),
-        ["cpu.governor", "cpu.idle.disable", "cpu.turbo"]
+        [
+            "cpu.epp",
+            "cpu.freq",
+            "cpu.governor",
+            "cpu.idle.disable",
+            "cpu.turbo"
+        ]
     );
 }
 
@@ -1022,7 +1134,7 @@ fn bad_queues_are_refused_before_anything_runs() {
     for (q, why) in [
         (with("colour", json!("red")), r#"unknown key "colour""#),
         (
-            with("profiles", json!({"p": {"cpu.freq": {"policy0": "1"}}})),
+            with("profiles", json!({"p": {"cpu.bogus": {"policy0": "1"}}})),
             "unknown setting",
         ),
         (

@@ -27,13 +27,16 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The fake machine: two CPUs with a governor, turbo and idle states, one RAPL zone.
+# The fake machine: two CPUs with a governor, frequency limits, turbo and idle states, one RAPL zone.
 sys=$T/sys cpu=$T/sys/devices/system/cpu rapl=$T/sys/class/powercap/intel-rapl:0
 gov=$cpu/cpufreq/policy0/scaling_governor
 put() { mkdir -p "$(dirname "$1")" && printf %s "$2" > "$1"; }
 for c in 0 1; do
   put "$cpu/cpufreq/policy$c/scaling_governor" powersave
   put "$cpu/cpufreq/policy$c/scaling_available_governors" "performance powersave"
+  for f in scaling_min:800000 scaling_max:3000000 cpuinfo_min:800000 cpuinfo_max:3500000; do
+    put "$cpu/cpufreq/policy$c/${f%:*}_freq" "${f#*:}"
+  done
   for s in 0 1 2; do put "$cpu/cpu$c/cpuidle/state$s/disable" 0; done
 done
 put "$cpu/intel_pstate/no_turbo" 0
@@ -76,7 +79,8 @@ git -C "$T/proj" init -q && git -C "$T/proj" add -A &&
 
 BASE='"base": {}'
 PERF='"perf": {"cpu.governor": {"policy0": "performance", "policy1": "performance"},
-  "cpu.turbo": {"no_turbo": "1"}, "cpu.idle.disable": {"cpu0/state2": "1"}}'
+  "cpu.turbo": {"no_turbo": "1"}, "cpu.freq": {"policy0/max": "2000000"},
+  "cpu.idle.disable": {"cpu0/state2": "1"}}'
 OK='"ok": {"cmd": ["sh", "work/ok.sh"]}'
 FAIL='"fail": {"cmd": ["sh", "-c", "echo boom >&2; exit 3"]}'
 

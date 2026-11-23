@@ -23,7 +23,8 @@ attributing energy to tenants or processes, a benchmark framework, dashboards, a
 
 ## What is built
 
-- Settings: `cpu.governor`, `cpu.turbo` and `cpu.idle.disable`.
+- Settings: `cpu.governor`, `cpu.epp`, `cpu.turbo`, `cpu.freq` (min and max) and
+  `cpu.idle.disable`.
 - Verbs: `snapshot`, `apply`, `restore`, `status`, `run`, `queue` and `reap`.
 - Meters: `time` and `rapl`.
 - Queue: randomized interleaved rounds under the queue lock, with reap, events and notify.
@@ -136,10 +137,10 @@ Phase 5.
 
 ### More settings
 
-Phase 5. Driver mode, SMT, EPP and EPB, perf limits, min and max frequency, uncore frequency, RAPL
-limits and group read of `energy_uj`, kernel knobs (NMI watchdog, KSM, THP, `vm/stat_interval`,
-NUMA balancing), `AllowedCPUs` of top-level units, IRQ affinity, movable kernel threads, the
-workqueue mask, and guards (irqbalance, tuned, thermald, listed timers).
+Phase 5. Driver mode, SMT, EPB, perf limits, uncore frequency, RAPL limits and group read of
+`energy_uj`, kernel knobs (NMI watchdog, KSM, THP, `vm/stat_interval`, NUMA balancing),
+`AllowedCPUs` of top-level units, IRQ affinity, movable kernel threads, the workqueue mask, and
+guards (irqbalance, tuned, thermald, listed timers).
 - **Order.** Guards are stopped first and released last; only those that were active start again.
   Everything else goes dependencies first, both ways: driver mode first, the governor before EPP,
   turbo before frequency and perf limits, SMT before IRQs and kernel threads. After a dependency is

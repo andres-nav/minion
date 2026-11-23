@@ -138,7 +138,7 @@ impl Running<'_> {
             return Err("the leftover journal could not be restored".into());
         }
         let start = settings::snapshot(&self.o.sysfs)?;
-        let targets = resolve(&self.q.profiles, &start);
+        let targets = resolve(&self.o.sysfs, &self.q.profiles, &start);
         let gru: Map<_, _> = std::env::vars()
             .filter(|(k, _)| k.starts_with("GRU_"))
             .filter(|(k, _)| !["PASS", "SECRET", "TOKEN"].iter().any(|w| k.contains(w)))
@@ -533,9 +533,13 @@ pub fn plan(q: &Queue) -> Vec<Run> {
 }
 
 /// Each profile over the start state: every object any profile sets, at this
-/// profile's value or else at its start value. So a run's state never depends
-/// on the run before it.
-fn resolve(profiles: &BTreeMap<String, State>, start: &State) -> BTreeMap<String, State> {
+/// profile's value, or else at its start value unless the kernel forces another
+/// one then. So a run's state never depends on the run before it.
+fn resolve(
+    sys: &Path,
+    profiles: &BTreeMap<String, State>,
+    start: &State,
+) -> BTreeMap<String, State> {
     let mut base = State::new();
     for (id, values) in profiles.values().flatten() {
         for obj in values.keys() {
@@ -550,6 +554,17 @@ fn resolve(profiles: &BTreeMap<String, State>, start: &State) -> BTreeMap<String
         let mut t = base.clone();
         for (id, values) in p {
             t.entry(id.clone()).or_default().extend(values.clone());
+        }
+        let mut state = start.clone();
+        for (id, values) in &t {
+            state.entry(id.clone()).or_default().extend(values.clone());
+        }
+        for s in settings::SETTINGS {
+            for (obj, f) in s.forced(sys, &state).unwrap_or_default() {
+                if let Some(v) = t.get_mut(s.id()).and_then(|v| v.get_mut(&obj)) {
+                    *v = f;
+                }
+            }
         }
         t
     };
