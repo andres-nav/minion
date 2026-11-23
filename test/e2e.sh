@@ -447,13 +447,16 @@ check_snapshot() {
 }
 
 failed=0
-for c in remote localhost detach two cli utc exit snapshot; do
+for c in "remote:remote path (fake ssh)" "localhost:--host localhost" \
+  "detach:detach, ps, attach, kill and a crashed runner" "two:two queues and a late restore" \
+  "cli:every gru option" "utc:every time in UTC (TZ=$TZ)" \
+  "exit:exit codes, broken queue files, privileged verbs" "snapshot:snapshot and run on the real /sys"; do
   SECONDS=0
-  if (cd "$T/proj" && "check_$c") > "$T/$c.log" 2>&1; then
-    echo "PASS $c ($SECONDS s)"
+  if (cd "$T/proj" && "check_${c%%:*}") > "$T/${c%%:*}.log" 2>&1; then
+    echo "PASS ${c#*:} ($SECONDS s)"
   else
-    echo "FAIL $c"
-    tail -n 25 "$T/$c.log" | sed 's/^/    /'
+    echo "FAIL ${c#*:}"
+    tail -n 25 "$T/${c%%:*}.log" | sed 's/^/    /'
     failed=$((failed + 1))
   fi
 done
