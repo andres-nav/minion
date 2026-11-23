@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +29,13 @@ type FileMeta struct {
 
 // Manifest maps a slash-separated relative path to its metadata.
 type Manifest map[string]FileMeta
+
+// add records the regular file at path (symlinks followed) as rel.
+func (m Manifest) add(rel, path string) {
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() {
+		m[rel] = FileMeta{Size: info.Size(), Mtime: info.ModTime().Unix(), Mode: uint32(info.Mode().Perm())}
+	}
+}
 
 // Walk builds a manifest of regular files under root, skipping .git and any
 // path matching an exclude pattern. A missing root yields an empty manifest.
@@ -58,11 +66,7 @@ func Walk(root string, exclude []string) (Manifest, error) {
 			return nil
 		}
 		// os.Stat follows symlinks, so symlinked files are synced as files.
-		info, err := os.Stat(p)
-		if err != nil || !info.Mode().IsRegular() {
-			return nil
-		}
-		m[rel] = FileMeta{Size: info.Size(), Mtime: info.ModTime().Unix(), Mode: uint32(info.Mode().Perm())}
+		m.add(rel, p)
 		return nil
 	})
 	if err != nil {
@@ -84,13 +88,19 @@ func WalkGit(root string, exclude []string) (Manifest, error) {
 		if rel == "" || excluded(rel, exclude) {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
-		if err != nil || !info.Mode().IsRegular() {
-			continue
-		}
-		m[rel] = FileMeta{Size: info.Size(), Mtime: info.ModTime().Unix(), Mode: uint32(info.Mode().Perm())}
+		m.add(rel, filepath.Join(root, filepath.FromSlash(rel)))
 	}
 	return m, nil
+}
+
+// Unignored drops the paths git ignores in root (none outside git), so
+// --delete leaves ignored remote files, like results or build output, alone.
+func Unignored(root string, paths []string) []string {
+	cmd := exec.Command("git", "-C", root, "check-ignore", "--stdin", "-z")
+	cmd.Stdin = strings.NewReader(strings.Join(paths, "\x00"))
+	out, _ := cmd.Output()
+	ignored := strings.Split(string(out), "\x00")
+	return slices.DeleteFunc(paths, func(p string) bool { return slices.Contains(ignored, p) })
 }
 
 // Deleted returns remote paths absent locally (for --delete mirroring).
@@ -185,27 +195,6 @@ func Changed(local, remote Manifest) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// WriteManifest walks root and writes its manifest as JSON to w.
-func WriteManifest(w io.Writer, root string, exclude []string) error {
-	m, err := Walk(root, exclude)
-	if err != nil {
-		return err
-	}
-	return json.NewEncoder(w).Encode(m)
-}
-
-// DecodeManifest parses a JSON manifest.
-func DecodeManifest(data []byte) (Manifest, error) {
-	m := Manifest{}
-	if len(bytes.TrimSpace(data)) == 0 {
-		return m, nil
-	}
-	if err := json.Unmarshal(data, &m); err != nil {
-		return nil, err
-	}
-	return m, nil
 }
 
 // frame is a newline-delimited JSON header preceding a file's raw bytes.

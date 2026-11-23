@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
 
 	"github.com/andres-nav/minion/gru/internal/config"
+	"github.com/andres-nav/minion/gru/internal/remote"
 	"github.com/andres-nav/minion/gru/internal/ssh"
 )
 
@@ -17,116 +19,57 @@ func errf(format string, a ...any) int {
 	return 1
 }
 
-// resolveContext loads the global config and resolves the repo for cwd. The returned
-// config includes the repo's .gru.json hosts/templates, so lookups see them.
-func resolveContext() (*config.Config, *config.Resolved, error) {
+// project loads the config and resolves the project of the current directory.
+// Its Config includes the project's .gru.json hosts and templates.
+func project() (*config.Resolved, error) {
 	cfg, err := config.Load()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, nil, err
-	}
-	r, err := cfg.Resolve(cwd)
-	if err != nil {
-		return nil, nil, err
-	}
-	return r.Config, r, nil
-}
-
-// resolveHost picks the ssh alias: an explicit override wins, else the resolved
-// template/repo host mapped through the hosts table. A name not in the table is
-// treated as a raw ssh alias. Returns an empty alias when none is configured.
-func resolveHost(cfg *config.Config, r *config.Resolved, override string) (config.Host, string) {
-	name := r.HostName
-	if override != "" {
-		name = override
-	}
-	if name == "" {
-		return config.Host{}, ""
-	}
-	if h, ok := cfg.Hosts[name]; ok {
-		alias := h.SSH
-		if alias == "" {
-			alias = name
-		}
-		return h, alias
-	}
-	return config.Host{}, name
-}
-
-// stateDir is where a host keeps its jobs and the agent.
-func stateDir(h config.Host) string {
-	if h.StateDir != "" {
-		return h.StateDir
-	}
-	return "~/.gru"
-}
-
-// executorFor resolves an executor for a command that doesn't bootstrap or sync
-// (attach/kill/ps): a local executor for a localhost alias, else an ssh client.
-// It also returns the host's alias and state dir.
-func executorFor(override string) (execer, string, string, error) {
-	cfg, r, err := resolveContext()
-	if err != nil {
-		return nil, "", "", err
-	}
-	h, alias := resolveHost(cfg, r, override)
-	if alias == "" {
-		return nil, "", "", errNoHost
-	}
-	if isLocalAlias(alias) {
-		return localExec{}, alias, stateDir(h), nil
-	}
-	return ssh.New(alias), alias, stateDir(h), nil
-}
-
-// remoteTarget bundles an executor (ssh or local) with its resolved context.
-type remoteTarget struct {
-	exec     execer
-	invoke   string // remote gru invocation ("" for local)
-	alias    string
-	host     config.Host // resolved host (for computing dependency dirs)
-	dir      string      // working/destination directory
-	state    string      // the host's state dir (jobs, agent)
-	local    bool
-	resolved *config.Resolved
-}
-
-// dialRemote resolves the host and returns a ready target. A localhost alias
-// runs in place with no ssh/bootstrap; a remote alias bootstraps the agent.
-// Returns errNoHost when no host is configured.
-func dialRemote(cfg *config.Config, r *config.Resolved, override string) (*remoteTarget, error) {
-	host, alias := resolveHost(cfg, r, override)
-	if alias == "" {
-		return nil, errNoHost
-	}
-	if isLocalAlias(alias) {
-		// run in the project itself; no sync, no bootstrap.
-		return &remoteTarget{exec: localExec{}, alias: alias, dir: r.Root, state: stateDir(host), local: true, resolved: r}, nil
-	}
-	client := ssh.New(alias)
-	client.Open() // one multiplexed connection for the whole command (incl. bootstrap)
-	invoke, err := client.EnsureAgent(stateDir(host), version, agentBinaryFor)
-	if err != nil {
-		client.Close()
 		return nil, err
 	}
-	return &remoteTarget{
-		exec:     client,
-		invoke:   invoke,
-		alias:    alias,
-		host:     host,
-		dir:      remoteDirFor(r.Template.RemoteDir, host.RemoteDir, r.Root),
-		state:    stateDir(host),
-		resolved: r,
-	}, nil
+	return cfg.Resolve(cwd)
 }
 
-// close tears down a remote target's multiplexed ssh connection (no-op locally).
-func (rt *remoteTarget) close() {
-	if c, ok := rt.exec.(*ssh.Client); ok {
-		c.Close()
+// target is a host to run on: a client (ssh, or this machine for localhost),
+// the project's dir there, the state dir that holds its jobs and agents, and
+// the gru agent there as one shell word.
+type target struct {
+	*ssh.Client
+	r     *config.Resolved
+	host  config.Host
+	alias string
+	dir   string
+	state string
+	agent string
+}
+
+// dial resolves the host (override, else the template's; a name not in hosts
+// is an ssh alias) and connects. A local target runs in the project itself
+// with this executable as its agent; a remote one gets its agent bootstrapped
+// when agent is set.
+func dial(r *config.Resolved, override string, agent bool) (*target, error) {
+	name := cmp.Or(override, r.Template.Host)
+	if name == "" {
+		return nil, errNoHost
 	}
+	h := r.Config.Hosts[name]
+	t := &target{r: r, host: h, alias: cmp.Or(h.SSH, name), state: cmp.Or(h.StateDir, "~/.gru")}
+	if t.alias == "localhost" || t.alias == "local" {
+		exe, err := os.Executable()
+		t.Client, t.dir, t.agent = ssh.Local(), r.Root, remote.ShellQuote(exe)
+		return t, err
+	}
+	t.Client, t.dir = ssh.New(t.alias), remoteDirFor(r.Template.RemoteDir, h.RemoteDir, r.Root)
+	if agent {
+		t.Open() // one multiplexed connection for the whole command
+		var err error
+		if t.agent, err = t.EnsureAgent(t.state, version, ssh.AgentBinary); err != nil {
+			t.Close()
+			return nil, err
+		}
+	}
+	return t, nil
 }

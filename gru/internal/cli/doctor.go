@@ -3,98 +3,48 @@ package cli
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/andres-nav/minion/gru/internal/config"
 	"github.com/andres-nav/minion/gru/internal/remote"
-	"github.com/andres-nav/minion/gru/internal/ssh"
 )
 
-// cmdDoctor validates the config and checks each host: reachable + agent
-// bootstraps. It replaces the old ad-hoc reachability check.
+// cmdDoctor checks the config and each host: reachable, and its agent in place.
 func cmdDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	host := hostFlag(fs)
-	notify := fs.Bool("notify", false, "also fire a test notification (email and/or run hooks) from --host or the template's default host")
+	notify := fs.Bool("notify", false, "also send a test notification (email and/or run hooks) from --host or the template's host")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-
-	cfg, r, err := resolveContext()
+	r, err := project() // loads and checks the config
 	if err != nil {
 		return errf("%v", err)
 	}
-
-	problems := 0
-
-	// config sanity
-	if err := cfg.Notify.Validate(); err != nil {
-		fmt.Printf("notify   %-14s FAIL  %v\n", "(default)", err)
-		problems++
-	}
-	for name, t := range cfg.Templates {
-		if len(t.OrderedTasks()) == 0 {
-			fmt.Printf("template %-14s WARN  no tasks defined\n", name)
-		}
-		if t.Host != "" {
-			if _, ok := cfg.Hosts[t.Host]; !ok {
-				fmt.Printf("template %-14s note  host %q not in hosts (used as a raw ssh alias)\n", name, t.Host)
-			}
-		}
-		if err := t.Notify.Validate(); err != nil {
-			fmt.Printf("template %-14s FAIL  %v\n", name, err)
-			problems++
-		}
-	}
-
-	// which hosts to check
-	var names []string
+	names := slices.Sorted(maps.Keys(r.Config.Hosts))
 	if *host != "" {
 		names = []string{*host}
-	} else {
-		for n := range cfg.Hosts {
-			names = append(names, n)
-		}
 	}
-	sort.Strings(names)
 	if len(names) == 0 {
 		fmt.Println("no hosts configured")
 	}
-
+	problems := 0
 	for _, n := range names {
-		h, alias := cfg.Hosts[n], n
-		if h.SSH != "" {
-			alias = h.SSH
-		}
-		if isLocalAlias(alias) {
-			fmt.Printf("host %-14s OK    local (this machine)\n", n)
-			continue
-		}
-		c := ssh.New(alias)
-		unm, err := c.Output("uname -sm")
+		t, err := dial(r, n, true)
 		if err != nil {
-			fmt.Printf("host %-14s FAIL  unreachable\n", n)
+			fmt.Printf("host %-14s FAIL  %v\n", n, err)
 			problems++
 			continue
 		}
-		invoke, err := c.EnsureAgent(stateDir(h), version, agentBinaryFor)
-		if err != nil {
-			fmt.Printf("host %-14s FAIL  agent: %v\n", n, err)
-			problems++
-			continue
-		}
-		fmt.Printf("host %-14s OK    %s, agent %s\n", n, unm, invoke)
+		t.Close()
+		fmt.Printf("host %-14s OK    %s, agent %s\n", n, t.alias, t.agent)
 	}
-
-	// optional end-to-end notification check (toggle: --notify)
-	if *notify {
-		if code := sendNotifyTest(cfg, r, *host); code != 0 {
-			problems++
-		}
+	if *notify && sendNotifyTest(r, *host) != 0 {
+		problems++
 	}
-
 	if problems > 0 {
 		fmt.Fprintf(os.Stderr, "\n%d problem(s)\n", problems)
 		return 1
@@ -102,36 +52,33 @@ func cmdDoctor(args []string) int {
 	return 0
 }
 
-// sendNotifyTest fires a synthetic notification through the resolved config
-// (email and/or run hooks) from the target host, verifying credentials and
-// connectivity end to end. Invoked by `doctor --notify`. Returns a process exit
-// code (0 on success).
-func sendNotifyTest(cfg *config.Config, r *config.Resolved, host string) int {
-	n := cfg.NotifyFor(r.Template)
+// sendNotifyTest sends a test notification through the resolved block (email
+// and/or run hooks, whatever its `on`) from the target host, to check the
+// credentials and the way there end to end.
+func sendNotifyTest(r *config.Resolved, host string) int {
+	n := r.Config.NotifyFor(r.Template)
 	if n == nil {
-		return errf("no notify configured (add a notify.email or notify.run block to the template or global config)")
+		return errf("no notify configured (add a notify block with email or run to the template or the config)")
 	}
-
-	rt, err := dialRemote(cfg, r, host)
+	test := *n
+	test.On = "always"
+	block, err := resolvedNotify(&test)
+	if err != nil {
+		return errf("notify: %v", err)
+	}
+	t, err := dial(r, host, true)
 	if err != nil {
 		return errf("%v", err)
 	}
-	defer rt.close()
-
-	// synthetic job env so the message reads like a real (successful) run.
-	cmd := "export GRU_JOB_ID=notify-test GRU_TASK=notify-test GRU_HOST=" + remote.ShellQuote(rt.alias) +
-		" GRU_EXIT=0 GRU_DURATION=0; " + notifyInvoke(rt) + " _agent notify --config -"
-	// Force the gate open (a synthetic exit=0 would otherwise skip an on:failure
-	// notify) so the test always exercises the configured transports.
-	test := *n
-	test.On = "always"
-
-	code, err := rt.exec.Run(cmd, strings.NewReader(resolvedNotify(&test)), os.Stdout, os.Stderr)
+	defer t.Close()
+	cmd := "export GRU_JOB_ID=notify-test GRU_TASK=notify-test GRU_HOST=" + remote.ShellQuote(t.alias) +
+		" GRU_EXIT=0 GRU_DURATION=0; " + t.agent + " _agent notify --config -"
+	code, err := t.Run(cmd, strings.NewReader(block), os.Stdout, os.Stderr)
 	if err != nil {
-		return errf("notify-test: %v", err)
+		return errf("notify test: %v", err)
 	}
 	if code == 0 {
-		fmt.Fprintf(os.Stderr, "fired test notification via %s\n", rt.alias)
+		fmt.Fprintf(os.Stderr, "sent a test notification from %s\n", t.alias)
 	}
 	return code
 }

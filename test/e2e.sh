@@ -159,6 +159,16 @@ check_remote() {
   [ -s "$dest/_gru/log" ] || fail "no job log fetched"
   notified remote queue_started run_done run_failed queue_done
   machine_clean
+
+  # A config typo, and a needs dir that would land on the project's own remote
+  # dir, are refused before anything runs.
+  mkdir -p "$T/dep" "$T/solo"
+  echo '{"tasks": {"x": "true"}, "build": "make"}' > "$T/solo/.gru.json"
+  (cd "$T/solo" && gru list) 2> "$T/solo.out" && fail "an unknown key was accepted"
+  grep -q 'unknown field "build"' "$T/solo.out" || fail "unknown key: no clear message"
+  echo "{\"tasks\": {\"x\": \"true\"}, \"host\": \"fake\", \"remote_dir\": \"$T/remote/solo\", \"needs\": [\"dep\"]}" > "$T/solo/.gru.json"
+  (cd "$T/solo" && gru run x) 2> "$T/solo.out" && fail "needs into the project dir ran"
+  grep -q "would sync into the project" "$T/solo.out" || fail "needs: no clear message"
 }
 
 check_localhost() {
@@ -171,6 +181,11 @@ check_localhost() {
   has "$T/state-local/jobs/$(started "$T/local.out")/run.json" '"exit":1'
   notified local queue_started run_done run_failed queue_done
   machine_clean
+  # A finished job can't be killed: its pid may be another process's now.
+  gru kill "$(started "$T/local.out")" --host localhost 2> "$T/kill.out" && fail "killed a finished job"
+  grep -q "has finished" "$T/kill.out" || fail "kill: no clear message"
+  gru ssh --host localhost 2> "$T/ssh.out" && fail "ssh to this machine ran"
+  grep -q "is this machine" "$T/ssh.out" || fail "ssh: no clear message"
 }
 
 check_detach() {

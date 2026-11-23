@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -41,6 +42,13 @@ func TestWalkGitRespectsGitignore(t *testing.T) {
 		if _, ok := m[bad]; ok {
 			t.Errorf("%s should be gitignored", bad)
 		}
+	}
+	// --delete keeps the remote files git ignores here.
+	if got := Unignored(root, []string{"ignored/r.json", "gone.py", "x.log", "sub/gone.txt"}); !reflect.DeepEqual(got, []string{"gone.py", "sub/gone.txt"}) {
+		t.Errorf("Unignored = %v", got)
+	}
+	if got := Unignored(t.TempDir(), []string{"a", "b"}); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Errorf("outside git: Unignored = %v", got)
 	}
 }
 

@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -17,149 +16,126 @@ import (
 	"github.com/andres-nav/minion/gru/internal/remote"
 )
 
-// cmdRun runs a task by name (the first positional argument), resolved from the
-// template's standard verbs (build/test/lint/clean) or its freeform tasks map.
-// It runs on the resolved host (template/repo host or --host); use
-// --host localhost to run on this machine.
+// cmdRun runs a task of the template on the resolved host (the template's or
+// --host; --host localhost runs it here): sync, launch, attach, fetch.
 func cmdRun(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	host := hostFlag(fs)
 	detach := fs.Bool("detach", false, "launch without attaching")
 	arg := fs.String("arg", "", "task text exposed to the command/hooks as $GRU_ARGS")
 	noSync := fs.Bool("no-sync", false, "don't sync local files; run against the code already on the host")
-	taskName, err := parsePositional(fs, args)
+	task, err := parsePositional(fs, args)
 	if err != nil {
 		return 2
 	}
-	if taskName == "" {
+	if task == "" {
 		fmt.Fprintln(os.Stderr, "usage: gru run <task>")
 		return 2
 	}
 
-	cfg, r, err := resolveContext()
+	r, err := project()
 	if err != nil {
 		return errf("%v", err)
 	}
-	if r.TemplateName == "" {
-		fmt.Fprintf(os.Stderr, "gru: no template for %s (add detect rules or a .gru.json with \"use\")\n", r.Root)
-		return 1
+	tm := r.Template
+	command, ok := tm.Tasks[task]
+	switch {
+	case len(tm.Tasks) == 0:
+		return errf("no tasks for %s (add detect rules to the config, or a .gru.json)", r.Root)
+	case !ok:
+		return errf("no task %q for %s (tasks: %s)", task, r.Root, strings.Join(tm.TaskNames(), ", "))
 	}
-	command, ok := r.Template.Lookup(taskName)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "gru: template %q has no task %q\n", r.TemplateName, taskName)
-		if names := taskNames(r.Template); names != "" {
-			fmt.Fprintf(os.Stderr, "available tasks: %s\n", names)
-		}
-		return 1
+	notify, err := resolvedNotify(r.Config.NotifyFor(tm))
+	if err != nil {
+		return errf("notify: %v", err)
 	}
-
-	job := remote.Job{
-		Dir:       r.Root,
-		Env:       r.Template.Env,
-		Command:   command,
-		Args:      *arg,
-		Before:    r.Template.Before,
-		OnSuccess: r.Template.OnSuccess,
-		OnFailure: r.Template.OnFailure,
-		Always:    r.Template.Always,
-	}
-
-	// Validate the effective notify config before touching the network, so a typo
-	// (e.g. on: "faliure") fails loudly here instead of silently notifying always.
-	notif := cfg.NotifyFor(r.Template)
-	if err := notif.Validate(); err != nil {
-		return errf("notify config: %v", err)
-	}
-
-	rt, err := dialRemote(cfg, r, *host)
+	t, err := dial(r, *host, true)
 	if err != nil {
 		return errf("%v", err)
 	}
-	defer rt.close()
-	return runRemote(rt, taskName, job, notif, *detach, *noSync)
-}
+	defer t.Close()
 
-func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.Notify, detach, noSync bool) int {
-	r := rt.resolved
-
-	// Local runs happen in place; remote runs sync the project (and any sibling
-	// dependency packages) up first. Dependency build order is Brazil's job
-	// (brazil-recursive-cmd) — gru just gets the edited sources there. --no-sync
-	// skips this to run against code already on the host (e.g. a mainline checkout).
-	if !rt.local && !noSync {
-		// Push local dirs (e.g. ~/.midway) to the same remote path first, so the
-		// remote has fresh credentials before the build runs.
-		for _, p := range r.Template.Push {
-			pn, _, perr := pushChanges(rt.exec, rt.invoke, expandLocalHome(p), nil, p, false)
-			if perr != nil {
-				return errf("push %s: %v", p, perr)
+	if !t.Local && !*noSync {
+		// Push local dirs (e.g. ~/.midway) to the same remote path, then the
+		// sibling packages the project needs, then the project.
+		for _, p := range tm.Push {
+			n, _, err := pushChanges(t, expandLocalHome(p), nil, p, false, false)
+			if err != nil {
+				return errf("push %s: %v", p, err)
 			}
-			fmt.Fprintf(os.Stderr, "pushed %s (%d file(s))\n", p, pn)
+			fmt.Fprintf(os.Stderr, "pushed %s (%d file(s))\n", p, n)
 		}
-		for _, need := range r.Template.Needs {
-			needLocal := filepath.Join(filepath.Dir(r.Root), need)
-			needRemote := remoteDirFor(r.Template.RemoteDir, rt.host.RemoteDir, needLocal)
-			dn, _, derr := pushChanges(rt.exec, rt.invoke, needLocal, r.Template.Exclude, needRemote, false)
-			if derr != nil {
-				return errf("dependency %s: %v", need, derr)
+		for _, need := range tm.Needs {
+			local := filepath.Join(filepath.Dir(r.Root), need)
+			dir := remoteDirFor(tm.RemoteDir, t.host.RemoteDir, local)
+			if dir == t.dir {
+				return errf("needs %s: it would sync into the project's remote dir %s (put {repo} in remote_dir)", need, dir)
 			}
-			fmt.Fprintf(os.Stderr, "synced dep %s (%d file(s)) to %s:%s\n", need, dn, rt.alias, needRemote)
+			n, _, err := pushChanges(t, local, tm.Exclude, dir, false, true)
+			if err != nil {
+				return errf("needs %s: %v", need, err)
+			}
+			fmt.Fprintf(os.Stderr, "synced dep %s (%d file(s)) to %s:%s\n", need, n, t.alias, dir)
 		}
-		n, _, err := pushChanges(rt.exec, rt.invoke, r.Root, r.Template.Exclude, rt.dir, false)
+		n, _, err := pushChanges(t, r.Root, tm.Exclude, t.dir, false, true)
 		if err != nil {
 			return errf("%v", err)
 		}
-		fmt.Fprintf(os.Stderr, "synced %d file(s) to %s:%s\n", n, rt.alias, rt.dir)
+		fmt.Fprintf(os.Stderr, "synced %d file(s) to %s:%s\n", n, t.alias, t.dir)
 	}
 
-	ts := stamp(time.Now())
-	job.Dir = rt.dir
-	job.Agent = notifyInvoke(rt)
-	if notif != nil {
-		job.Notify = resolvedNotify(notif)
-	}
 	sha, dirty := gitProvenance(r.Root)
-	id, err := launch(rt.exec, rt.state, ts, func(id, jobDir string) string {
-		meta := remote.Meta{ID: id, Task: taskName, Host: rt.alias, Git: sha, Dirty: dirty}
-		return remote.Script(rt.dir, jobDir, job, meta)
-	})
-	if err != nil {
-		return errf("%v", err)
-	}
-	jobDir := remote.JobDir(rt.state, id)
-	fmt.Fprintf(os.Stderr, "started %s on %s\n", id, rt.alias)
-
-	if detach {
-		fmt.Println(id)
-		return 0
-	}
-
-	code, err := rt.exec.Run(remote.AttachCommand(notifyInvoke(rt), jobDir), nil, os.Stdout, os.Stderr)
-	if err != nil {
-		return errf("detached (job %s still running): %v", id, err)
-	}
-
+	job := remote.Job{Task: task, Host: t.alias, Git: sha, Dirty: dirty, Env: tm.Env, Command: command, Args: *arg,
+		Before: tm.Before, OnSuccess: tm.OnSuccess, OnFailure: tm.OnFailure, Always: tm.Always, Notify: notify}
+	id, code := start(t, job, *detach)
 	// Fetch results (remote only — local runs already wrote them in place),
-	// regardless of exit code, since failed runs still leave useful output.
-	if !rt.local && len(r.Template.Fetch) > 0 {
-		dest := fetchDest(r.Root, r.Template.FetchInto, id, ts, filepath.Base(r.Root))
-		if n, ferr := pullResults(rt.exec, rt.invoke, remote.RemotePath(rt.dir), r.Template.Fetch, dest); ferr != nil {
-			fmt.Fprintf(os.Stderr, "gru: fetch failed: %v\n", ferr)
+	// whatever the exit code: failed runs still leave useful output.
+	if id != "" && !t.Local && len(tm.Fetch) > 0 {
+		dest := fetchDest(r.Root, tm.FetchInto, id, filepath.Base(r.Root))
+		if n, err := pullResults(t, remote.RemotePath(t.dir), tm.Fetch, dest); err != nil {
+			fmt.Fprintf(os.Stderr, "gru: fetch failed: %v\n", err)
 		} else {
 			fmt.Fprintf(os.Stderr, "fetched %d file(s) to %s\n", n, dest)
 		}
-		pullJob(rt, jobDir, dest)
+		pullJob(t, id, dest)
 	}
 	return code
 }
 
+// start launches job on t and, unless detach, follows it to its end. It
+// returns the job's id once it ended ("" if detached or still running) and
+// the exit code.
+func start(t *target, job remote.Job, detach bool) (string, int) {
+	job.Repo, job.Agent = filepath.Base(t.r.Root), t.agent
+	id, err := launch(t, stamp(time.Now()), func(id string) string {
+		job.ID = id
+		return remote.Script(t.dir, remote.JobDir(t.state, id), job)
+	})
+	if err != nil {
+		return "", errf("%v", err)
+	}
+	fmt.Fprintf(os.Stderr, "started %s on %s\n", id, t.alias)
+	if detach {
+		fmt.Println(id)
+		return "", 0
+	}
+	jobDir := remote.JobDir(t.state, id)
+	code, err := t.Run(remote.AttachCommand(t.agent, jobDir), nil, os.Stdout, os.Stderr)
+	if err != nil || code == 255 {
+		// ssh failed: the job may still run, without us.
+		if _, serr := t.Output("test -e " + jobDir + "/status"); serr != nil {
+			return "", errf("lost %s; job %s may still run (gru attach %s)", t.alias, id, id)
+		}
+	}
+	return id, code
+}
+
 // launch starts a job under a new id (a random name and ts), drawing another
 // name while the id is taken, so a job never reuses an old job's files.
-func launch(ex execer, state, ts string, script func(id, jobDir string) string) (string, error) {
+func launch(t *target, ts string, script func(id string) string) (string, error) {
 	for range 5 {
 		id := randomName() + "-" + ts
-		s := script(id, remote.JobDir(state, id))
-		code, err := ex.Run(remote.LaunchCommand(state, id), strings.NewReader(s), io.Discard, os.Stderr)
+		code, err := t.Run(remote.LaunchCommand(t.state, id), strings.NewReader(script(id)), io.Discard, os.Stderr)
 		switch {
 		case err == nil && code == 0:
 			return id, nil
@@ -168,14 +144,6 @@ func launch(ex execer, state, ts string, script func(id, jobDir string) string) 
 		}
 	}
 	return "", errors.New("launch failed: no free job id")
-}
-
-func taskNames(t config.Template) string {
-	var names []string
-	for _, task := range t.OrderedTasks() {
-		names = append(names, task.Name)
-	}
-	return strings.Join(names, ", ")
 }
 
 // gitProvenance returns the commit SHA and dirty flag of the tree at dir.
@@ -190,58 +158,43 @@ func gitOut(dir string, args ...string) string {
 	return string(out)
 }
 
-// --- job notify wiring -------------------------------------------------------
-// A job announces itself through the agent on the target, which reads the
-// resolved notify block from a file in the job dir. Shared by the run path and
-// `doctor --notify`.
-
 // resolvedNotify returns n as one line of JSON with its ${ENV} secrets
 // resolved on this machine, so credentials never live in the config or repo.
-func resolvedNotify(n *config.Notify) string {
+// It is "" without a notify block.
+func resolvedNotify(n *config.Notify) (string, error) {
+	if n == nil {
+		return "", nil
+	}
 	r := *n
+	var err error
 	if n.Email != nil {
 		e := *n.Email
-		e.Pass = resolveSecret(e.Pass)
+		if e.Pass, err = resolveSecret(e.Pass); err != nil {
+			return "", err
+		}
 		r.Email = &e
 	}
 	r.Env = map[string]string{}
 	for k, v := range n.Env {
-		r.Env[k] = resolveSecret(v)
+		if r.Env[k], err = resolveSecret(v); err != nil {
+			return "", err
+		}
 	}
 	b, _ := json.Marshal(r)
-	return string(b)
-}
-
-// sortedKeys returns the map keys in a stable order.
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
+	return string(b), nil
 }
 
 // resolveSecret expands a ${VAR} or $VAR reference from this machine's
-// environment; any other value is returned literally.
-func resolveSecret(s string) string {
-	if strings.HasPrefix(s, "${") && strings.HasSuffix(s, "}") {
-		return os.Getenv(s[2 : len(s)-1])
+// environment, refusing an unset variable; any other value is returned literally.
+func resolveSecret(s string) (string, error) {
+	name, ok := strings.CutPrefix(s, "$")
+	if !ok {
+		return s, nil
 	}
-	if strings.HasPrefix(s, "$") {
-		return os.Getenv(s[1:])
+	name = strings.TrimSuffix(strings.TrimPrefix(name, "{"), "}")
+	v, ok := os.LookupEnv(name)
+	if !ok {
+		return "", fmt.Errorf("$%s is not set", name)
 	}
-	return s
-}
-
-// notifyInvoke returns the gru binary to call on the target, as one shell
-// word: the uploaded agent for a remote, or this executable for a local run.
-func notifyInvoke(rt *remoteTarget) string {
-	if !rt.local && rt.invoke != "" {
-		return rt.invoke
-	}
-	if exe, err := os.Executable(); err == nil {
-		return remote.ShellQuote(exe)
-	}
-	return "gru"
+	return v, nil
 }

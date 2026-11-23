@@ -3,27 +3,24 @@ package cli
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andres-nav/minion/gru/internal/config"
-	"github.com/andres-nav/minion/gru/internal/remote"
 )
 
 func TestResolveSecret(t *testing.T) {
 	t.Setenv("SMTP_PW", "s3cret")
-	cases := map[string]string{
-		"${SMTP_PW}": "s3cret",
-		"$SMTP_PW":   "s3cret",
-		"literal":    "literal",
-		"${MISSING}": "",
-		"":           "",
+	for in, want := range map[string]string{"${SMTP_PW}": "s3cret", "$SMTP_PW": "s3cret", "literal": "literal", "": ""} {
+		if got, err := resolveSecret(in); err != nil || got != want {
+			t.Errorf("resolveSecret(%q) = %q, %v; want %q", in, got, err, want)
+		}
 	}
-	for in, want := range cases {
-		if got := resolveSecret(in); got != want {
-			t.Errorf("resolveSecret(%q) = %q, want %q", in, got, want)
+	for _, in := range []string{"${MISSING}", "$MISSING"} {
+		if _, err := resolveSecret(in); err == nil || !strings.Contains(err.Error(), "$MISSING is not set") {
+			t.Errorf("resolveSecret(%q): err %v", in, err)
 		}
 	}
 }
@@ -36,14 +33,21 @@ func TestResolvedNotify(t *testing.T) {
 		Run:   []string{"echo done"},
 		Env:   map[string]string{"TOKEN": "${TOKEN}"},
 	}
-	s := resolvedNotify(n)
+	s, err := resolvedNotify(n)
 	for _, want := range []string{`"pass":"app-password"`, `"TOKEN":"s3cret-token"`, `"run":["echo done"]`} {
-		if !strings.Contains(s, want) {
-			t.Errorf("resolved block missing %s: %s", want, s)
+		if err != nil || !strings.Contains(s, want) {
+			t.Errorf("resolved block missing %s: %s %v", want, s, err)
 		}
 	}
 	if strings.Contains(s, "${") || strings.Contains(s, "\n") || n.Email.Pass != "${PW}" {
 		t.Errorf("secret reference left, not one line, or config mutated: %s", s)
+	}
+	n.Env["X"] = "$UNSET_VAR"
+	if _, err := resolvedNotify(n); err == nil {
+		t.Error("an unset secret was sent as empty")
+	}
+	if s, err := resolvedNotify(nil); s != "" || err != nil {
+		t.Errorf("no block: %q %v", s, err)
 	}
 }
 
@@ -100,26 +104,31 @@ func TestAgentNotifyRunsHooks(t *testing.T) {
 	}
 }
 
-// The job script, with a notify block, must still be valid sh.
-func TestNotifyScriptIsValidShell(t *testing.T) {
-	job := remote.Job{Command: "make", Agent: "~/.gru/bin/gru", Notify: resolvedNotify(&config.Notify{Run: []string{"echo 'done'"}})}
-	s := remote.Script("~/w", "~/.gru/jobs/j1", job, remote.Meta{ID: "j1"})
-	cmd := exec.Command("sh", "-n")
-	cmd.Stdin = strings.NewReader(s)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sh -n rejected script: %v\n%s\n---\n%s", err, out, s)
+// A notify that runs past its timeout is killed with everything it started.
+func TestAgentNotifyTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	cfg, mark := filepath.Join(dir, "notify.json"), filepath.Join(dir, "late")
+	b, _ := json.Marshal(config.Notify{Run: []string{"(sleep 1; touch " + mark + ") & sleep 30"}})
+	os.WriteFile(cfg, b, 0o600)
+	defer func(d time.Duration) { notifyTimeout = d }(notifyTimeout)
+	notifyTimeout = 200 * time.Millisecond
+	begin := time.Now()
+	if code := agentNotify([]string{"--config", cfg}); code != 1 || time.Since(begin) > 5*time.Second {
+		t.Fatalf("exit %d after %v", code, time.Since(begin))
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if _, err := os.Stat(mark); err == nil {
+		t.Error("the hook's child outlived the timeout")
 	}
 }
 
-func TestNotifyInvokeLocal(t *testing.T) {
-	rt := &remoteTarget{local: true}
-	got := notifyInvoke(rt)
-	exe, _ := os.Executable()
-	if got != remote.ShellQuote(exe) {
-		t.Errorf("local notifyInvoke = %q, want quoted executable %q", got, exe)
+func TestAgentArgs(t *testing.T) {
+	for _, args := range [][]string{{}, {"bogus"}, {"follow"}, {"send"}, {"notify"}} {
+		if code := cmdAgent(args); code != 2 {
+			t.Errorf("_agent %v: exit %d, want 2", args, code)
+		}
 	}
-	remoteRT := &remoteTarget{invoke: "~/.gru/bin/gru"}
-	if got := notifyInvoke(remoteRT); got != "~/.gru/bin/gru" {
-		t.Errorf("remote notifyInvoke = %q", got)
+	if code := agentNotify([]string{"--config", filepath.Join(t.TempDir(), "none")}); code != 1 {
+		t.Errorf("missing config file: exit %d", code)
 	}
 }

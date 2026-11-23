@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/andres-nav/minion/gru/internal/config"
@@ -16,79 +18,68 @@ import (
 	"github.com/andres-nav/minion/gru/internal/sync"
 )
 
-// cmdAgent is the hidden remote-side counterpart invoked over ssh.
+// cmdAgent is the hidden counterpart that gru runs on the target.
 func cmdAgent(args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "gru _agent: missing subcommand")
 		return 2
 	}
-	switch args[0] {
+	verb, args := args[0], args[1:]
+	switch verb {
 	case "version":
 		fmt.Printf("gru %s\n", version)
 		return 0
-	case "follow":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "gru _agent follow: missing job dir")
-			return 2
-		}
-		code, err := follow(args[1], os.Stdout)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gru: %v\n", err)
-		}
-		return code
-	case "manifest":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "gru _agent manifest: missing dir")
-			return 2
-		}
-		if err := sync.WriteManifest(os.Stdout, args[1], args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "gru _agent: %v\n", err)
-			return 1
-		}
-		return 0
-	case "recv":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "gru _agent recv: missing dir")
-			return 2
-		}
-		n, err := sync.Receive(os.Stdin, args[1])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gru _agent: %v\n", err)
-			return 1
-		}
-		fmt.Printf("%d\n", n)
-		return 0
-	case "send":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "gru _agent send: missing dir")
-			return 2
-		}
-		paths, err := sync.Match(args[1], args[2:])
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "gru _agent: %v\n", err)
-			return 1
-		}
-		if err := sync.Send(os.Stdout, args[1], paths, nil); err != nil {
-			fmt.Fprintf(os.Stderr, "gru _agent: %v\n", err)
-			return 1
-		}
-		return 0
-	case "notify":
-		return agentNotify(args[1:])
 	case "now":
 		fmt.Println(time.Now().UnixNano())
 		return 0
+	case "notify":
+		return agentNotify(args)
+	case "follow", "manifest", "recv", "send":
 	default:
-		fmt.Fprintf(os.Stderr, "gru _agent: unknown subcommand %q\n", args[0])
+		fmt.Fprintf(os.Stderr, "gru _agent: unknown subcommand %q\n", verb)
 		return 2
 	}
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "gru _agent %s: missing dir\n", verb)
+		return 2
+	}
+	dir := args[0]
+	var err error
+	switch verb {
+	case "follow":
+		var code int
+		if code, err = follow(dir, os.Stdout); err == nil {
+			return code
+		}
+	case "manifest":
+		var m sync.Manifest
+		if m, err = sync.Walk(dir, args[1:]); err == nil {
+			err = json.NewEncoder(os.Stdout).Encode(m)
+		}
+	case "recv":
+		_, err = sync.Receive(os.Stdin, dir)
+	case "send":
+		var paths []string
+		if paths, err = sync.Match(dir, args[1:]); err == nil {
+			err = sync.Send(os.Stdout, dir, paths, nil)
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gru _agent %s: %v\n", verb, err)
+		return 1
+	}
+	return 0
 }
+
+// notifyTimeout bounds a job-end notification: email and run hooks together.
+var notifyTimeout = 30 * time.Second
 
 // agentNotify announces a finished job as the notify block in --config says (a
 // resolved block as JSON, in a file or - for stdin). The outcome comes from the
-// GRU_* env the run wrapper exported, unless --subject/--body give the
+// GRU_* env the job wrapper exported, unless --subject/--body give the
 // message: then it is sent as is, without the `on` gate (for a task's own
 // events). Run hooks also see $GRU_SUBJECT, $GRU_BODY and the block's env.
+// Whatever still runs after notifyTimeout is killed.
 func agentNotify(args []string) int {
 	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
 	path := fs.String("config", "", "notify block as JSON: a file, or - for stdin")
@@ -121,19 +112,31 @@ func agentNotify(args []string) int {
 	} else if !n.Fires(res.Exit) {
 		return 0
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
+	defer cancel()
 	code := 0
 	if e := n.Email; e != nil {
-		sink := notify.Email{Addr: e.SMTP, From: e.From, To: splitList(e.To), User: e.User, Pass: e.Pass}
-		if err := sink.Send(subj, text); err != nil {
+		sent := make(chan error, 1)
+		go func() {
+			sent <- notify.Email{Addr: e.SMTP, From: e.From, To: splitList(e.To), User: e.User, Pass: e.Pass}.Send(subj, text)
+		}()
+		select {
+		case err = <-sent:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[gru] notify: email failed: %v\n", err)
 			code = 1
 		}
 	}
 	for _, c := range n.Run {
-		cmd := exec.Command("sh", "-c", c)
+		cmd := exec.CommandContext(ctx, "sh", "-c", c)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 		cmd.Env = append(os.Environ(), "GRU_SUBJECT="+subj, "GRU_BODY="+text)
-		for _, k := range sortedKeys(n.Env) {
-			cmd.Env = append(cmd.Env, k+"="+n.Env[k])
+		for k, v := range n.Env {
+			cmd.Env = append(cmd.Env, k+"="+v)
 		}
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {

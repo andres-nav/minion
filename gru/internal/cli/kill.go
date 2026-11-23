@@ -19,12 +19,18 @@ func cmdKill(args []string) int {
 		fmt.Fprintln(os.Stderr, "usage: gru kill <id> [--host <name>]")
 		return 2
 	}
-
-	client, _, state, err := executorFor(*host)
+	if err := remote.CheckID(id); err != nil {
+		return errf("%v", err)
+	}
+	r, err := project()
 	if err != nil {
 		return errf("%v", err)
 	}
-	code, err := client.Run(remote.KillCommand(remote.JobDir(state, id)), nil, os.Stdout, os.Stderr)
+	t, err := dial(r, *host, false)
+	if err != nil {
+		return errf("%v", err)
+	}
+	code, err := t.Run(remote.KillCommand(remote.JobDir(t.state, id)), nil, os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("%v", err)
 	}

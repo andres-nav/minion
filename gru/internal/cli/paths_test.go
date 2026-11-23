@@ -6,8 +6,6 @@ import (
 	"testing"
 	"time"
 	_ "time/tzdata" // Europe/Zurich wherever the tests run
-
-	"github.com/andres-nav/minion/gru/internal/config"
 )
 
 func TestRemoteDirFor(t *testing.T) {
@@ -26,48 +24,23 @@ func TestRemoteDirFor(t *testing.T) {
 }
 
 func TestFetchDest(t *testing.T) {
-	root := "/proj/repo"
-	if got := fetchDest(root, "", "id1", "ts1", "repo"); got != root {
+	root, id := "/proj/repo", "brave_otter-20261123T142501Z"
+	if got := fetchDest(root, "", id, "repo"); got != root {
 		t.Errorf("empty tmpl = %q, want root %q", got, root)
 	}
 	// {id}/{ts}/{repo} expand; relative path is under root.
-	if got := fetchDest(root, "results/{repo}/{id}/{ts}", "id1", "ts1", "repo"); got != filepath.Join(root, "results/repo/id1/ts1") {
+	if got := fetchDest(root, "results/{repo}/{ts}/{id}", id, "repo"); got != filepath.Join(root, "results/repo/20261123T142501Z", id) {
 		t.Errorf("relative expansion = %q", got)
 	}
 	// absolute path is used verbatim (after expansion).
-	if got := fetchDest(root, "/tmp/out/{id}", "id1", "ts1", "repo"); got != "/tmp/out/id1" {
-		t.Errorf("absolute = %q, want /tmp/out/id1", got)
+	if got := fetchDest(root, "/tmp/out/{id}", id, "repo"); got != "/tmp/out/"+id {
+		t.Errorf("absolute = %q", got)
 	}
 	// leading ~ expands to the local home.
 	if home, err := os.UserHomeDir(); err == nil {
-		if got := fetchDest(root, "~/out", "id1", "ts1", "repo"); got != filepath.Join(home, "out") {
+		if got := fetchDest(root, "~/out", id, "repo"); got != filepath.Join(home, "out") {
 			t.Errorf("~ expansion = %q, want %q", got, filepath.Join(home, "out"))
 		}
-	}
-}
-
-func TestResolveHost(t *testing.T) {
-	cfg := &config.Config{Hosts: map[string]config.Host{
-		"gpu":  {SSH: "gpu-alias", RemoteDir: "x"},
-		"bare": {}, // no SSH → alias defaults to the name
-	}}
-	r := &config.Resolved{HostName: "gpu"}
-
-	// resolved template host, mapped through the hosts table.
-	if h, alias := resolveHost(cfg, r, ""); alias != "gpu-alias" || h.RemoteDir != "x" {
-		t.Errorf("default = %q %+v, want gpu-alias", alias, h)
-	}
-	// explicit override wins; SSH empty → alias is the name.
-	if _, alias := resolveHost(cfg, r, "bare"); alias != "bare" {
-		t.Errorf("override bare alias = %q, want bare", alias)
-	}
-	// a name not in the table is a raw ssh alias.
-	if h, alias := resolveHost(cfg, r, "raw-host"); alias != "raw-host" || h != (config.Host{}) {
-		t.Errorf("raw alias = %q %+v, want raw-host / empty host", alias, h)
-	}
-	// nothing configured → empty alias.
-	if _, alias := resolveHost(cfg, &config.Resolved{}, ""); alias != "" {
-		t.Errorf("no host alias = %q, want empty", alias)
 	}
 }
 
@@ -86,10 +59,11 @@ func TestTimesAreUTC(t *testing.T) {
 	if got := stamp(at); got != "20261123T142501Z" {
 		t.Errorf("stamp = %q", got)
 	}
-	if got := psTime(time.Unix(at.Unix(), 0)); got != "2026-11-23 14:25Z" {
+	start, ok := idTime("brave_otter-" + stamp(at))
+	if got := psTime(start); !ok || got != "2026-11-23 14:25Z" {
 		t.Errorf("ps time = %q", got)
 	}
-	if got := fetchDest("/r", "out/{ts}", "id", stamp(at), "r"); got != "/r/out/20261123T142501Z" {
+	if got := fetchDest("/r", "out/{ts}", "x-"+stamp(at), "r"); got != "/r/out/20261123T142501Z" {
 		t.Errorf("fetch dest = %q", got)
 	}
 }
