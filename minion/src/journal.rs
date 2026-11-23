@@ -32,10 +32,10 @@ impl Journal {
                 let mut s = String::new();
                 f.read_to_string(&mut s)
                     .map_err(|e| err("read", &path, e))?;
-                let end = s.rfind('\n').map_or(0, |i| i + 1);
-                f.set_len(end as u64)
+                let s = whole(&s);
+                f.set_len(s.len() as u64)
                     .map_err(|e| err("truncate", &path, e))?;
-                (Some(f), parse(&s[..end])?)
+                (Some(f), parse(s)?)
             }
             Err(e) if e.kind() == ErrorKind::NotFound => (None, vec![]),
             Err(e) => return Err(err("open", &path, e)),
@@ -88,10 +88,15 @@ impl Journal {
 pub fn read(dir: &Path) -> Result<Vec<Value>, String> {
     let path = dir.join("journal.jsonl");
     match fs::read_to_string(&path) {
-        Ok(s) => parse(&s[..s.rfind('\n').map_or(0, |i| i + 1)]),
+        Ok(s) => parse(whole(&s)),
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(vec![]),
         Err(e) => Err(err("read", &path, e)),
     }
+}
+
+/// s without a torn last line.
+fn whole(s: &str) -> &str {
+    &s[..s.rfind('\n').map_or(0, |i| i + 1)]
 }
 
 fn parse(s: &str) -> Result<Vec<Value>, String> {

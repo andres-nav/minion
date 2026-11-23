@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
+use crate::ffi::{
+    PR_SET_PDEATHSIG, SIGHUP, SIGINT, SIGKILL, SIGTERM, getppid, kill, prctl, signal,
+};
 use crate::lock;
 use crate::run::{self, Meter, WORKLOAD};
 use crate::settings::{self, State};
@@ -29,18 +32,6 @@ const KEYS: [&str; 9] = [
 ];
 const SETTLE: Duration = Duration::from_secs(1);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
-const SIGHUP: i32 = 1;
-const SIGINT: i32 = 2;
-const SIGKILL: i32 = 9;
-const SIGTERM: i32 = 15;
-const PR_SET_PDEATHSIG: i32 = 1;
-
-unsafe extern "C" {
-    fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
-    safe fn kill(pid: i32, sig: i32) -> i32;
-    safe fn prctl(option: i32, arg: u64) -> i32;
-    safe fn getppid() -> i32;
-}
 
 /// The signal that stops the queue, or 0.
 static STOP: AtomicI32 = AtomicI32::new(0);
@@ -110,7 +101,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     let result = r
         .start(&given, plan.len(), waited)
         .and_then(|targets| r.runs(&plan, &targets));
-    let restored = r.restore(false);
+    let restored = r.restore("end of queue");
     let sig = STOP.load(SeqCst);
     let (status, code) = match sig {
         0 if result.is_ok() && restored && r.failed == 0 => ("ok", 0),
@@ -141,11 +132,6 @@ struct Running<'a> {
     failed: usize,
 }
 
-enum Verb<'a> {
-    Apply(&'a State),
-    Restore,
-}
-
 impl Running<'_> {
     /// Kills the leftover workloads of a queue that died and restores its journal,
     /// both after the queue named itself in the lock; then writes queue.json and
@@ -160,7 +146,7 @@ impl Running<'_> {
         if reaped > 0 {
             log(format!("killed {reaped} leftover workload processes"));
         }
-        if !self.restore(true) {
+        if !self.restore("leftover journal") {
             return Err("the leftover journal could not be restored".into());
         }
         let start = settings::snapshot(&self.o.sysfs)?;
@@ -198,7 +184,7 @@ impl Running<'_> {
         for r in plan {
             let target = &targets[&r.profile];
             if current != Some(&r.profile) {
-                self.privileged(Verb::Apply(target))
+                self.privileged("apply", Some(target))
                     .map_err(|e| format!("apply {}: {e}", r.profile))?;
                 current = Some(&r.profile);
             }
@@ -244,17 +230,13 @@ impl Running<'_> {
             "{:.3} s",
             rec["meters"]["time"]["seconds"].as_f64().unwrap_or(0.0)
         );
-        match status {
-            Ok(s) if s.success() => self.send("run_done", &r.id, "exit 0", &secs),
-            Ok(s) => {
-                self.failed += 1;
-                self.send("run_failed", &r.id, &exit_text(s), &secs);
-            }
-            Err(e) => {
-                self.failed += 1;
-                self.send("run_failed", &r.id, "error", &e);
-            }
-        }
+        let (event, status, detail) = match status {
+            Ok(s) if s.success() => ("run_done", exit_text(s), secs),
+            Ok(s) => ("run_failed", exit_text(s), secs),
+            Err(e) => ("run_failed", "error".into(), e),
+        };
+        self.failed += usize::from(event == "run_failed");
+        self.send(event, &r.id, &status, &detail);
         if drift {
             let why = format!("the settings changed or differ from profile {}", r.profile);
             self.send("drift", &r.id, "", &why);
@@ -262,16 +244,11 @@ impl Running<'_> {
         Ok(drift)
     }
 
-    /// Puts the original settings back and sends restore_ok (at the start only
-    /// if a journal was open) or restore_failed.
-    fn restore(&mut self, leftover: bool) -> bool {
-        let what = if leftover {
-            "leftover journal"
-        } else {
-            "end of queue"
-        };
-        match self.privileged(Verb::Restore) {
-            Ok(said) if said.is_empty() && leftover => {}
+    /// Puts the original settings back and sends restore_ok (for the leftover
+    /// journal only if one was open) or restore_failed.
+    fn restore(&mut self, what: &str) -> bool {
+        match self.privileged("restore", None) {
+            Ok(said) if said.is_empty() && what == "leftover journal" => {}
             Ok(said) if said.is_empty() => {
                 self.send("restore_ok", "", "ok", &format!("{what}: none open"))
             }
@@ -286,11 +263,11 @@ impl Running<'_> {
 
     /// A privileged verb with this queue's id: `sudo -n minion <verb> --held`
     /// with the input on stdin, or in-process on a test tree. Returns what it says.
-    fn privileged(&self, verb: Verb) -> Result<String, String> {
-        let (verb, input) = match verb {
-            Verb::Apply(p) => ("apply", json!({"queue": self.id, "profile": p})),
-            Verb::Restore => ("restore", json!({"queue": self.id})),
-        };
+    fn privileged(&self, verb: &str, profile: Option<&State>) -> Result<String, String> {
+        let mut input = json!({"queue": self.id});
+        if let Some(p) = profile {
+            input["profile"] = json!(p);
+        }
         let input = input.to_string();
         if self.o.test {
             crate::privileged(self.o, verb, true, input.as_bytes())
@@ -606,7 +583,7 @@ fn stop_on_signals() {
     STOP.store(0, SeqCst);
     for sig in [SIGHUP, SIGINT, SIGTERM] {
         // SAFETY: on_signal only uses atomics and kill, which are async-signal-safe.
-        unsafe { signal(sig, on_signal) };
+        unsafe { signal(sig, on_signal as *const () as usize) };
     }
 }
 

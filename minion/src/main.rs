@@ -1,4 +1,5 @@
 mod engine;
+mod ffi;
 mod journal;
 mod lock;
 mod queue;
@@ -14,6 +15,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
+use crate::ffi::geteuid;
 use crate::journal::Journal;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -36,10 +38,6 @@ queue that holds it: stdin is {\"queue\": ID} for restore, plus \"profile\" for 
 --sysfs, --state-dir and --lock are for tests and are refused as root. With them, queue runs
 apply and restore in-process instead of through sudo."
 );
-
-unsafe extern "C" {
-    safe fn geteuid() -> u32;
-}
 
 struct Opts {
     sysfs: PathBuf,
