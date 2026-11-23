@@ -251,7 +251,7 @@ pub fn measure(
         warnings.push("the settings changed during the run (drift)".into());
     }
     for w in warnings {
-        eprintln!("{}: WARNING: {w}", env!("CARGO_PKG_NAME"));
+        crate::utc::log(format!("WARNING: {w}"));
     }
     let run = json!({
         "cmd": cmd, "exit": status.code(), "signal": status.signal(),

@@ -1,9 +1,10 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
+
+use crate::utc;
 
 /// The open journal of the state dir, held under an exclusive lock. The lock is
 /// a separate file because the journal itself is renamed on close.
@@ -55,7 +56,9 @@ impl Journal {
             self.file = Some(f.map_err(|e| err("create", &path, e))?);
             sync_dir(&self.dir)?;
         }
-        line["time"] = json!(now_ns() / 1_000_000_000);
+        let now = utc::now_s();
+        line["time"] = json!(now);
+        line["time_utc"] = json!(utc::iso(now));
         let mut bytes = line.to_string().into_bytes();
         bytes.push(b'\n');
         let f = self.file.as_mut().unwrap();
@@ -66,11 +69,11 @@ impl Journal {
         Ok(())
     }
 
-    /// Moves the journal to done/<ns>.jsonl.
+    /// Moves the journal to done/<UTC time to the ns>.jsonl.
     pub fn close(self) -> Result<(), String> {
         let done = self.dir.join("done");
         create_dir(&done)?;
-        let to = done.join(format!("{}.jsonl", now_ns()));
+        let to = done.join(format!("{}.jsonl", utc::stamp(utc::now_ns(), true)));
         fs::rename(self.dir.join("journal.jsonl"), &to).map_err(|e| err("rename to", &to, e))?;
         sync_dir(&done)?;
         sync_dir(&self.dir)
@@ -110,13 +113,6 @@ fn sync_dir(dir: &Path) -> Result<(), String> {
     File::open(dir)
         .and_then(|d| d.sync_all())
         .map_err(|e| err("fsync", dir, e))
-}
-
-pub fn now_ns() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
 }
 
 fn err(what: &str, path: &Path, e: std::io::Error) -> String {
