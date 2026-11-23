@@ -606,6 +606,19 @@ fn queue_runs_every_run_and_restores() {
     }
 
     let queue = read_json(&dir.join("queue.json"));
+    let first = read_json(&dir.join("runs").join(ids[0]).join("run.json"));
+    let (q, r) = (&queue["time"], &first["meters"]["time"]);
+    let ns = |v: &Value, edge: &str| v[format!("{edge}_realtime_ns")].as_u64().unwrap();
+    assert!(ns(q, "start") <= ns(r, "start") && ns(r, "start") <= ns(r, "end"));
+    assert!(ns(r, "end") <= ns(q, "end"));
+    assert!(utc::now_ns() as u64 - ns(q, "start") < 60_000_000_000); // wall-clock, not monotonic
+    for (v, edge) in [(q, "start"), (q, "end"), (r, "start"), (r, "end")] {
+        assert_eq!(
+            v[format!("{edge}_utc")],
+            utc::iso(ns(v, edge) / 1_000_000_000)
+        );
+    }
+    assert!(!dir.join("queue.json.new").exists());
     assert_eq!(queue["given"]["reps"], 2);
     assert_eq!(queue["resolved"]["seed"], 7);
     assert_eq!(queue["resolved"]["meters"], json!(["time", "rapl"]));
@@ -939,6 +952,10 @@ fn times_are_utc_whatever_tz_says() {
         utc::iso(1_795_425_125),
         utc::stamp(1_795_425_125_000_000_007, false),
         utc::stamp(1_795_425_125_000_000_007, true),
+        crate::run::edges(&[("start", &[1, 1_795_425_125_000_000_007])])["start_utc"]
+            .as_str()
+            .unwrap()
+            .into(),
     ];
     unsafe { std::env::remove_var("TZ") };
     assert_eq!(
@@ -949,6 +966,34 @@ fn times_are_utc_whatever_tz_says() {
             "2026-11-23T09:12:05Z",
             "20261123T091205Z",
             "20261123T091205.000000007Z",
+            "2026-11-23T09:12:05Z",
         ]
     );
+}
+
+#[test]
+fn restore_refuses_a_lock_that_is_not_a_regular_file() {
+    let f = Fake::new("fifo-lock");
+    let lock = f.root.join("lock");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&lock)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let a = [
+        "restore",
+        "--sysfs",
+        f.sys.to_str().unwrap(),
+        "--state-dir",
+        f.state.to_str().unwrap(),
+        "--lock",
+        lock.to_str().unwrap(),
+    ]
+    .map(String::from);
+    let (done, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || done.send(crate::run(&a)));
+    let r = got
+        .recv_timeout(Duration::from_secs(5))
+        .expect("restore blocked on the FIFO");
+    assert!(r.unwrap_err().contains("not a regular file"));
 }

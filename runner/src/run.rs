@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 
 use serde_json::{Map, Value, json};
 
-use crate::settings;
+use crate::{settings, utc};
 
 /// Something read at the edges of a run, never in between.
 pub trait Meter {
@@ -18,7 +18,9 @@ pub trait Meter {
     fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>);
 }
 
-/// CLOCK_MONOTONIC in ns. Always the first meter: it gives the run's duration.
+/// CLOCK_MONOTONIC and CLOCK_REALTIME in ns. Always the first meter: the
+/// monotonic clock gives the run's duration, the realtime one lines it up with
+/// other logs and machines.
 struct Clock;
 
 /// The readable `energy_uj` counters of the powercap zones.
@@ -45,23 +47,47 @@ unsafe extern "C" {
     fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
 }
 
+const CLOCK_REALTIME: i32 = 0;
 const CLOCK_MONOTONIC: i32 = 1;
+
+/// The monotonic and the realtime clock in ns, read back to back.
+pub fn clocks() -> Result<Vec<u64>, String> {
+    [CLOCK_MONOTONIC, CLOCK_REALTIME]
+        .into_iter()
+        .map(|clock| {
+            let mut ts = Timespec { sec: 0, nsec: 0 };
+            // SAFETY: ts is a valid timespec for the call to fill.
+            if unsafe { clock_gettime(clock, &mut ts) } != 0 {
+                return Err("clock_gettime failed".to_string());
+            }
+            Ok(ts.sec as u64 * 1_000_000_000 + ts.nsec as u64)
+        })
+        .collect()
+}
+
+/// Both clocks at each named edge: <edge>_ns (monotonic), <edge>_realtime_ns
+/// and <edge>_utc.
+pub fn edges(edges: &[(&str, &[u64])]) -> Map<String, Value> {
+    let mut m = Map::new();
+    for (name, c) in edges {
+        m.insert(format!("{name}_ns"), json!(c[0]));
+        m.insert(format!("{name}_realtime_ns"), json!(c[1]));
+        m.insert(format!("{name}_utc"), json!(utc::iso(c[1] / 1_000_000_000)));
+    }
+    m
+}
 
 impl Meter for Clock {
     fn name(&self) -> &'static str {
         "time"
     }
     fn read(&self) -> Result<Vec<u64>, String> {
-        let mut ts = Timespec { sec: 0, nsec: 0 };
-        // SAFETY: ts is a valid timespec for the call to fill.
-        if unsafe { clock_gettime(CLOCK_MONOTONIC, &mut ts) } != 0 {
-            return Err("clock_gettime failed".into());
-        }
-        Ok(vec![ts.sec as u64 * 1_000_000_000 + ts.nsec as u64])
+        clocks()
     }
     fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>) {
-        let v = json!({"start_ns": start[0], "end_ns": end[0], "seconds": secs});
-        (v, vec![])
+        let mut v = edges(&[("start", start), ("end", end)]);
+        v.insert("seconds".into(), json!(secs));
+        (v.into(), vec![])
     }
 }
 
