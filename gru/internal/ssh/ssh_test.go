@@ -126,7 +126,7 @@ func TestRunAndOutput(t *testing.T) {
 		if out, err := c.Output("echo hi"); err != nil || out != "hi" {
 			t.Fatalf("Output = %q, err = %v", out, err)
 		}
-		if _, err := c.Output("echo oops >&2; exit 3"); err == nil || !strings.Contains(err.Error(), "oops") {
+		if _, err := c.Output("echo oops >&2; exit 3"); err == nil || !strings.Contains(err.Error(), "oops") || strings.Contains(err.Error(), "echo") {
 			t.Fatalf("Output err = %v", err)
 		}
 		if code, err := c.Run("exit 5", nil, nil, nil); err != nil || code != 5 {
