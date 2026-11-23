@@ -275,7 +275,9 @@ Avoid:
 
 - Paper texts behind a paywall (only metadata, abstracts or code read): benchkit, EnergyTrackr
   (ASE), Ournani 2020, Laaber 2019 and 2020, Guilloteau 2024, Danglot 2024 (results), Khrouf 2026,
-  Kwollect, perun, Kepler, SmartWatts, EnergAt (method details).
+  Kwollect, perun, Kepler, SmartWatts, EnergAt (method details). For Khrouf 2026 and Laaber 2020
+  only the Crossref records were read: each is the only work of that first author and year on
+  the topic found there, so check that they are the ones meant.
 - Whether tuned's originals survive a daemon crash; what Slurm does if `slurmstepd` crashes.
 - Overhead numbers for Scaphandre, Kepler, perun, PowerAPI and turbostat (none published).
 - osnoise overhead in no-workload mode; the RAPL hardware update interval; the energy unit on the
@@ -326,8 +328,13 @@ Avoid:
   tell the masses when reporting performance results. SC. https://doi.org/10.1145/2807591.2807644
 - Kalibera, T., Jones, R. 2013. Rigorous benchmarking in reasonable time. ISMM.
   https://doi.org/10.1145/2464157.2464160
+- Khrouf, L., Shatnawi, A., Rouvoy, R. 2026. Can we spot energy regressions using developers'
+  tests? An industrial replication. ICPC. https://doi.org/10.1145/3794763.3798169
 - Laaber, C., Scheuner, J., Leitner, P. 2019. Software microbenchmarking in the cloud. How bad is it
   really? Empirical Software Engineering. https://doi.org/10.1007/s10664-019-09681-1
+- Laaber, C., Würsten, S., Gall, H. C., Leitner, P. 2020. Dynamically reconfiguring software
+  microbenchmarks: reducing execution time without sacrificing result quality. ESEC/FSE.
+  https://doi.org/10.1145/3368089.3409683
 - Maquoi, J., Bechet, F., Cruz, L., Vanderose, B., Devroey, X. 2026. Systematic detection of energy
   regressions in software version histories. arXiv:2610.19895 [preprint].
   https://arxiv.org/abs/2610.19895
