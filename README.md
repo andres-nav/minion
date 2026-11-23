@@ -5,7 +5,7 @@ Two tools for running builds, tests and experiments on remote machines:
 - **gru**, on the laptop: a thin remote dev-loop orchestrator. It dispatches a repo's
   build/test/experiment commands — locally or on a remote SSH server — reusing each repo's
   existing build tooling. It syncs only modified files, runs jobs in detached sessions that
-  survive disconnects, notifies on failure from the remote side, and fetches results back. One
+  survive disconnects, notifies from the remote side when a job ends, and fetches results back. One
   uniform interface across every repo, driven from the terminal, Emacs, or an AI agent.
 - **minion**, on the measured host: sets machine settings for a measurement, puts the originals
   back (also after a crash), and runs queues of measured runs (see [minion/README.md](minion/README.md)).
@@ -19,10 +19,10 @@ gru v1 working, validated end-to-end against a real host. The full loop runs wit
 no tmux and nothing to install on the remote but a POSIX shell:
 
 ```
-gru run <task>                    # build/test/lint/clean or a freeform task; local, or remote when a host is set
+gru run <task>                    # a task of the template, on its host; --host localhost runs it here
 gru sync [--delete]               # git-aware, only modified files
-gru fetch                         # pull result files back
-gru attach <id> | ps | kill <id>  # manage detached remote jobs
+gru fetch [<id>]                  # pull result files back
+gru attach [<id>] | ps | kill <id>  # manage detached jobs
 gru ssh                           # interactive shell on the host, in the project dir
 gru doctor [--notify]             # validate config + hosts; --notify fires a test notification (email and/or run hooks)
 gru list [--json]                 # discover the resolved template + tasks

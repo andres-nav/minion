@@ -19,6 +19,6 @@ var nameNouns = []string{
 }
 
 // randomName returns a friendly Docker-style "adjective_noun", the start of a job id.
-func randomName() string {
+var randomName = func() string {
 	return nameAdjectives[rand.IntN(len(nameAdjectives))] + "_" + nameNouns[rand.IntN(len(nameNouns))]
 }

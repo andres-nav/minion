@@ -22,15 +22,15 @@ type command struct {
 // cmdHelp → usage → commands.
 func commands() []command {
 	return []command{
-		{"run", "run <task>", "run a task by name (build, test, lint, clean, or a freeform task)", cmdRun},
-		{"list", "", "show the resolved template and tasks for this repo", cmdList},
-		{"sync", "", "copy modified files to the remote (--host)", cmdSync},
-		{"fetch", "", "pull result files back from the remote (--host, --into)", cmdFetch},
-		{"attach", "attach [<id>]", "watch a remote job's output (default: the latest) (--host)", cmdAttach},
-		{"kill", "kill <id>", "stop a running remote job (--host)", cmdKill},
-		{"ps", "", "list this package's remote jobs (--all for every job) (--host)", cmdPs},
+		{"run", "run <task>", "run a task of this project (--host, --detach, --arg, --no-sync)", cmdRun},
+		{"list", "", "show the resolved template and tasks for this project (--json)", cmdList},
+		{"sync", "", "copy modified files to the remote (--host, --delete)", cmdSync},
+		{"fetch", "fetch [<id>]", "pull result files back from the remote (--host, --into)", cmdFetch},
+		{"attach", "attach [<id>]", "watch a job's output (default: the latest) (--host)", cmdAttach},
+		{"kill", "kill <id>", "stop a running job (--host)", cmdKill},
+		{"ps", "", "list this project's jobs (--all for every job) (--host)", cmdPs},
 		{"ssh", "", "open an interactive shell on the host, in the project dir (--host)", cmdSSH},
-		{"doctor", "", "validate config and check hosts; --notify also sends a test email (--host)", cmdDoctor},
+		{"doctor", "", "check the config and hosts; --notify also sends a test notification (--host)", cmdDoctor},
 		{"version", "", "print the gru version", cmdVersion},
 		{"help", "", "show this help", cmdHelp},
 		{"_agent", "", "", cmdAgent},

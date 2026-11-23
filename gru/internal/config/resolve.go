@@ -5,39 +5,34 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 )
 
 const repoFile = ".gru.json"
+
+// RepoConfig is a per-project .gru.json: it picks a template via `use` and
+// may override any Template field (embedded fields sit at the JSON top level).
+// Its own `templates` and `hosts` are merged over the global config (local
+// wins), so a project can `use` a template defined right in its .gru.json.
+type RepoConfig struct {
+	Use       string              `json:"use"`
+	Hosts     map[string]Host     `json:"hosts"`
+	Templates map[string]Template `json:"templates"`
+	Template
+}
 
 // Resolved is the effective config for a directory after detection and
 // per-project overrides.
 type Resolved struct {
 	Root         string // project root: nearest ancestor with a marker or .gru.json
-	GitRoot      string // nearest .git ancestor (sync base); may equal Root or be ""
 	TemplateName string
-	HostName     string
-	Host         Host
 	Template     Template
 	RepoFile     string
 	Ambiguous    []string // other templates that also matched at Root
 	Config       *Config  // effective config: global plus the .gru.json hosts/templates
-}
-
-func gitRoot(dir string) string {
-	dir = filepath.Clean(dir)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return ""
-		}
-		dir = parent
-	}
 }
 
 // Resolve walks up from dir; the first level with a .gru.json or a matching
@@ -47,170 +42,85 @@ func gitRoot(dir string) string {
 func (c *Config) Resolve(dir string) (*Resolved, error) {
 	dir = filepath.Clean(dir)
 	gr := gitRoot(dir)
-
-	for cur := dir; ; {
-		rcPath := filepath.Join(cur, repoFile)
-		b, err := os.ReadFile(rcPath)
-		switch {
-		case err == nil:
-			rc := &RepoConfig{}
-			if uErr := json.Unmarshal(b, rc); uErr != nil {
-				return nil, fmt.Errorf("parse %s: %w", rcPath, uErr)
-			}
-			// Merge in any project-local templates/hosts so `use` can name a
-			// template defined right here in the .gru.json.
-			cfg := c.withLocal(rc)
-			// A `use` that names no template resolves to an empty template and
-			// only fails later with a confusing "no task" error — fail loudly here.
-			if rc.Use != "" {
-				if _, ok := cfg.Templates[rc.Use]; !ok {
-					return nil, fmt.Errorf("%s: use %q is not a defined template", rcPath, rc.Use)
-				}
-			}
-			return cfg.finish(cur, gr, rc, rcPath), nil
-		case !errors.Is(err, fs.ErrNotExist):
+	for cur := dir; ; cur = filepath.Dir(cur) {
+		path := filepath.Join(cur, repoFile)
+		b, err := os.ReadFile(path)
+		if err == nil {
+			return c.resolveRepo(cur, path, b)
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, err
 		}
-
-		if matches := c.detect(cur); len(matches) > 0 {
-			sort.Strings(matches)
-			return c.build(cur, gr, matches[0], matches[1:], nil, ""), nil
+		if m := c.detect(cur); len(m) > 0 {
+			return &Resolved{Root: cur, TemplateName: m[0], Template: c.Templates[m[0]], Ambiguous: m[1:], Config: c}, nil
 		}
-
-		if cur == gr {
+		if cur == gr || cur == filepath.Dir(cur) {
 			break
 		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			break
+	}
+	if gr != "" {
+		dir = gr
+	}
+	return &Resolved{Root: dir, Config: c}, nil
+}
+
+func (c *Config) resolveRepo(root, path string, b []byte) (*Resolved, error) {
+	rc := &RepoConfig{}
+	if err := decode(b, rc); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	merged := &Config{Hosts: map[string]Host{}, Templates: map[string]Template{}, Notify: c.Notify}
+	maps.Copy(merged.Hosts, c.Hosts)
+	maps.Copy(merged.Hosts, rc.Hosts)
+	maps.Copy(merged.Templates, c.Templates)
+	maps.Copy(merged.Templates, rc.Templates)
+
+	r := &Resolved{Root: root, TemplateName: rc.Use, RepoFile: path, Config: merged}
+	if rc.Use == "" {
+		if m := merged.detect(root); len(m) > 0 {
+			r.TemplateName, r.Ambiguous = m[0], m[1:]
 		}
-		cur = parent
+	} else if _, ok := merged.Templates[rc.Use]; !ok {
+		return nil, fmt.Errorf("%s: use %q is not a defined template", path, rc.Use)
 	}
 
-	root := gr
-	if root == "" {
-		root = dir
+	// The .gru.json fields overlay a copy of the template: lists and values
+	// replace, tasks merge by name, env adds, a notify block replaces.
+	base := merged.Templates[r.TemplateName]
+	cp, _ := json.Marshal(base)
+	json.Unmarshal(cp, &r.Template)
+	if rc.Notify != nil {
+		r.Template.Notify = nil
 	}
-	return c.build(root, gr, "", nil, nil, ""), nil
+	json.Unmarshal(b, &r.Template)
+	if len(rc.Env) > 0 {
+		r.Template.Env = append(slices.Clone(base.Env), rc.Env...)
+	}
+	return r, r.Template.Notify.Validate()
 }
 
-func (c *Config) finish(root, gr string, rc *RepoConfig, rcPath string) *Resolved {
-	name := rc.Use
-	var ambiguous []string
-	if name == "" {
-		matches := c.detect(root)
-		sort.Strings(matches)
-		if len(matches) > 0 {
-			name = matches[0]
-			ambiguous = matches[1:]
-		}
-	}
-	return c.build(root, gr, name, ambiguous, rc, rcPath)
-}
-
-func (c *Config) build(root, gr, name string, ambiguous []string, rc *RepoConfig, rcPath string) *Resolved {
-	tmpl := c.Templates[name]
-	if rc != nil {
-		tmpl = mergeTemplate(tmpl, rc.Template)
-	}
-	return &Resolved{
-		Root:         root,
-		GitRoot:      gr,
-		TemplateName: name,
-		HostName:     tmpl.Host,
-		Host:         c.Hosts[tmpl.Host],
-		Template:     tmpl,
-		RepoFile:     rcPath,
-		Ambiguous:    ambiguous,
-		Config:       c,
-	}
-}
-
-// detect returns templates with at least one detection marker present in root.
+// detect returns, sorted, the templates with a detection marker present in root.
 func (c *Config) detect(root string) []string {
 	var out []string
 	for name, t := range c.Templates {
-		for _, marker := range t.Detect {
-			if _, err := os.Stat(filepath.Join(root, marker)); err == nil {
-				out = append(out, name)
-				break
-			}
+		if slices.ContainsFunc(t.Detect, func(m string) bool {
+			_, err := os.Stat(filepath.Join(root, m))
+			return err == nil
+		}) {
+			out = append(out, name)
 		}
 	}
+	slices.Sort(out)
 	return out
 }
 
-// mergeTemplate overlays non-empty fields of over onto base; Tasks merge
-// key-by-key.
-func mergeTemplate(base, over Template) Template {
-	out := base
-	if len(over.Detect) > 0 {
-		out.Detect = over.Detect
-	}
-	if over.Host != "" {
-		out.Host = over.Host
-	}
-	if over.RemoteDir != "" {
-		out.RemoteDir = over.RemoteDir
-	}
-	if len(over.Needs) > 0 {
-		out.Needs = over.Needs
-	}
-	if len(over.Push) > 0 {
-		out.Push = over.Push
-	}
-	if len(over.Exclude) > 0 {
-		out.Exclude = over.Exclude
-	}
-	if len(over.Env) > 0 {
-		// env is additive: template vars plus per-repo vars (later wins).
-		out.Env = append(append([]string{}, base.Env...), over.Env...)
-	}
-	if len(over.Before) > 0 {
-		out.Before = over.Before
-	}
-	if len(over.OnSuccess) > 0 {
-		out.OnSuccess = over.OnSuccess
-	}
-	if len(over.OnFailure) > 0 {
-		out.OnFailure = over.OnFailure
-	}
-	if len(over.Always) > 0 {
-		out.Always = over.Always
-	}
-	if len(over.Fetch) > 0 {
-		out.Fetch = over.Fetch
-	}
-	if over.FetchInto != "" {
-		out.FetchInto = over.FetchInto
-	}
-	if over.Notify != nil {
-		out.Notify = over.Notify
-	}
-	if over.Build != "" {
-		out.Build = over.Build
-	}
-	if over.Test != "" {
-		out.Test = over.Test
-	}
-	if over.Run != "" {
-		out.Run = over.Run
-	}
-	if over.Lint != "" {
-		out.Lint = over.Lint
-	}
-	if over.Clean != "" {
-		out.Clean = over.Clean
-	}
-	if len(over.Tasks) > 0 {
-		merged := make(map[string]string, len(base.Tasks)+len(over.Tasks))
-		for k, v := range base.Tasks {
-			merged[k] = v
+func gitRoot(dir string) string {
+	for ; ; dir = filepath.Dir(dir) {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return dir
 		}
-		for k, v := range over.Tasks {
-			merged[k] = v
+		if dir == filepath.Dir(dir) {
+			return ""
 		}
-		out.Tasks = merged
 	}
-	return out
 }

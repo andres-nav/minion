@@ -1,17 +1,17 @@
 package cli
 
-import "flag"
+import (
+	"errors"
+	"flag"
+)
 
-// hostFlag registers the standard --host flag shared by the remote commands, so
-// every command describes it identically.
+// hostFlag registers the --host flag shared by the remote commands.
 func hostFlag(fs *flag.FlagSet) *string {
 	return fs.String("host", "", "target host: a hosts-map name, an ssh alias, or localhost")
 }
 
-// parsePositional parses fs and returns the command's single optional
-// positional argument (an id or task name), which may be surrounded by flags on
-// either side. flag.Parse stops at the first non-flag token, so a second pass
-// over whatever trails the positional is what makes `kill <id> --host x` work.
+// parsePositional parses fs and returns the command's one optional positional
+// argument (an id or task name), with flags on either side of it.
 func parsePositional(fs *flag.FlagSet, args []string) (string, error) {
 	if err := fs.Parse(args); err != nil {
 		return "", err
@@ -20,6 +20,10 @@ func parsePositional(fs *flag.FlagSet, args []string) (string, error) {
 	if fs.NArg() > 1 {
 		if err := fs.Parse(fs.Args()[1:]); err != nil {
 			return "", err
+		}
+		if fs.NArg() > 0 {
+			fs.Usage()
+			return "", errors.New("too many arguments")
 		}
 	}
 	return pos, nil

@@ -25,30 +25,36 @@ gru list --json
 
 This prints the resolved `template`, `host`, `remote_dir`, and available
 `tasks` (name → command) for the current directory. **Rules:**
-- If it shows a `template` and tasks → use gru for build/test/run here.
-- If `template` is empty ("no template matched") → this repo has no gru
-  setup; fall back to the repo's own commands. Do NOT invent a gru config.
+- If it shows tasks → use gru for build/test/run here.
+- If `tasks` is empty ("no tasks for …") → this repo has no gru setup; fall
+  back to the repo's own commands. Do NOT invent a gru config.
 - Run it from the package/project dir (gru auto-detects the project root).
 
 ## Core commands
 
 - `gru run <task>` — run any task by name: `run build`, `run test`,
-  `run lint`, or a freeform task like `run sweep`. (There are no bare `build`/
-  `test` commands; everything goes through `run`.)
+  `run sweep`. (There are no bare `build`/`test` commands; everything goes
+  through `run`.)
 - `gru run <task> --host <name>` — override where it runs (a hosts-map name,
   an ssh alias, or `localhost`). Default is the template/repo's host.
 - `gru run <task> --host localhost` — run on this machine (in place, no ssh).
 - `gru run <task> --detach` — launch without attaching; prints the job id.
+- `gru run <task> --arg 'TEXT'` — pass TEXT to the task as `$GRU_ARGS`.
+- `gru run <task> --no-sync` — run the code already on the host.
 - `gru sync [--delete]` — push modified files only (git-aware); no run.
-- `gru fetch [<id>]` — pull result files back (into `fetch_into` if set).
-- `gru attach [<id>]` — stream a job's output (default: latest); exits with
-  the job's exit code.
-- `gru ps [--all]` — list this package's jobs (name/task/started/status);
+  Don't use `--delete` unless asked.
+- `gru fetch [<id>] [--into DIR]` — copy the files matching `fetch` from the
+  remote project dir as they are now (into `fetch_into` if set, else the
+  project dir); the id names `{id}`/`{ts}` and adds that job's `run.json` and
+  log under `_gru/`.
+- `gru attach [<id>]` — stream a job's output (default: this project's latest);
+  exits with the job's exit code.
+- `gru ps [--all]` — list this project's jobs (name/task/started/status);
   `--all` for every job on the host.
-- `gru kill <id>` — stop a running job.
+- `gru kill <id>` — stop a running job (SIGTERM; its hooks still run).
 - `gru ssh` — interactive shell on the host, in the project's remote dir.
-- `gru doctor [--notify]` — validate config + check hosts (reachable +
-  agent); `--notify` also sends a test email through the configured sink.
+- `gru doctor [--notify]` — check config + hosts (reachable + agent);
+  `--notify` also sends a test notification (email and/or run hooks).
 
 Flags can follow the positional arg (`gru attach my_job --host gpu`).
 
@@ -63,16 +69,16 @@ Flags can follow the positional arg (`gru attach my_job --host gpu`).
 - Exit codes propagate: `gru run <task>` returns the task's exit code. Read a
   failed job's log with `gru attach <id>`.
 - Results land where `fetch_into` says (e.g. `results/{ts}-{id}/`, with `{ts}`
-  the start time in UTC: `20261123T142501Z`), so each run is preserved.
+  the start time in UTC: `20261123T142501Z`), so each run is preserved;
+  without it they land in the project dir, replacing the last fetch's.
 
 ## Config model (only if asked to change it)
 
 - Global: `~/.config/gru/config.json` — a library of `hosts` and `templates`
   (repo-types). Written once; repos need no files.
 - Per-repo: an optional `.gru.json` that picks a template via `"use"` and
-  overrides any field.
-- A template maps standard verbs (`build`/`test`/`run`/`lint`/`clean`) and
-  freeform `tasks` to real commands, plus environment:
+  overrides any field (unknown keys are refused).
+- A template maps `tasks` (name → command) to real commands, plus environment:
   `detect` (markers), `host`, `remote_dir`, `needs` (sibling packages to sync
   first), `push` (local dirs to copy first, e.g. `~/.midway`), `exclude`,
   `env`, `before`/`on_success`/`on_failure`/`always` hooks, `fetch` (result

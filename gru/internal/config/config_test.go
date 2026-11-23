@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -15,15 +16,14 @@ const globalJSON = `{
   "templates": {
     "latex": {
       "detect": ["main.tex"],
-      "build": "latexmk -pdflua -outdir=build main.tex",
-      "clean": "rm -rf build"
+      "tasks": { "build": "latexmk -pdflua -outdir=build main.tex", "clean": "rm -rf build" }
     },
     "python-gpu": {
       "detect": ["requirements.txt"],
-      "test": "pytest",
-      "run": "python spike.py",
       "host": "gpu02",
-      "tasks": { "sweep": "python sweep.py" }
+      "env": ["A=1"],
+      "notify": { "run": ["echo template"] },
+      "tasks": { "test": "pytest", "sweep": "python sweep.py" }
     }
   }
 }`
@@ -70,11 +70,11 @@ func TestDetectTemplate(t *testing.T) {
 	if r.TemplateName != "latex" {
 		t.Fatalf("template = %q, want latex", r.TemplateName)
 	}
-	if cmd, ok := r.Template.Lookup("build"); !ok || cmd == "" {
-		t.Fatalf("build task missing: %q ok=%v", cmd, ok)
+	if cmd := r.Template.Tasks["build"]; cmd == "" {
+		t.Fatal("build task missing")
 	}
-	if r.HostName != "" { // no defaults, and latex sets no host
-		t.Fatalf("host = %q, want empty", r.HostName)
+	if r.Template.Host != "" { // no defaults, and latex sets no host
+		t.Fatalf("host = %q, want empty", r.Template.Host)
 	}
 }
 
@@ -96,8 +96,8 @@ func TestResolveFromSubdir(t *testing.T) {
 	if r.TemplateName != "python-gpu" {
 		t.Fatalf("template = %q, want python-gpu", r.TemplateName)
 	}
-	if r.HostName != "gpu02" { // template-level host wins over defaults
-		t.Fatalf("host = %q, want gpu02", r.HostName)
+	if r.Template.Host != "gpu02" {
+		t.Fatalf("host = %q, want gpu02", r.Template.Host)
 	}
 }
 
@@ -120,9 +120,6 @@ func TestMonorepoSubproject(t *testing.T) {
 	if r.Root != proj {
 		t.Fatalf("project root = %q, want %q", r.Root, proj)
 	}
-	if r.GitRoot != root {
-		t.Fatalf("git root = %q, want %q", r.GitRoot, root)
-	}
 	if r.TemplateName != "latex" {
 		t.Fatalf("template = %q, want latex", r.TemplateName)
 	}
@@ -131,15 +128,13 @@ func TestMonorepoSubproject(t *testing.T) {
 func TestPerRepoOverride(t *testing.T) {
 	cfg := loadGlobal(t)
 	root := mkRepo(t, "main.tex") // would auto-detect latex...
-	repoJSON := `{
+	writeRepo(t, root, `{
   "use": "python-gpu",
   "host": "gpu99",
-  "build": "python setup.py build"
-}`
-	if err := os.WriteFile(filepath.Join(root, ".gru.json"), []byte(repoJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
+  "env": ["B=2"],
+  "notify": { "on": "failure", "email": { "smtp": "h:587", "from": "a@x", "to": "a@x" } },
+  "tasks": { "build": "python setup.py build" }
+}`)
 	r, err := cfg.Resolve(root)
 	if err != nil {
 		t.Fatal(err)
@@ -147,17 +142,25 @@ func TestPerRepoOverride(t *testing.T) {
 	if r.TemplateName != "python-gpu" { // `use` overrides detection
 		t.Fatalf("template = %q, want python-gpu", r.TemplateName)
 	}
-	if r.HostName != "gpu99" { // per-repo host override
-		t.Fatalf("host = %q, want gpu99", r.HostName)
+	want := map[string]string{"build": "python setup.py build", "test": "pytest", "sweep": "python sweep.py"}
+	if r.Template.Host != "gpu99" || !reflect.DeepEqual(r.Template.Tasks, want) {
+		t.Fatalf("host %q tasks %v: want gpu99 and merged tasks", r.Template.Host, r.Template.Tasks)
 	}
-	if cmd, _ := r.Template.Lookup("build"); cmd != "python setup.py build" {
-		t.Fatalf("build override = %q", cmd)
+	if !reflect.DeepEqual(r.Template.Env, []string{"A=1", "B=2"}) { // env adds
+		t.Fatalf("env = %v", r.Template.Env)
 	}
-	if cmd, _ := r.Template.Lookup("test"); cmd != "pytest" { // inherited from template
-		t.Fatalf("inherited test = %q, want pytest", cmd)
+	if n := r.Template.Notify; n.On != "failure" || n.Run != nil { // notify replaces
+		t.Fatalf("notify = %+v, want the repo's block only", n)
 	}
-	if cmd, ok := r.Template.Lookup("sweep"); !ok || cmd != "python sweep.py" { // freeform inherited
-		t.Fatalf("inherited sweep = %q ok=%v", cmd, ok)
+	if got := cfg.Templates["python-gpu"]; len(got.Tasks) != 2 || len(got.Env) != 1 {
+		t.Fatalf("the global template changed: %+v", got)
+	}
+}
+
+func writeRepo(t *testing.T, root, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, ".gru.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -166,16 +169,13 @@ func TestPerRepoOverride(t *testing.T) {
 func TestLocalTemplateResolves(t *testing.T) {
 	cfg := loadGlobal(t)
 	root := mkRepo(t)
-	repoJSON := `{
+	writeRepo(t, root, `{
   "use": "ai",
   "hosts": { "ds-ai": { "ssh": "ds-ai-box", "remote_dir": "~/workspace" } },
   "templates": {
     "ai": { "host": "ds-ai", "tasks": { "ai": "claude -p go" } }
   }
-}`
-	if err := os.WriteFile(filepath.Join(root, ".gru.json"), []byte(repoJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
+}`)
 
 	r, err := cfg.Resolve(root)
 	if err != nil {
@@ -184,11 +184,11 @@ func TestLocalTemplateResolves(t *testing.T) {
 	if r.TemplateName != "ai" {
 		t.Fatalf("template = %q, want ai", r.TemplateName)
 	}
-	if r.HostName != "ds-ai" || r.Host.SSH != "ds-ai-box" {
-		t.Fatalf("host = %q ssh=%q, want ds-ai/ds-ai-box", r.HostName, r.Host.SSH)
+	if r.Template.Host != "ds-ai" || r.Config.Hosts["ds-ai"].SSH != "ds-ai-box" {
+		t.Fatalf("host = %q, want ds-ai with ssh ds-ai-box", r.Template.Host)
 	}
-	if cmd, ok := r.Template.Lookup("ai"); !ok || cmd != "claude -p go" {
-		t.Fatalf("local task = %q ok=%v", cmd, ok)
+	if cmd := r.Template.Tasks["ai"]; cmd != "claude -p go" {
+		t.Fatalf("local task = %q", cmd)
 	}
 	// The global config must be untouched by the local merge.
 	if _, ok := cfg.Templates["ai"]; ok {
@@ -200,105 +200,73 @@ func TestLocalTemplateResolves(t *testing.T) {
 func TestLocalTemplateOverridesGlobal(t *testing.T) {
 	cfg := loadGlobal(t)
 	root := mkRepo(t)
-	repoJSON := `{
+	writeRepo(t, root, `{
   "use": "python-gpu",
-  "templates": { "python-gpu": { "host": "gpu01", "test": "local-test" } }
-}`
-	if err := os.WriteFile(filepath.Join(root, ".gru.json"), []byte(repoJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
+  "templates": { "python-gpu": { "host": "gpu01", "tasks": { "test": "local-test" } } }
+}`)
 	r, err := cfg.Resolve(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cmd, _ := r.Template.Lookup("test"); cmd != "local-test" {
+	if cmd := r.Template.Tasks["test"]; cmd != "local-test" {
 		t.Fatalf("test = %q, want local-test (local override)", cmd)
 	}
-	if r.HostName != "gpu01" {
-		t.Fatalf("host = %q, want gpu01", r.HostName)
+	if r.Template.Host != "gpu01" {
+		t.Fatalf("host = %q, want gpu01", r.Template.Host)
 	}
 }
 
-func TestOrderedTasks(t *testing.T) {
+func TestTaskNames(t *testing.T) {
 	cfg := loadGlobal(t)
-	tmpl := cfg.Templates["python-gpu"]
-	got := tmpl.OrderedTasks()
-
-	// std verbs (test, run) first in canonical order, then freeform (sweep).
-	want := []string{"test", "run", "sweep"}
-	if len(got) != len(want) {
-		t.Fatalf("got %d tasks, want %d: %+v", len(got), len(want), got)
+	if got := cfg.Templates["python-gpu"].TaskNames(); !reflect.DeepEqual(got, []string{"sweep", "test"}) {
+		t.Fatalf("task names = %v", got)
 	}
-	for i, name := range want {
-		if got[i].Name != name {
-			t.Fatalf("task[%d] = %q, want %q (order: %+v)", i, got[i].Name, name, got)
+}
+
+// Unknown keys and bad notify blocks are refused, so a typo fails loudly.
+func TestConfigErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("GRU_CONFIG", path)
+	for body, want := range map[string]string{
+		`{"templates": {"x": {"build": "make"}}}`:                  `unknown field "build"`,
+		`{"hosts": {"h": {"remote": "x"}}}`:                        `unknown field "remote"`,
+		`{"notify": {"on": "faliure", "run": ["x"]}}`:              `notify.on "faliure"`,
+		`{"templates": {"x": {"notify": {"email": {"to": "a"}}}}}`: "template x: notify.email needs",
+		`{"hosts": `: "unexpected EOF",
+	} {
+		os.WriteFile(path, []byte(body), 0o644)
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), path) {
+			t.Errorf("%s: err %v, want %q", body, err, want)
 		}
 	}
-}
-
-// fullTemplate sets every field to a distinct value derived from prefix.
-func fullTemplate(p string) Template {
-	return Template{
-		Detect: []string{p + "-detect"}, Host: p + "-host", RemoteDir: p + "-rd",
-		Needs: []string{p + "-needs"}, Push: []string{p + "-push"}, Exclude: []string{p + "-excl"},
-		Env: []string{p + "=1"}, Before: []string{p + "-before"},
-		OnSuccess: []string{p + "-succ"}, OnFailure: []string{p + "-fail"}, Always: []string{p + "-always"},
-		Fetch: []string{p + "-fetch"}, FetchInto: p + "-fetchinto", Build: p + "-build", Test: p + "-test",
-		Run: p + "-run", Lint: p + "-lint", Clean: p + "-clean",
-		Tasks:  map[string]string{"shared": p + "-shared", p + "-only": p + "-only"},
-		Notify: &Notify{Email: &EmailSink{SMTP: "h:587", From: p + "@x", To: p + "@x"}},
-	}
-}
-
-// Guards against drift: a new Template field not wired into mergeTemplate would
-// leave out.Field == base.Field and fail here. Env/Tasks merge specially.
-func TestMergeTemplateOverridesEveryField(t *testing.T) {
-	base, over := fullTemplate("base"), fullTemplate("over")
-	out := mergeTemplate(base, over)
-
-	bv, tv := reflect.ValueOf(base), reflect.ValueOf(out)
-	for i := 0; i < tv.NumField(); i++ {
-		if reflect.DeepEqual(tv.Field(i).Interface(), bv.Field(i).Interface()) {
-			t.Errorf("field %s not overridden", tv.Type().Field(i).Name)
+	cfg := loadGlobal(t)
+	root := mkRepo(t)
+	for body, want := range map[string]string{
+		`{"use": "latex", "test": "x"}`:         `unknown field "test"`,
+		`{"notify": {"on": "x", "run": ["y"]}}`: `notify.on "x"`,
+	} {
+		writeRepo(t, root, body)
+		if _, err := cfg.Resolve(root); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: err %v, want %q", body, err, want)
 		}
-	}
-	if want := []string{"base=1", "over=1"}; !reflect.DeepEqual(out.Env, want) {
-		t.Errorf("Env = %v, want %v (additive)", out.Env, want)
-	}
-	wantTasks := map[string]string{"shared": "over-shared", "base-only": "base-only", "over-only": "over-only"}
-	if !reflect.DeepEqual(out.Tasks, wantTasks) {
-		t.Errorf("Tasks = %v, want %v", out.Tasks, wantTasks)
-	}
-}
-
-// Zero-valued override fields are ignored.
-func TestMergeTemplateEmptyOverrideKeepsBase(t *testing.T) {
-	base := fullTemplate("base")
-	if out := mergeTemplate(base, Template{}); !reflect.DeepEqual(out, base) {
-		t.Errorf("empty override changed base:\n got %+v\nwant %+v", out, base)
 	}
 }
 
 func TestUnknownUseErrors(t *testing.T) {
 	cfg := loadGlobal(t)
 	root := mkRepo(t)
-	repoJSON := `{ "use": "nope" }`
-	if err := os.WriteFile(filepath.Join(root, ".gru.json"), []byte(repoJSON), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeRepo(t, root, `{ "use": "nope" }`)
 	if _, err := cfg.Resolve(root); err == nil {
 		t.Fatal("use of an undefined template should error")
 	}
 	// an inline .gru.json with no `use` is still valid (name stays empty).
-	if err := os.WriteFile(filepath.Join(root, ".gru.json"), []byte(`{ "build": "make" }`), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeRepo(t, root, `{ "tasks": { "build": "make" } }`)
 	r, err := cfg.Resolve(root)
 	if err != nil {
 		t.Fatalf("inline config without use should not error: %v", err)
 	}
-	if cmd, _ := r.Template.Lookup("build"); cmd != "make" {
-		t.Fatalf("inline build = %q, want make", cmd)
+	if r.Template.Tasks["build"] != "make" || r.TemplateName != "" {
+		t.Fatalf("inline: template %q tasks %v", r.TemplateName, r.Template.Tasks)
 	}
 }
 
@@ -325,7 +293,7 @@ func TestNotifyValidate(t *testing.T) {
 	if err := (&Notify{On: "maybe"}).Validate(); err == nil {
 		t.Error("invalid on value should fail")
 	}
-	if err := (&Notify{Email: &EmailSink{From: "a@x"}}).Validate(); err == nil {
+	if err := (&Notify{Email: &EmailSink{SMTP: "h:587", From: "a@x"}}).Validate(); err == nil {
 		t.Error("email missing smtp/to should fail")
 	}
 	if err := (&Notify{On: "failure", Email: &EmailSink{SMTP: "h:587", From: "a@x", To: "b@x"}}).Validate(); err != nil {

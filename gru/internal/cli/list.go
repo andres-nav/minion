@@ -5,20 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-
-	"github.com/andres-nav/minion/gru/internal/config"
 )
-
-type listOutput struct {
-	Root      string        `json:"root"`
-	GitRoot   string        `json:"git_root,omitempty"`
-	Template  string        `json:"template"`
-	Host      string        `json:"host"`
-	RemoteDir string        `json:"remote_dir,omitempty"`
-	RepoFile  string        `json:"repo_file,omitempty"`
-	Tasks     []config.Task `json:"tasks"`
-	Ambiguous []string      `json:"ambiguous,omitempty"`
-}
 
 func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
@@ -26,48 +13,31 @@ func cmdList(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-
-	_, r, err := resolveContext()
+	r, err := project()
 	if err != nil {
 		return errf("%v", err)
 	}
-
-	tasks := r.Template.OrderedTasks()
-
+	tm := r.Template
 	var remoteDir string
-	if r.HostName != "" {
-		remoteDir = remoteDirFor(r.Template.RemoteDir, r.Host.RemoteDir, r.Root)
+	if tm.Host != "" {
+		remoteDir = remoteDirFor(tm.RemoteDir, r.Config.Hosts[tm.Host].RemoteDir, r.Root)
 	}
 
 	if *jsonOut {
-		out := listOutput{
-			Root:      r.Root,
-			GitRoot:   r.GitRoot,
-			Template:  r.TemplateName,
-			Host:      r.HostName,
-			RemoteDir: remoteDir,
-			RepoFile:  r.RepoFile,
-			Tasks:     tasks,
-			Ambiguous: r.Ambiguous,
-		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if err := enc.Encode(out); err != nil {
-			return errf("%v", err)
-		}
+		enc.Encode(map[string]any{"root": r.Root, "template": r.TemplateName, "host": tm.Host, "remote_dir": remoteDir,
+			"repo_file": r.RepoFile, "tasks": tm.Tasks, "ambiguous": r.Ambiguous})
 		return 0
 	}
-
-	if r.TemplateName == "" {
-		fmt.Printf("no template matched in %s\n", r.Root)
-		fmt.Println("(add detect rules to ~/.config/gru/config.json or a .gru.json with \"use\": \"...\")")
+	if len(tm.Tasks) == 0 {
+		fmt.Printf("no tasks for %s\n", r.Root)
+		fmt.Println("(add detect rules to ~/.config/gru/config.json, or a .gru.json with \"use\" or \"tasks\")")
 		return 0
 	}
-
 	fmt.Printf("template: %s\n", r.TemplateName)
-	if r.HostName != "" {
-		fmt.Printf("host:     %s\n", r.HostName)
-		fmt.Printf("remote:   %s\n", remoteDir)
+	if tm.Host != "" {
+		fmt.Printf("host:     %s\nremote:   %s\n", tm.Host, remoteDir)
 	}
 	fmt.Printf("root:     %s\n", r.Root)
 	if r.RepoFile != "" {
@@ -76,13 +46,9 @@ func cmdList(args []string) int {
 	if len(r.Ambiguous) > 0 {
 		fmt.Printf("note:     also matched %v (using %q)\n", r.Ambiguous, r.TemplateName)
 	}
-	if len(tasks) == 0 {
-		fmt.Println("tasks:    (none defined)")
-		return 0
-	}
 	fmt.Println("tasks:")
-	for _, t := range tasks {
-		fmt.Printf("  %-10s %s\n", t.Name, t.Command)
+	for _, n := range tm.TaskNames() {
+		fmt.Printf("  %-10s %s\n", n, tm.Tasks[n])
 	}
 	return 0
 }

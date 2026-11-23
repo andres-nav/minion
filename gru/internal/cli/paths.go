@@ -7,22 +7,29 @@ import (
 	"time"
 )
 
-// tsLayout formats a run's start time for {ts} in fetch_into and job ids.
+// tsLayout is a job's start time in its id and in {ts}: UTC, so names don't
+// depend on the machine's time zone.
 const tsLayout = "20060102T150405Z"
 
-// stamp formats t for {ts} and job ids, in UTC so names don't depend on the
-// machine's time zone.
 func stamp(t time.Time) string { return t.UTC().Format(tsLayout) }
+
+// idTime is the start time in a job id (name-20261123T142501Z).
+func idTime(id string) (time.Time, bool) {
+	t, err := time.Parse(tsLayout, id[max(len(id)-len(tsLayout), 0):])
+	return t, err == nil
+}
 
 // fetchDest resolves the local destination for fetched results, expanding
 // {id}/{ts}/{repo} in tmpl. Empty tmpl → root; a relative path is under root.
-// Using {id}/{ts} gives each run its own dir, so fetches never conflict.
-func fetchDest(root, tmpl, id, ts, repo string) string {
+func fetchDest(root, tmpl, id, repo string) string {
 	if tmpl == "" {
 		return root
 	}
-	p := strings.NewReplacer("{id}", id, "{ts}", ts, "{repo}", repo).Replace(tmpl)
-	p = expandLocalHome(p)
+	ts := ""
+	if t, ok := idTime(id); ok {
+		ts = stamp(t)
+	}
+	p := expandLocalHome(strings.NewReplacer("{id}", id, "{ts}", ts, "{repo}", repo).Replace(tmpl))
 	if filepath.IsAbs(p) {
 		return p
 	}
@@ -39,7 +46,7 @@ func expandLocalHome(p string) string {
 	return p
 }
 
-// remoteDirFor computes the remote destination directory, expanding {repo}. A
+// remoteDirFor computes the remote project directory, expanding {repo}. A
 // template's remote_dir (e.g. a workspace slot) takes precedence over the host's.
 func remoteDirFor(tmplDir, hostDir, root string) string {
 	rd := tmplDir
