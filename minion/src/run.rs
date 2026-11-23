@@ -8,7 +8,9 @@ use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 
 use serde_json::{Map, Value, json};
 
-use crate::ffi::{CLOCK_MONOTONIC, CLOCK_REALTIME, SIGKILL, Timespec, clock_gettime, kill};
+use crate::ffi::{
+    CLOCK_MONOTONIC, CLOCK_REALTIME, SIGKILL, SIGTERM, Timespec, clock_gettime, kill,
+};
 use crate::{settings, utc};
 
 /// Something read at the edges of a run, never in between.
@@ -196,6 +198,8 @@ fn max_power_uw(dir: &Path) -> Option<u64> {
 
 /// The pid of the command being measured, or 0.
 pub static WORKLOAD: AtomicI32 = AtomicI32::new(0);
+/// The signal that stops the queue, or 0.
+pub static STOP: AtomicI32 = AtomicI32::new(0);
 
 /// The named meters, opened once. `time` is always read, first: it gives the duration.
 pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, String> {
@@ -247,6 +251,9 @@ pub fn measure(
     let status = command.spawn().and_then(|mut child| {
         pid = child.id() as i32;
         WORKLOAD.store(pid, SeqCst);
+        if STOP.load(SeqCst) != 0 {
+            kill(-pid, SIGTERM);
+        }
         let status = child.wait();
         WORKLOAD.store(0, SeqCst);
         status

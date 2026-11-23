@@ -4,7 +4,7 @@ use std::io::{self, ErrorKind, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ use crate::ffi::{
     PR_SET_PDEATHSIG, SIGHUP, SIGINT, SIGKILL, SIGTERM, getppid, kill, prctl, signal,
 };
 use crate::lock;
-use crate::run::{self, Meter, WORKLOAD};
+use crate::run::{self, Meter, STOP, WORKLOAD};
 use crate::settings::{self, State};
 use crate::utc::{self, log, now_ns};
 use crate::{NAME, Opts};
@@ -32,9 +32,6 @@ const KEYS: [&str; 9] = [
 ];
 const SETTLE: Duration = Duration::from_secs(1);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// The signal that stops the queue, or 0.
-static STOP: AtomicI32 = AtomicI32::new(0);
 
 pub struct Queue {
     pub name: String,
@@ -182,6 +179,9 @@ impl Running<'_> {
     fn runs(&mut self, plan: &[Run], targets: &BTreeMap<String, State>) -> Result<(), String> {
         let mut current = None;
         for r in plan {
+            if stopped() {
+                break;
+            }
             let target = &targets[&r.profile];
             if current != Some(&r.profile) {
                 self.privileged("apply", Some(target))

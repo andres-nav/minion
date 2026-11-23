@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 
-use crate::ffi::geteuid;
+use crate::ffi::{SIG_IGN, SIGHUP, SIGINT, SIGTERM, geteuid, signal};
 use crate::journal::Journal;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
@@ -53,12 +53,24 @@ struct Opts {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if matches!(args.first().map(String::as_str), Some("apply" | "restore")) {
+        ignore_stop_signals();
+    }
     match run(&args) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             utc::log(e);
             ExitCode::FAILURE
         }
+    }
+}
+
+/// A signal to a queue's process group reaches its sudo children: apply and
+/// restore finish what they started. The journal covers SIGKILL.
+fn ignore_stop_signals() {
+    for sig in [SIGHUP, SIGINT, SIGTERM] {
+        // SAFETY: SIG_IGN installs no handler.
+        unsafe { signal(sig, SIG_IGN) };
     }
 }
 
