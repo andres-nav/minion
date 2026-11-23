@@ -42,9 +42,9 @@ func cmdFetch(args []string) int {
 	dest := expandLocalHome(*into)
 	if dest == "" {
 		if id == "" { // resolve the latest run for {id}/{ts}
-			id, _ = rt.exec.Output(remote.LatestJobCommand())
+			id, _ = rt.exec.Output(remote.LatestJobCommand(rt.state))
 		}
-		dest = fetchDest(r.Root, r.Template.FetchInto, id, jobStartTS(rt.exec, id), filepath.Base(r.Root))
+		dest = fetchDest(r.Root, r.Template.FetchInto, id, jobStartTS(rt.exec, rt.state, id), filepath.Base(r.Root))
 	}
 
 	n, err := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, dest)
@@ -56,11 +56,11 @@ func cmdFetch(args []string) int {
 }
 
 // jobStartTS reads a job's start time and formats it for {ts}, or "" on failure.
-func jobStartTS(client execer, id string) string {
+func jobStartTS(client execer, state, id string) string {
 	if id == "" {
 		return ""
 	}
-	out, err := client.Output("cat " + remote.JobDir(id) + "/started")
+	out, err := client.Output("cat " + remote.JobDir(state, id) + "/started")
 	if err != nil {
 		return ""
 	}

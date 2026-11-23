@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -110,20 +111,20 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.
 		fmt.Fprintf(os.Stderr, "synced %d file(s) to %s:%s\n", n, rt.alias, rt.dir)
 	}
 
-	id := randomName()
 	ts := time.Now().Format(tsLayout)
-	jobDir := remote.JobDir(id)
 	job.Dir = rt.dir
-	if notif != nil {
-		job.Notify = buildNotify(notifyInvoke(rt), jobDir+"/log", notif)
-	}
 	sha, dirty := gitProvenance(r.Root)
-	meta := remote.Meta{ID: id, Task: taskName, Host: rt.alias, Git: sha, Dirty: dirty}
-	script := remote.Script(rt.dir, jobDir, job, meta)
-
-	if code, err := rt.exec.Run(remote.LaunchCommand(jobDir), strings.NewReader(script), io.Discard, os.Stderr); err != nil || code != 0 {
-		return errf("launch failed (err=%v exit=%d)", err, code)
+	id, err := launch(rt.exec, rt.state, ts, func(id, jobDir string) string {
+		if notif != nil {
+			job.Notify = buildNotify(notifyInvoke(rt), jobDir+"/log", notif)
+		}
+		meta := remote.Meta{ID: id, Task: taskName, Host: rt.alias, Git: sha, Dirty: dirty}
+		return remote.Script(rt.dir, jobDir, job, meta)
+	})
+	if err != nil {
+		return errf("%v", err)
 	}
+	jobDir := remote.JobDir(rt.state, id)
 	fmt.Fprintf(os.Stderr, "started %s on %s\n", id, rt.alias)
 
 	if detach {
@@ -147,6 +148,23 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.
 		}
 	}
 	return code
+}
+
+// launch starts a job under a new id (a random name and ts), drawing another
+// name while the id is taken, so a job never reuses an old job's files.
+func launch(ex execer, state, ts string, script func(id, jobDir string) string) (string, error) {
+	for range 5 {
+		id := randomName() + "-" + ts
+		s := script(id, remote.JobDir(state, id))
+		code, err := ex.Run(remote.LaunchCommand(state, id), strings.NewReader(s), io.Discard, os.Stderr)
+		switch {
+		case err == nil && code == 0:
+			return id, nil
+		case err != nil || code != remote.IDTaken:
+			return "", fmt.Errorf("launch failed (err=%v exit=%d)", err, code)
+		}
+	}
+	return "", errors.New("launch failed: no free job id")
 }
 
 func taskNames(t config.Template) string {

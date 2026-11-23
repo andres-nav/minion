@@ -25,7 +25,7 @@ func cmdPs(args []string) int {
 		return 2
 	}
 
-	client, alias, err := executorFor(*host)
+	client, alias, state, err := executorFor(*host)
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -36,7 +36,7 @@ func cmdPs(args []string) int {
 		cur = filepath.Base(r.Root)
 	}
 
-	out, err := client.Output(remote.PsCommand())
+	out, err := client.Output(remote.PsCommand(state))
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -63,9 +63,9 @@ func cmdPs(args []string) int {
 	// most recent first
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].epoch > rows[j].epoch })
 
-	fmt.Printf("%-18s %-10s %-17s %-6s %s\n", "NAME", "TASK", "STARTED", "AGE", "STATUS")
+	fmt.Printf("%-30s %-10s %-17s %-6s %s\n", "NAME", "TASK", "STARTED", "AGE", "STATUS")
 	for _, row := range rows {
-		fmt.Printf("%-18s %-10s %-17s %-6s %s\n", row.id, row.task, row.when, row.age, row.status)
+		fmt.Printf("%-30s %-10s %-17s %-6s %s\n", row.id, row.task, row.when, row.age, row.status)
 	}
 	if len(rows) == 0 {
 		if *all {

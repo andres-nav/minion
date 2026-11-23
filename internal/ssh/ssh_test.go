@@ -81,15 +81,18 @@ func TestEnsureAgentUploadsAndVerifies(t *testing.T) {
 
 	c := localClient(home)
 	binaryFor := func(string) (string, error) { return fake, nil }
-	invoke, err := c.EnsureAgent("testver", binaryFor)
+	invoke, err := c.EnsureAgent("~/state", "testver", binaryFor)
 	if err != nil {
 		t.Fatalf("EnsureAgent: %v", err)
 	}
-	if want := "~/" + remoteBin; invoke != want {
+	if want := `"$HOME"/'state'/bin/minion`; invoke != want {
 		t.Fatalf("invoke = %q, want %q", invoke, want)
 	}
+	if fi, err := os.Stat(filepath.Join(home, "state")); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("state dir not private: %v %v", fi.Mode(), err)
+	}
 
-	got := filepath.Join(home, remoteBin)
+	got := filepath.Join(home, "state/bin/minion")
 	fi, err := os.Stat(got)
 	if err != nil {
 		t.Fatalf("uploaded binary missing: %v", err)
@@ -99,7 +102,7 @@ func TestEnsureAgentUploadsAndVerifies(t *testing.T) {
 	}
 
 	// second call hits the fast path (present, matching version).
-	if _, err := c.EnsureAgent("testver", binaryFor); err != nil {
+	if _, err := c.EnsureAgent("~/state", "testver", binaryFor); err != nil {
 		t.Fatalf("EnsureAgent (cached): %v", err)
 	}
 }

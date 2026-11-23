@@ -16,13 +16,13 @@ func cmdAttach(args []string) int {
 		return 2
 	}
 
-	client, alias, err := executorFor(*host)
+	client, alias, state, err := executorFor(*host)
 	if err != nil {
 		return errf("%v", err)
 	}
 
 	if id == "" { // no id → most recent job
-		latest, err := client.Output(remote.LatestJobCommand())
+		latest, err := client.Output(remote.LatestJobCommand(state))
 		if err != nil {
 			return errf("%v", err)
 		}
@@ -33,7 +33,7 @@ func cmdAttach(args []string) int {
 		fmt.Fprintf(os.Stderr, "attaching latest: %s\n", id)
 	}
 
-	code, err := client.Run(remote.AttachCommand(remote.JobDir(id)), nil, os.Stdout, os.Stderr)
+	code, err := client.Run(remote.AttachCommand(remote.JobDir(state, id)), nil, os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("%v", err)
 	}
