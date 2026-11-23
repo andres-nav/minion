@@ -1,70 +1,88 @@
-# Energy runner — design
+# Experiment runner — design
 
-**Status:** proposal; nothing is implemented. Survey and sources: [ENERGY-RESEARCH.md](ENERGY-RESEARCH.md).
+**Status:** the state engine and a first `run` are in `runner/`; the rest is proposed. Sources:
+[ENERGY-RESEARCH.md](ENERGY-RESEARCH.md).
 
 ## Summary
 
-Energy numbers depend on the machine's state (governor, turbo, idle states, uncore, SMT, interrupts,
-temperature, other users) as much as on the code under test, and today that state is set by hand
-with scripts that are neither recorded nor undone. This design adds a small **runner** on the
-measured host. It records every setting, applies a declared profile and checks it. It runs a queue
-in randomized interleaved order, reads the meters only at run edges, and stores a noise record with
-every result. It pushes notifications between runs, and puts every setting back to its
-**original** value, also after a crash or a reboot. minion stays the laptop side. The goals follow
-the project task description (M. Friedman, CORES Lab, ETH Zurich, 2026). GEOPM Service, Slurm and
-tuned also restore originals, but only from memory or `/run`; an on-disk journal that survives a
-reboot is new.
+Measurements, energy above all, depend on the machine's state (governor, turbo, idle states,
+uncore, SMT, interrupts, temperature, other users) as much as on the code under test, and today
+that state is set by hand with scripts that are neither recorded nor undone. This design adds a
+small **runner** on the measured host, run as one detached minion job (no service). It records
+every setting, applies a declared profile and checks it, runs a queue in randomized interleaved
+order, reads its meters only at run edges, stores a noise record with every result, notifies
+between runs, and puts every setting back to its **original** value, also after a crash. Energy is
+the first use case: workloads are any command and meters are plugins. The goals follow the project
+task description (M. Friedman, CORES Lab, ETH Zurich, 2026). GEOPM Service, Slurm and tuned also
+restore originals, but only from memory or `/run`; an on-disk journal is new.
 
 ## Goals and non-goals
 
-Goals: declarative, reversible state (the originals come back after `kill -9`, a crash or a
-reboot); repeatable runs (isolation, randomized interleaved order with a recorded seed, a thermal
-gate, refusal when boot-only settings don't match); negligible overhead; every result carrying its
-state, noise record, commit, config, seed, hardware and job id; enough data for the three
-[research questions](#research-questions).
+Goals: declarative, reversible state (the originals come back after `kill -9` or a crash; after a
+reboot once the boot unit exists); repeatable runs (isolation, randomized interleaved order with a
+recorded seed, a thermal gate, refusal when boot-only settings don't match); negligible overhead;
+every result carrying its state, noise record, commit, config, seed, hardware and job id; any
+command as a workload; enough data for the three [research questions](#research-questions).
 
-Non-goals: scheduling across machines, attributing energy to tenants or processes, a benchmark
-framework (workloads stay the user's commands), dashboards, anything but Linux.
+Non-goals: a cluster scheduler (several machines only inside one experiment), attributing energy
+to tenants or processes, a benchmark framework (workloads stay the user's commands), dashboards,
+anything but Linux.
 
 ## The rule: stay out of the measured window
 
-A *measured window* runs from the counter reads at the start of a run to those at its end. Inside
-it the runner does not log, write, send or fork. It sleeps in one `poll()` on the workload cgroup's
-`cgroup.events` and a mark FIFO (opened `O_RDWR`, so a closed writer can't make it spin), on a
-housekeeping CPU, with a large timer slack and no real-time priority. The only exception is the
-slow counter-wrap timer. The window ends when the workload's cgroup is empty, so children (MPI
-ranks, `cmd &`) count. Leftovers after a grace period are killed with `cgroup.kill`, and the run is
-flagged.
+A *measured window* runs from the counter reads at the start of a run to those at its end. Inside it
+the runner does not log, write, send or fork. It sleeps in one `poll()` on a `signalfd` for
+`SIGCHLD` and a mark FIFO (opened `O_RDWR`, so a closed writer can't make it spin), on a
+housekeeping CPU, with a large timer slack and no real-time priority. The only exception is the slow
+counter-wrap timer. The runner is a child subreaper (`PR_SET_CHILD_SUBREAPER`): orphans come back to
+it, so the window ends when no workload process is left, and children (MPI ranks, `cmd &`) count.
+Helpers (`notify.cmd`, the `cmd` meter, `sudo` verbs) run only between runs, in their own process
+group, which is killed before a window starts; a leader's `hold` sessions are not counted. Leftovers
+after a grace period, or a run past its `timeout_s`, are killed and the run is flagged. The
+workload's first process gets `PR_SET_PDEATHSIG(SIGKILL)`. From the isolation phase on, the workload
+also has its own cgroup, which `cgroup.kill` ends.
 
 Before `exec`, the child resets its timer slack to the default 50 µs (slack is inherited) and its
 signal mask. Before the start read come the noise snapshot, then `sync` (so writes from between
 runs are not flushed inside the window), then a short recorded settle.
 
+## Every time is UTC
+
+Experiments span machines and time zones, so local time is never used. Machine fields are epoch
+seconds or nanoseconds. Readable times are ISO 8601 with `Z` (`2026-11-23T14:25:01Z`). Ids, dirs
+and file names use `20261123T142501Z`. Displays and log lines show UTC with the `Z`.
+
 ## Components
 
 | Part | Where | Language | Does |
 |---|---|---|---|
-| minion | laptop | Go, stdlib only | sync, launch, fetch, notify config |
-| runner | host, as the user | Rust | `submit`, queue, meters, noise record, events; `snapshot`, `verify`, `stop`, `resume`, `mark` |
-| helper | host, root via one sudoers rule | Rust | the only writer of settings; owns the journal |
-| `energy-recover.service` | host, root | the helper | `helper recover`, at boot and when the runner unit fails |
+| minion | laptop | Go, stdlib only | sync, launch the queue as a job, fetch, notify config |
+| runner | host, as the user, in `runner/` of this repo for now | Rust | `queue`, `run`, `hold`, meters, noise record, events; `snapshot`, `status`, `mark` |
+| privileged verbs | the same binary, as `sudo -n energy-runner <verb>` (one sudoers rule) | Rust | the only writer of settings; own the journal |
 | wall sampler | another machine | the runner binary | reads the BMC over the network during the queue |
 
 - minion stays a user-level CLI with no dependencies. The host side needs root, NVML (a C library)
   and control over every wakeup: Rust has no runtime threads or garbage collector, while an idle
-  Go program still wakes every minute or two (`runtime/proc.go`).
-- All root actions go through one small helper with an allowlist, like `kvm-grid` today, working
-  like GEOPM Service (save before the first write, restore when the client dies). **Root never
-  reads user files or runs user code**: `energy-runner submit q.json` reads the queue, host
-  profile and notify block as the user and pipes them to `sudo -n energy-helper start`, which
-  validates and stores them under `/var/lib/energy-runner/` and starts the runner unit.
-- The runner is an instance of a static unit, `energy-runner@<user>.service` (`User=%i`,
-  `Slice=energy.slice`, `Delegate=yes`, `LoadCredential=` for notify secrets,
-  `TimeoutStopSec=600`, `OnFailure=energy-recover.service`), with two `ExecStopPost=` lines:
-  `+energy-helper recover` (root restores) and `energy-runner finish` (the user copies the journal
-  into the results and sends pending events). So the queue survives logout, the workload dies
-  with the runner (the cgroup is killed), and the restore runs on *any* exit: `ExecStopPost=`
-  also runs after an unexpected exit.
+  Go program still wakes every minute or two (`runtime/proc.go`). The code can move to its own
+  repository later.
+- **The minion job hosts the queue; no systemd units for now.** `minion run energy --detach`
+  starts a detached job (setsid, survives disconnect) whose command, `exec energy-runner queue
+  energy/turbo.json`, runs the whole queue in the foreground. One id: `minion ps`, `attach`, `kill`
+  and the log apply to the queue. The runner records `MINION_JOB_ID`, the commit and the dirty flag
+  from the environment and writes under `<remote_dir>/results/` for `minion fetch`. The
+  template's `always` hook is `sudo -n energy-runner restore --wait`: a killed wrapper can run it
+  while the runner is still restoring, so it first waits for a live owner in its own session to
+  exit, then restores any leftover. Without minion, the runner works the same under `setsid` or
+  tmux, minus the hook. The runner and `hold` treat `SIGTERM`, `SIGINT` and `SIGHUP` alike.
+  setsid stays in the login session's cgroup: with logind's `KillUserProcesses=yes` (upstream
+  default; Ubuntu builds `no`), the job dies when minion's launch connection closes, so such a
+  host needs `KillExcludeUsers=` for the user. Check each host.
+- **Privileged verbs live in the runner binary for now**, with an allowlist like `kvm-grid` today,
+  working like GEOPM Service (save before the first write, restore when the client dies). **Root
+  never reads user files or runs user code**: the runner reads the queue and host profile as the
+  user and pipes what a verb needs on stdin. As root the binary runs only the allowlisted verbs,
+  reads input from stdin only, refuses `--sysfs` and `--state-dir`, and blocks `SIGINT`,
+  `SIGTERM` and `SIGHUP` while a verb runs. A separate helper can come back if needed.
 
 ## Configuration
 
@@ -80,13 +98,13 @@ JSON, like minion's config: one format for the user and no new dependency in min
     "stable":   { "cpu.governor": "performance", "cpu.turbo": "off",
                   "cpu.idle.disable": ["deepest"], "uncore.freq": "initial_max" }
   },
-  "workloads": { "ep": { "cmd": "bin/ep.C.x" }, "idle": { "cmd": "sleep 60" } },
+  "workloads": { "ep": { "cmd": "bin/ep.C.x", "timeout_s": 600 }, "idle": { "cmd": "sleep 60" } },
   "reps": 30, "seed": 7,
   "thermal": { "band_c": 3, "timeout_s": 900 },
   "meters": ["rapl", "nvml"],
   "others": "wait", "drift": "stop",
   "out": "results/energy",
-  "notify": { "events": ["run_failed", "drift", "restore_failed", "queue_done"] }
+  "notify": { "cmd": "$MINION_AGENT _agent notify", "events": ["run_failed", "drift", "queue_done"] }
 }
 ```
 
@@ -110,13 +128,13 @@ trait Setting {
     fn on_reboot(&self) -> OnReboot;                  // Restore | Drop
     fn read(&self) -> Result<Values>;                 // per object: "cpu3" -> "powersave"
     fn expect(&self, want: &Values, deps: &State) -> Values; // what the kernel will show
-    fn validate(&self, want: &Values) -> Result<()>;  // the allowlist check, run by the helper
+    fn validate(&self, want: &Values) -> Result<()>;  // the allowlist check, run as root
     fn apply(&self, want: &Values) -> Result<()>;
     fn restore(&self, saved: &Values) -> Result<()>;
 }
 ```
 
-Values are per object (CPU, package, uncore domain, IRQ, unit), so CPUs that differ are restored
+Values are per object (CPU, package, uncore domain, IRQ, unit, GPU), so CPUs that differ are restored
 exactly, where `slot.sh` has to refuse. `expect` knows what dependencies force: EPP is
 `performance` under the `performance` governor (and is not written), and the maximum frequency is
 capped under `no_turbo`. Offline CPUs (SMT off) are skipped; their cpufreq files return `EBUSY`.
@@ -131,7 +149,7 @@ capped under `no_turbo`. Offline CPUs (SMT off) are skipped; their cpufreq files
 | `cpu.idle.disable` | `cpu*/cpuidle/state*/disable`, on every CPU | smt | restore |
 | `uncore.freq` | `intel_uncore_frequency/*/{min,max}_freq_khz`, packages before domains | – | restore |
 | `rapl.limit`, `rapl.readable` | `intel-rapl:*/constraint_*`; group read of `energy_uj` | – | restore |
-| `gpu.limit` | NVML power limit and locked clocks (recorded first, written later) | – | restore |
+| `gpu.*` | NVML power limit, locked clocks, persistence mode ([Devices](#devices)) | – | restore |
 | `kernel.*` | `nmi_watchdog`, KSM `run`, THP, `vm/stat_interval`, `numa_balancing`, osnoise options | – | restore |
 | `cpus.units` | `systemctl set-property --runtime <top-level unit> AllowedCPUs=` | – | drop |
 | `irq.affinity` | `/proc/irq/*/smp_affinity_list`, `default_smp_affinity` | smt, irqbalance | drop |
@@ -166,51 +184,61 @@ exactly these pairs; `slot.sh` already restores uncore packages before domains.*
 
 ### Journal
 
-One journal per machine: `/var/lib/energy-runner/journal.jsonl`, root-owned and on local disk.
-Every helper verb takes an `flock` on it, every line is `fsync`ed (the directory too, on create),
-and every line carries the `boot_id`:
+One journal per machine: `/var/lib/energy-runner/journal.jsonl`, root-owned, world-readable (it
+holds no secrets) and on local disk. Every privileged verb holds an `flock` on
+`/var/lib/energy-runner/lock` while it runs, every line is `fsync`ed (the directory too, on
+create), and every line carries the `boot_id`:
 
 ```
-{"t":"open","queue":"turbo-cost-20261123-0912","uid":1000,"kernel":"…","cmdline":"…","microcode":"…","bios":"…"}
+{"t":"open","queue":"turbo-cost-20261123T091200Z","uid":1000,"runner":{"pid":4711,"start":…},"job":"…","kernel":"…","cmdline":"…","microcode":"…","bios":"…"}
 {"t":"saved","state":{…every object of every plugin…}}       <- originals, before any write
 {"t":"apply","profile":"stable"}                              <- intent, before the writes
 {"t":"applied","profile":"stable","state":{…read back…}}      <- after the writes, with side effects
 {"t":"drift","state":{…objects someone else changed…}}
+{"t":"restore"}                                              <- intent, before the first write
 {"t":"restored"}
 {"t":"close"}
 ```
 
-- `saved` is a full snapshot at open, so it also covers settings that only change as a side
-  effect of our writes. It is never overwritten, except that `drop` settings are saved again when
-  a queue resumes after a reboot. `applied` is the full read-back after each apply, with what the
-  kernel derived. An incomplete last line is ignored.
-- An open journal refuses every other queue: it is the machine lock. Its owner's liveness is
-  judged by the unit's state, not a pid. On close it is renamed to `done/<queue>.jsonl` (directory
-  `fsync`ed) and `finish` copies it into the results.
+- `saved` is a full snapshot at open, so it also covers settings that only change as a side effect
+  of our writes. It is never overwritten. `applied` is the full read-back after each apply, with
+  what the kernel derived. An incomplete last line is ignored.
+- **Owner.** The runner sends its pid and start time on stdin; under the lock the verb checks
+  that this process is alive and its ancestor, refuses otherwise, and records it as `runner`. So
+  a verb orphaned by a dead runner never opens a journal. A journal whose owner is dead, or from
+  another boot, is a *leftover*. On close it moves to `done/<queue>.jsonl` (directory `fsync`ed)
+  and the runner copies it into the results.
 
 ### Restore, crashes and reboots
 
-Restore first reads the current state. An object that differs from both the last `applied`
-snapshot and its `saved` value was changed by someone else during the queue: it is kept, recorded,
-and reported as `restore_conflict`. Every other object gets its `saved` value, dependencies first,
+Restore first reads the current state. An object that differs from both the last `applied` snapshot
+and its `saved` value was changed by someone else during the queue: it is kept, recorded, and
+reported as `restore_conflict`. Every other object gets its `saved` value, dependencies first,
 whatever the side effects. If the queue died between an `apply` intent and its `applied` snapshot,
-every object is restored. So restoring twice is harmless.
+or during a restore (`restore` without `restored`), every object is restored. So restoring twice is
+harmless. Until the boot unit exists, a journal from another boot is never written back. Without a
+service, two things restore: the job's `always` hook, and every `queue`, `run` and `hold`, which
+restores a leftover first, once it holds the [queue lock](#queue). Read-only verbs only report it.
 
 | What happens | Recovery |
 |---|---|
-| runner killed or crashes, any phase | systemd kills the unit's cgroup (the workload too). `helper recover` restores, unlocks, marks the open run `aborted` and closes the journal. `finish` (as the user) copies it and sends events |
-| recover fails or is cut off | `energy-recover.service` retries a few times. If it still fails: unlock, keep the journal open (no new queue on a half-restored machine), send `restore_failed`. An admin repairs and runs `helper abandon` |
-| clean shutdown | recover restores only the `restore` settings and leaves the queue `paused` |
-| reboot | the lock is gone with `/run`. At boot, `energy-recover.service` runs with `Before=systemd-user-sessions.service` and `TimeoutStartSec=60`, and never fails the boot. It loads the uncore, RAPL and coretemp drivers and waits for their paths. It restores the `restore` settings only if kernel, cmdline, microcode and BIOS match the journal; otherwise it only records. The queue stays `paused`, and `rebooted` is sent once the network is up |
-| someone changes a setting | caught by the end-of-run verify and by a full verify before each apply. The verify includes `HWP_REQUEST` through the helper's `msr` verb, which catches direct MSR writes. The run is marked `drifted` with the diff. `drift: stop` (default) stops and restores; `reapply` re-applies once, for agreed slots. A change made and undone inside one run shows only through its effects |
+| `minion kill`, `SIGTERM`, `SIGHUP`, shutdown | `minion kill` signals the job's process group, so the workload gets it too (a leader keeps its ssh sessions in another group, to still reach its followers). The runner stops the run, kills what is left, restores, marks the run `aborted`, sends events and exits; the hook then finds nothing. This must fit systemd's stop timeout (90 s default); while the system is stopping, only the `restore` settings are put back, and guards and `drop` settings are left to the shutdown |
+| runner killed with `-9` or crashes, any phase | the `always` hook restores and closes the journal. Root writes no user files and sends nothing: minion's own failure notice reports it, with the restore output in the log, and `--resume` treats a run without an end record as aborted and copies the closed journal from `done/`. The workload's first process dies with the runner (`PDEATHSIG`); its children can survive until the isolation phase's cgroup, and the next queue's quiet-host check (`others`) sees them |
+| the whole job is killed, or the runner was started by hand | no hook runs; the journal stays open until the next start restores it, or someone runs `sudo -n energy-runner restore` |
+| restore fails | the journal stays open, so every later start tries again and refuses to run on a half-restored machine, and sends `restore_failed`. An admin repairs and runs `energy-runner abandon` |
+| reboot | **not covered until the boot unit** ([Plan](#plan)). The runner makes no change that survives a reboot (sysfs, `/proc`, NVML and `--runtime` systemd state only), so every setting comes back at its boot value, but values set by hand before the queue are lost. The next start sees a journal from another boot, writes nothing, records the state, closes it and sends `rebooted`, to whoever starts next. `minion ps` keeps showing the dead job as running (no status was written) |
+| someone changes a setting | caught by the end-of-run verify and by a full verify before each apply. The verify includes `HWP_REQUEST` through the `msr` verb, which catches direct MSR writes. The run is marked `drifted` with the diff. `drift: stop` (default) stops and restores; `reapply` re-applies once, for agreed slots. A change made and undone inside one run shows only through its effects |
 
-The helper authorizes each verb by `SUDO_UID`. Changing state is allowed for the journal's owner,
-the admin group and root. `msr` reads only `SMI_COUNT`, `APERF`, `MPERF`, `THERM_STATUS` and
-`HWP_REQUEST`.
+Who may do what (by `SUDO_UID` and the owner check): anyone may restore or close a leftover;
+only the live owner may `apply` or restore its own queue; admins and root may restore a live queue
+only with `restore --force`; the holder, admins, root and the expiry timer may always `unlock`.
+From phase 3, `apply` also needs its owner to hold `queue.lock` (checked in `/proc/locks`), so a
+hand-run `apply` can't leave a live owner that blocks every queue. `msr` reads only `SMI_COUNT`,
+`APERF`, `MPERF`, `THERM_STATUS` and `HWP_REQUEST`.
 
-It refuses settings that are not compiled in; CPUs that don't exist; values outside the hardware's
-range (frequencies within `cpuinfo_*`, uncore within `initial_*`, RAPL limits between a floor and
-the default); offlining every housekeeping CPU; units not in the root-owned
+The verbs refuse settings that are not compiled in; CPUs that don't exist; values outside the
+hardware's range (frequencies within `cpuinfo_*`, uncore within `initial_*`, RAPL limits between a
+floor and the default); offlining every housekeeping CPU; units not in the root-owned
 `/etc/energy-runner/units`; `AllowedCPUs` below the top level; restricting other users
 (`AllowedCPUs` of shared slices, paused units, RAPL limits, the lock) on a machine that has not
 opted in or for longer than its maximum; writes while another queue's journal is open; queues whose
@@ -228,10 +256,15 @@ with the host profile refuses the queue before anything is written.
 
 | | What |
 |---|---|
-| controls | `AllowedCPUs` of every top-level unit (`system.slice`, `user.slice`, `init.scope`, `machine.slice`) to the housekeeping CPUs; the runner's delegated cgroup split into `hk/` (runner) and `exp/` (workload, started there with `CLONE_INTO_CGROUP`); movable IRQs, `default_smp_affinity`, movable kernel threads and the workqueue mask to housekeeping; listed units paused; all journaled |
+| controls | `AllowedCPUs` of every top-level unit (`system.slice`, `user.slice`, `init.scope`, `machine.slice`) to the housekeeping CPUs; the queue's delegated cgroup (below) split into `hk/` (runner) and `exp/` (workload, started there with `CLONE_INTO_CGROUP`); movable IRQs, `default_smp_affinity`, movable kernel threads and the workqueue mask to housekeeping; listed units paused; all journaled |
 | detects only | managed IRQs, per-CPU kernel threads, SMIs, other users' logins and processes, boot-only flags |
 | records | all of the above, in every run's noise record |
 
+- **The delegated cgroup, without a unit file** (not yet tried): the `scope` verb moves the runner
+  into a transient scope in `energy.slice` (systemd's bus API, as `systemd-run --scope`), outside
+  the restricted `user.slice`, with `Delegate=yes`, and gives the user its directory,
+  `cgroup.procs`, `cgroup.threads` and `cgroup.subtree_control`. `restore` then first kills a dead
+  queue's scope.
 - The runner owns its delegated subtree, so placing a workload needs no root call. `AllowedCPUs`
   never moves kernel threads (they live in the root cgroup), hence the `kthreads` plugin.
 - No cgroup cpuset partitions: on 6.8 an `isolated` partition must sit directly under the root
@@ -251,45 +284,40 @@ with the host profile refuses the queue before anything is written.
 
 While a queue runs, *new* ssh logins of other users can be refused. The lock is off unless the
 admins enable it in `/etc/energy-runner/config`, with a maximum duration and an admin group. Two
-lines are installed once in the account part of `/etc/pam.d/sshd`:
+lines go once into the account part of `/etc/pam.d/sshd`; sshd runs that stack for every
+authentication type, keys included, and reads PAM files at each login, so nothing restarts:
 
 ```
 account [success=1 default=ignore] pam_access.so accessfile=/run/energy-runner/allow.conf
 account [auth_err=bad default=ignore] pam_nologin.so file=/run/energy-runner/nologin
 ```
 
-sshd runs the PAM account stack for every authentication type, keys included, and PAM files are
-read at each login, so nothing restarts.
-
-- **Lock**: write `allow.conf` (`+:root <holder> (<admin group>):ALL`, then `-:ALL:ALL`) through
-  a temporary file and a rename, read it back, then create `nologin`. pam_nologin refuses the
-  others with `PAM_AUTH_ERR` and shows its text ("locked for energy experiments by <holder> until
-  <time>"). **Unlock** removes `nologin`, and is always allowed for the holder, admins and root.
+- **Lock**: write `allow.conf` (`+:root <holder> (<admin group>):ALL`, then `-:ALL:ALL`) through a
+  temporary file and a rename, read it back, then create `nologin`. pam_nologin refuses the others
+  with `PAM_AUTH_ERR` and shows its text ("locked for energy experiments by <holder> until
+  2026-11-23T18:00:00Z"). **Unlock** removes `nologin`; the holder, admins and root may always
+  unlock.
 - **Fails open**: without `nologin`, pam_nologin returns `PAM_IGNORE`; `default=ignore` skips any
-  other result, including a module that fails to load and the `PAM_ABORT` of pam_access for a
-  missing `accessfile` (a tmpfiles.d line creates an empty one at boot). An empty or garbled
-  `allow.conf` matches nobody, which pam_access treats as success, so the lock would silently be
-  off: hence the read-back. The lock is refused if the admin group has no members. With
-  `pamtester` installed, the helper checks that the holder and an admin get in and a non-member
-  doesn't.
+  other result, including a module that fails to load and pam_access's `PAM_ABORT` for a missing
+  `accessfile` (a tmpfiles.d line creates an empty one at boot). An empty or garbled `allow.conf`
+  matches nobody, which pam_access treats as success, hence the read-back. The lock is refused if
+  the admin group is empty. With `pamtester`, the `lock` verb checks that the holder and an admin
+  get in and a non-member doesn't.
 - **Never locked out**: root (pam_nologin never refuses it), the holder, and the admin group from
-  the root-owned config (a queue can't drop it). The BMC console (serial over LAN, virtual
-  console) goes through `/etc/pam.d/login`, which is not touched. A reboot clears both files
-  (`/run` is in memory).
-- **Hard expiry**: locking also starts `systemd-run --on-active=<duration> energy-helper unlock`,
+  the root-owned config. The BMC console goes through `/etc/pam.d/login`, which is not touched. A
+  reboot clears both files (`/run` is in memory).
+- **Hard expiry**: locking also starts `systemd-run --on-active=<duration> energy-runner unlock`,
   capped at the configured maximum, so the lock lifts even if the runner is dead.
 - **Provisional until checked**: minion opens a fresh login (`ssh -o ControlPath=none <host>
-  true`). If it works, minion runs `energy-helper confirm` over the connection it kept open;
-  otherwise `unlock`. Without a confirmation within 5 minutes (also when no shared connection is
-  left) the runner lifts the lock and continues unlocked. With interactive 2FA the check asks for
-  the code.
+  true`), then runs `energy-runner confirm` over its kept connection, or `unlock` if the login
+  failed. Without a confirmation within 5 minutes the runner lifts the lock and continues
+  unlocked. With interactive 2FA the check asks for the code.
 - **Cannot block** (detected, recorded, then `others` applies): sessions opened before the lock,
-  including new sessions over an already authenticated multiplexed connection (sshd
-  `MaxSessions`); running processes; cron and at jobs; lingering users' systemd services; other
-  network services.
+  including new sessions over an authenticated multiplexed connection; running processes; cron and
+  at jobs; lingering users' systemd services; other network services.
 
-Queue order: quiet-host check, lock, check, apply, runs, restore, unlock. `helper recover`, the
-expiry timer and a reboot also unlock.
+Queue order: quiet-host check, lock, check, apply, runs, restore, unlock. `restore`, the expiry
+timer and a reboot also unlock.
 
 ## Queue
 
@@ -305,16 +333,29 @@ expiry timer and a reboot also unlock.
 - **Between runs**: verify, apply the next profile's diff, verify, send events, thermal gate.
 - **Canary** (optional): a fixed workload every N rounds. If its energy drifts past a bound, the
   queue pauses and notifies, as the Green Metrics Tool does with its control workload.
-- **One queue per machine**, through the journal lock. This replaces the hand-made wait loops on
-  job status files.
-- **Stop and resume.** `energy-runner stop` stops the unit, which restores. `energy-runner resume`
-  reruns the aborted run as a new attempt (`runs/0001-…-a2/`; the old one is kept) and continues.
+- **One queue at a time; the others wait.** Every `queue`, `run` and `hold` first takes a
+  blocking `flock` on `/var/lib/energy-runner/queue.lock` (world-readable, created at install),
+  opened `O_CLOEXEC` so a leftover workload can't inherit it, and keeps it to the end. A
+  multi-host leader takes its own lock in host-name order with its followers'. A queue never
+  starts `run` or `hold` on its own host as a child, which would wait on its lock. A waiter sleeps
+  in the kernel with no wakeups, logs which queue it waits for (from the open journal, or the
+  holder's pid in `/proc/locks`) and sends `queue_waiting`. The lock is freed when its holder dies,
+  also by `kill -9`; then all waiters wake and one wins (not first come, first served). Any local
+  user can take it and block queues for as long as they hold it. This replaces hand-made "wait for
+  job X" tasks.
+- **Stop and resume.** `minion kill <id>` (or `SIGTERM`) stops the queue, which restores.
+  `energy-runner queue --resume <dir>` reruns the aborted run as a new attempt
+  (`runs/0001-…-a2/`; the old one is kept) and continues.
 
 ## Meters and noise record
 
-Read only at run edges (start, end, phase marks), kept in memory, written after the window.
+Meters are small plugins, read only at run edges (start, end, phase marks), kept in memory and
+written after the window. A queue lists the ones it uses; `time` is always on.
 
-- **RAPL**: `energy_uj` of the powercap zones, found at runtime with their tree recorded; zones
+- **`time`**: each edge records `CLOCK_MONOTONIC` (Python's `time.monotonic`) and `CLOCK_REALTIME`
+  to line up with workload logs and BMC samples, and `CLOCK_BOOTTIME`, whose jump against
+  `MONOTONIC` reveals a suspend. The host's and the sampler's NTP offsets are recorded.
+- **`rapl`**: `energy_uj` of the powercap zones, found at runtime with their tree recorded; zones
   overlap (psys covers the packages), so one interface per package is summed. On Xeon 6 with 6.8,
   expect a TPMI zone and no perf `power/` events. Files are opened once and read with `pread`.
   sysfs, not perf: perf sends an IPI when an event opens and keeps a periodic overflow timer.
@@ -323,20 +364,26 @@ Read only at run edges (start, end, phase marks), kept in memory, written after 
   A slow timer reads each zone every `max_energy_range_uj / (2 × the zone's maximum power)` (from
   the host profile, since the DRAM zone often has no limit), and each pair of consecutive reads is
   corrected for one wrap.
-- **GPU**: NVML total energy (`nvmlDeviceGetTotalEnergyConsumption`, mJ, Volta and newer), one
-  session per queue via `dlopen` of `libnvidia-ml.so.1`; clock-event reasons, temperature, power
-  limit and locked clocks at edges. `nvmlDeviceGetPowerUsage` is a 1 s average on Ampere and
-  newer, so it is not used. The persistence mode is recorded (without it, the driver state is
-  rebuilt, costing seconds).
-- **Wall power**, out of band: the wall sampler asks the BMC (IPMI-over-LAN DCMI or Redfish) once
+- **`nvml`**: total energy per GPU (`nvmlDeviceGetTotalEnergyConsumption`, mJ since the driver
+  loaded, Volta and newer), one session per queue via `dlopen` of `libnvidia-ml.so.1`.
+  `nvmlDeviceGetPowerUsage` is a 1 s average on Ampere and newer, so it is not used. GPU state
+  and noise: [Devices](#devices).
+- **`wall`**, out of band: the wall sampler asks the BMC (IPMI-over-LAN DCMI or Redfish) once
   a second for the whole queue; edges are matched afterwards. DCMI gives integer watts over a
   vendor-chosen window, so each sample keeps the reported period (DCMI statistics period, Redfish
   `SensingInterval`). In the prototype the reading changed every 4-5 s and lagged the load, so
   wall energy suits only long runs. In band is a last resort: one long-lived reader, never a fork
   per second (on KCS the `kipmid` kernel thread may poll).
-- **Clocks**: each edge records `CLOCK_MONOTONIC` (Python's `time.monotonic`) and `CLOCK_REALTIME`
-  to line up with workload logs and BMC samples, and `CLOCK_BOOTTIME`, whose jump against
-  `MONOTONIC` reveals a suspend. The host's and the sampler's NTP offsets are recorded.
+- **`perf`**: hardware counters (cycles, instructions, cache misses) counted, never sampled:
+  `perf_event_open` on the workload with `enable_on_exec` and `inherit`, so it and its later
+  children count from `exec`. A read sums live children, so a phase-mark read sends an IPI to each
+  CPU running the workload; one group read per edge returns every counter. Events beyond the free
+  counters (the NMI watchdog holds one) are multiplexed by a per-tick timer, so `time_enabled` and
+  `time_running` are kept to show it didn't happen. Upstream `perf_event_paranoid` 2 allows
+  user-space counts, but Ubuntu 24.04 kernels build with `CONFIG_SECURITY_PERF_EVENTS_RESTRICT=y`,
+  which restricts unprivileged perf further (see the open questions).
+- **`cmd`**: a user command printing `name value` lines (device counters, app metrics), run before
+  the start read and after the end read, never at marks (that would fork inside the window).
 - **Phase marks**: the workload writes a line to the FIFO at `$RUNNER_MARK`, and the runner reads
   the counters.
 - **Time series** (optional, off by default): a timer at a declared period. Frequent sampling
@@ -347,8 +394,8 @@ read, outside the window:
 - CPU time of every other cgroup (`cpu.stat`), foreign processes, logins, the load average;
 - `/proc/interrupts` (timer, IPIs, device IRQs) and `/proc/softirqs`;
 - per CPU: SMI count, APERF/MPERF (average frequency), throttle counters and temperatures, via the
-  helper's `msr` verb (one sudo call per edge, one IPI per CPU; if RQ2 shows a cost, one
-  long-lived root reader per queue replaces it);
+  `msr` verb (one sudo call per edge, one IPI per CPU; if RQ2 shows a cost, one long-lived root
+  reader per queue replaces it);
 - new kernel log lines, the end-of-run verify, and the wall-energy window.
 
 On 5.15, `scaling_cur_freq` and `/proc/cpuinfo` are never read during a run: each read interrupts
@@ -357,35 +404,81 @@ the CPU and may sleep 10 ms. osnoise is optional, off by default, and 6.8 only. 
 its tracepoints write a trace buffer inside the window, so RQ2 measures its cost. Its default mode
 occupies every CPU it measures, so it only serves as a probe before the queue.
 
+## Devices
+
+Devices are plugin objects like CPUs (`gpu0`), with the same save, apply, verify and restore. The
+first set is GPUs, through NVML as root:
+- **State**: power limit (`nvmlDeviceSetPowerManagementLimit`), locked clocks
+  (`nvmlDeviceSetGpuLockedClocks`, Volta and newer) and persistence mode; none survives a reboot.
+  Persistence is applied first and restored last: without it the GPU is torn down when the last
+  client exits, such as a short-lived sudo verb, and the power limit goes with it.
+  No NVML call that reads the locked clocks was found, so restore unlocks them
+  (`nvmlDeviceResetGpuLockedClocks`): exact only if they were unlocked before.
+- **Boot-only**, detected and refused on mismatch: ECC mode (changes apply at the next reboot) and
+  MIG mode (changes need a GPU reset), current and pending.
+- **Noise**: other processes on the GPU (`nvmlDeviceGetComputeRunningProcesses`), clock-event
+  reasons and temperature at the edges. The meter is `nvml`.
+
+Other devices later, for example a NIC's interrupt coalescing and IRQ affinity, or a disk's I/O
+scheduler and read-ahead.
+
+## Several machines (later phase)
+
+One experiment can span hosts, like the two-machine A/B tests (one machine parks work, the other
+is switched off, wall power on both). The simplest correct mechanism:
+- **A leader drives followers over SSH**, with no new sockets or ports: one session per follower
+  for the whole queue (`ssh -T -o ControlPath=none -o ServerAliveInterval=0 <host> energy-runner
+  hold`, no pty), one JSON line per command, each with a reply timeout.
+- **Each host keeps its own state engine, journal and lock.** `hold` takes its host's lock and uses
+  its own privileged verbs. The leader takes all locks, its own included, in host-name order, so
+  two multi-host queues can't deadlock.
+- **A follower holds its state only while the leader's session lives.** `hold` restores and exits
+  at EOF on stdin: when the connection ends, sshd closes a non-pty session's pipes and sends no
+  signal. Each leader line also sets a lease, the longest planned silence (a run's `timeout_s` or
+  the thermal gate's, plus a margin), for a leader host that dies without closing the connection.
+  A late reply flags the run, and the leader stops and restores everywhere. If a follower dies,
+  the leader runs `sudo -n energy-runner restore` there over a new session (it acts only on a
+  leftover and never waits on the lock).
+- **Shared edges.** The leader asks every host to read its meters at each edge, then reads its own;
+  each host returns its readings and `CLOCK_REALTIME`, so the round trip (skew) and clock offset
+  are recorded, with each NTP offset. A follower running part of the workload sends one line when
+  it ends, the only traffic inside the window. The leader's plan and seed are stored on every host.
+- **Cost.** Between lines sshd waits with no timeout (`ClientAliveInterval` defaults to 0) and TCP
+  keepalive starts after 2 h of silence, so the session should cause no periodic wakeups; it still
+  holds processes and a connection on each host, and RQ2 measures it.
+- **Energy is compared only on the same machine**; results from several machines are per host.
+
 ## Events and notifications
 
-The runner appends events to `events.jsonl`, and root-side recovery to a spool under
-`/var/lib/energy-runner` that `finish` sends. Events go out only between runs, right after a run
-and before the thermal gate:
+The runner decides when, a command decides how. Every event goes to `events.jsonl`. Only outside
+measured windows (after a run before the thermal gate, or while waiting, starting or exiting), it
+runs `notify.cmd` once per event listed in `notify.events`, with a timeout and the event in
+`RUNNER_EVENT`, `RUNNER_QUEUE`, `RUNNER_RUN` and `RUNNER_TEXT`:
 
-`queue_started`, `run_done`, `run_failed`, `run_aborted`, `drift`, `others_detected`,
-`thermal_timeout`, `canary_drift`, `restore_ok`, `restore_conflict`, `restore_failed`,
-`rebooted`, `queue_paused`, `queue_done`, `lock_taken`, `lock_lifted` (done, failed, killed,
-expired), `lockout_check_failed`, and an optional daily `heartbeat`.
+`queue_started`, `queue_waiting`, `run_done`, `run_failed`, `run_aborted`, `drift`,
+`others_detected`, `thermal_timeout`, `canary_drift`, `restore_ok`, `restore_conflict`,
+`restore_failed`, `rebooted`, `queue_paused`, `queue_done`, `lock_taken`, `lock_lifted` (done,
+failed, killed, expired), `lockout_check_failed`, and an optional daily `heartbeat`.
 
-Sinks are minion's: email through the minion agent (`_agent notify`) and `run` hooks (e.g. a
-`curl` webhook), filtered by `notify.events`. Secrets come from the laptop and reach the unit via
-`LoadCredential=` from a 0600 file on local disk (a `rebooted` notice needs them too). The laptop
-never polls: `minion fetch` and an on-demand status read are the only logins, and the noise record
-shows logins during a run. A dead machine can't notify, so optionally the runner pings a heartbeat
-URL at queue start, after each run and at the end, and a service such as Healthchecks.io alerts
-when a ping is late.
+With minion the command is `$MINION_AGENT _agent notify`, reading the 0600 notify file at
+`$MINION_NOTIFY` (minion change 7), so secrets stay out of the queue and the environment. Without
+minion it is any script, e.g. `curl` to a webhook. Beyond its env vars, the runner knows nothing of
+minion. Root never notifies (it runs no user code): after a `kill -9`, minion's job notice reports
+the failure, and a leftover is reported by the runner that finds it. The laptop never polls:
+`minion fetch` and an on-demand status read are the only logins. A dead machine can't notify, so
+optionally the runner pings a heartbeat URL at queue start, after each run and at the end, and a
+service such as Healthchecks.io alerts when a ping is late.
 
 ## Results
 
 ```
-<out>/<queue-id>/
+<out>/turbo-cost-20261123T091200Z/
   queue.json      the queue as given, with resolved values and the seed
   plan.json       the full order: round and position of every run
   host.json       CPU model and topology, kernel, cmdline, microcode, BIOS, boot-only checks,
                   energy zone tree and backend (MSR, TPMI, modeled), NVML and driver versions,
-                  runner and helper versions, git commit and dirty flag (from minion)
-  journal.jsonl   the helper's journal for this queue
+                  runner version, minion job id, git commit and dirty flag (from minion's env)
+  journal.jsonl   this queue's journal
   events.jsonl
   wall/           BMC samples from the wall sampler
   runs/0001-ep-stable-r03-a1/
@@ -396,7 +489,9 @@ when a ping is late.
 ```
 
 Runs only ever go to new directories. `out` must be on local disk, like every runner path. It is
-relative to the project's `remote_dir`, so minion's existing `fetch` globs bring everything back.
+relative to the project's `remote_dir` and under `results/`, so a `fetch` glob brings everything
+back. In UTC: the queue id ends in its start time (`20261123T091200Z`), every JSON time is epoch
+nanoseconds, and every runner log line starts with an ISO 8601 `Z` time.
 
 ## Research questions
 
@@ -407,12 +502,13 @@ relative to the project's `remote_dir`, so minion's existing `fetch` globs bring
   from variance due to interference.
 - **RQ2: exact and safe restore, without disturbance.** *Restore:* `runner snapshot` before a
   queue and after its restore must match, also with `kill -9` at random points in apply, run and
-  restore, and with a reboot mid-queue. *Overhead:* fixed workloads and a long idle window with
-  (a) no tool, (b) the runner, (c) today's Python sampler plus a per-second `ipmitool` fork,
-  (d) time-series mode at a few rates. For (b), the runner on CPU 0, on a package's lowest CPU
-  (where RAPL is read), on another housekeeping CPU, and on an experiment CPU's SMT sibling, with
-  osnoise on and off. Compare energy (RAPL and wall), run time, IPIs and timer interrupts on
-  experiment CPUs, and idle-state residency.
+  restore, and (with the boot unit) a reboot mid-queue. *Overhead:* fixed workloads and a long
+  idle window with (a) no tool, (b) the runner, (c) today's Python sampler plus a per-second
+  `ipmitool` fork, (d) time-series mode at a few rates, (e) an idle `hold` session on both hosts.
+  For (b), the runner on CPU 0, on a package's lowest CPU (where RAPL is read), on another
+  housekeeping CPU, and on an experiment CPU's SMT sibling, with osnoise on and off. Compare
+  energy (RAPL and wall), run time, IPIs and timer interrupts on experiment CPUs, and idle-state
+  residency.
 - **RQ3: smallest detectable regression.** Two queue modes. *A/A* runs the same code on both sides
   and gives the false-positive rate. *Injected* adds a calibrated extra cost (extra work, a
   frequency cap) and gives the detection rate. Measure both against the number of runs, with and
@@ -422,77 +518,76 @@ relative to the project's `remote_dir`, so minion's existing `fetch` globs bring
 
 ## Minion changes
 
-Verified in the code. Each one is small and useful without the runner.
+Verified in the code. Each one is small and useful without the runner. Items 1-7 are merged
+(PRs #3, #6, #7, #8); 8 is open as PR #10.
 
-1. **Job state on local disk.** Jobs live in `~/.minion/jobs` (`jobsDir`, `JobDir`,
-   `LatestJobCommand` and `PsCommand` in `internal/remote/remote.go`), and the agent in
-   `~/.minion/bin/minion` (`remoteBin` in `internal/ssh/ssh.go`). With an NFS home, logs are
-   written over NFS during a run. The job script, which exports the SMTP password and is written
-   before its `chmod 700`, is stored there. Every machine sees the others' jobs. Fix: add
-   `state_dir` to `Host` (`internal/config/config.go`, default `~/.minion`), and set `umask 077`
-   first.
-2. **Jobs per host.** Record `hostname` in the job dir. `ps`, and `attach` or `fetch` without an id
-   (`LatestJobCommand`), then see only this host's jobs. `kill` refuses another host's job: today
-   it reads that host's pid, signals an unrelated local process, and writes 143 into the other
-   job's `status` (`KillCommand`).
-3. **Unique job ids.** `randomName` (`internal/cli/names.go`) has 40 × 40 = 1600 names, and the
-   `mkdir -p` in `LaunchCommand` then reuses an old job's `status`, `run.json` and log. Fix: a plain
-   `mkdir` with retry, and the time in the id.
-4. **Agents never rewritten in place.** With one shared path, bootstrapping an arm64 host
-   overwrites the amd64 agent that other machines run, and dev builds re-upload on every command
-   (`EnsureAgent`, `upload`). Fix: upload to `<state_dir>/bin/minion-<version>-<goos>-<goarch>`,
-   and never rewrite an existing file.
-5. **Quiet attach.** `AttachCommand` loops on `sleep 1` beside `tail -f`, and on NFS GNU `tail`
-   also polls every second. Fix: `_agent follow <jobdir>`, with inotify on the log (on local disk)
-   and a pidfd on the job (`internal/cli/agent.go`).
-6. **Provenance.** `run.json` uses `date +%s` and is never fetched (`Script` in `remote.go`,
-   `pullResults` in `internal/cli/fetch.go`). Fix: record nanosecond times, kernel and hostname, and
-   fetch `run.json` and the log into `_minion/`.
-7. **Notify for tasks.** Write the resolved notify block to a 0600 file in the job dir. Export its
-   path as `MINION_NOTIFY`, and the agent path as `MINION_AGENT` (`buildNotify` in
-   `internal/cli/run.go`). The secrets stay out of the environment.
-8. **Lockout check.** `minion lock-check` logs in once with `-o ControlPath=none`, which bypasses
-   the user's and minion's shared connections. It then runs `energy-helper confirm`, or `unlock` if
-   the login failed, over the kept connection (`internal/ssh`).
-
-Launching needs no new verb. A task such as `"energy": "energy-runner submit energy/turbo.json"`
-starts the unit and returns, so the minion job's notification only means "submitted".
-`energy-runner stop`, not `minion kill`, stops a queue, and `minion fetch` brings the results back.
+1. **Job state on local disk**: `state_dir` per host (default `~/.minion`), under `umask 077`.
+2. **Jobs per host**: `ps` and the latest-job lookup see only this host's jobs; `kill` refuses
+   another host's job.
+3. **Unique job ids**: a random name plus the start time, made with a plain `mkdir`.
+4. **Agents never rewritten in place**: each agent build gets its own file.
+5. **Quiet attach**: `_agent follow` with inotify on the log and a pidfd on the job.
+6. **Provenance**: `run.json` has nanosecond times, kernel and hostname and is fetched into
+   `_minion/`; jobs see `MINION_GIT` and `MINION_DIRTY`.
+7. **Notify for tasks**: the notify block is a 0600 file at `$MINION_NOTIFY`, and
+   `$MINION_AGENT _agent notify` sends a given subject and body, so the runner can use it.
+8. **UTC everywhere**: job ids and `{ts}` as `20261123T142501Z`, `ps` in UTC with the `Z`
+   (today local time: `tsLayout` in `minion/internal/cli/paths.go`, `.Local()` in `ps.go`).
+9. **Lockout check** (later): `minion lock-check` logs in once with `-o ControlPath=none`,
+   bypassing shared connections, then runs `energy-runner confirm`, or `unlock` if the login
+   failed, over the kept connection (`minion/internal/ssh`).
 
 ## Plan
 
-1. **minion fixes** (items 1-7). Done when two hosts sharing a home each list only their own
-   jobs, `kill` refuses another host's job, ids never collide, `attach` causes no periodic wakeups
-   on the host (`strace -f -c`), fetched results contain `run.json` and the log, and `make test`
-   passes.
-2. **State engine**: the helper, the journal, the cpufreq, idle, turbo, uncore and RAPL plugins,
-   `snapshot`/`verify`/`apply`/`restore`/`recover`, and the units. Done when, on a test machine,
-   the snapshots before and after a queue match, both normally and after `kill -9` in each phase
-   and after a reboot, and `host_baseline.sh` and `slot.sh` can be retired.
-3. **Queue, meters, noise record, events, isolation.** Done when a queue of 2 profiles,
-   2 workloads and 10 reps runs unattended with full provenance, notifications arrive only between
-   runs, and the RQ2 overhead experiment has run.
-4. **Machine lock** (opt-in, item 8). Done when, on a test machine, another account is refused
-   and sees the message while the holder, root and an admin get in; the lock lifts at the end,
-   after `kill -9` of the runner, at expiry and after a reboot; and a broken PAM module or
-   `allow.conf` leaves logins open.
-5. **RQ3**: the A/A and injected modes and the Python analysis. Done when the detection rate
-   against the number of runs is measured for two injected sizes or more, with and without the
+Each phase has a "done when", checked on a test machine.
+
+1. **minion fixes**: items 1-7 merged; UTC (item 8) in PR #10. Done when ids, `{ts}` and `ps`
+   are UTC and `make test` passes.
+2. **State engine** (merged, PR #2): the journal, the verbs `snapshot`, `apply`, `restore`,
+   `status`, and three settings: governor, turbo, idle states. Done when snapshots before and after
+   match, also after `kill -9` at each step, and as root the binary refuses the test overrides.
+2b. **`energy-runner run`** (first slice merged, PR #4: `time` and `rapl` at the edges, a drift
+   flag): one workload under one profile, the subreaper, the window rule. Done when `run.json` has
+   energy per zone and the three clocks, `strace` shows no runner syscall inside the window but
+   the wakeup that ends it, and the state is restored after success, failure and `SIGTERM`.
+3. **Queue and the minion connection** (PR #9 open): `queue`, `plan.json`, lock waiting, restore
+   first, owner checks, the `always` hook, `notify.cmd`. Done when two queues started together run
+   one after the other, a `kill -9` of the runner at any point leaves the machine restored,
+   notifications arrive only outside windows, and `minion fetch` brings back results with job id and
+   commit.
+4. **Meters, noise record, isolation**: `nvml`, `wall`, `perf`, `cmd`, the thermal gate, the other
+   settings, the delegated scope. Done when 2 profiles × 2 workloads × 10 reps run unattended with
+   full provenance and the RQ2 overhead experiment has run; `host_baseline.sh` and `slot.sh` retire.
+5. **Machine lock** (opt-in, item 9). Done when another account is refused and sees the message
+   while the holder, root and an admin get in; the lock lifts at the end, after `kill -9` of the
+   runner, at expiry and after a reboot; and a broken PAM module or `allow.conf` leaves logins open.
+6. **Several machines**. Done when a two-host queue runs with shared edges, and killing the leader
+   or cutting its network leaves the follower restored within one lease.
+7. **GPU and device state**. Done when GPU snapshots before and after a queue match and ECC or MIG
+   mismatches are refused.
+8. **Boot unit**: a root service before user sessions that never fails the boot, loads the uncore,
+   RAPL and coretemp drivers, and restores an open journal's `restore` settings only if kernel,
+   cmdline, microcode and BIOS match. Done when snapshots match after a reboot mid-queue.
+9. **RQ3**: the A/A and injected modes and the Python analysis. Done when the detection rate
+   against the number of runs is measured for two or more injected sizes, with and without the
    noise record.
 
 ## Open questions
 
-1. Where should the runner live: its own repository (recommended: another language, the
-   project's deliverable) or `runner/` here?
-2. Can the admins install the helper, its sudoers rule and the units on each host?
-3. Is each BMC reachable from another machine, and with which credentials?
-4. After a reboot the journal restores values set by hand, other users' included (the task asks
-   for this), and only on the same kernel and firmware. Confirm, since a user may expect a reboot
-   to clear them.
-5. Which timers and services may be paused on the shared machines?
-6. Restricting other users (the lock, `AllowedCPUs` on shared slices, RAPL limits) needs root and
+1. Can the admins install the runner binary and its sudoers rule on each host (no units for now)?
+2. Is each BMC reachable from another machine, and with which credentials?
+3. Until the boot unit, a reboot loses values set by hand before a queue. With it, the journal
+   restores them, other users' included (the task asks for this), only on the same kernel and
+   firmware. Confirm, since a user may expect a reboot to clear them.
+4. Which timers and services may be paused on the shared machines?
+5. Restricting other users (the lock, `AllowedCPUs` on shared slices, RAPL limits) needs root and
    the agreement of the admins and those users. Which machines opt in, with which maximum and
    admin group? On shared machines, keep it opt-in and time-limited.
-7. The Cascade Lake host runs kernel 5.15: no osnoise no-workload mode, and frequency reads
+6. The Cascade Lake host runs kernel 5.15: no osnoise no-workload mode, and frequency reads
    interrupt the CPU read. Move it to 24.04 (6.8), or only record the gap?
-8. A name: `energy-runner` is a placeholder.
+7. A name: `energy-runner` is a placeholder; it should be general, since energy is only the first
+   use case.
+8. How do we enable the `perf` meter on the Ubuntu hosts: an admin sysctl, or `CAP_PERFMON` for
+   the runner?
+9. Isolation needs a delegated cgroup; without unit files, the plan is a transient scope. Is a
+   transient (not installed) unit acceptable?
