@@ -1,9 +1,11 @@
 package ssh
 
 import (
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -69,30 +71,39 @@ func localClient(home string) *Client {
 	}
 }
 
-func TestEnsureAgentUploadsAndVerifies(t *testing.T) {
-	home := t.TempDir()
-
-	// a fake minion that answers `_agent version`.
-	fake := filepath.Join(t.TempDir(), "minion-fake")
-	script := "#!/bin/sh\nif [ \"$1\" = \"_agent\" ] && [ \"$2\" = \"version\" ]; then echo \"minion testver\"; fi\n"
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+// fakeAgent writes a script that answers `_agent version` with version.
+func fakeAgent(t *testing.T, version, extra string) string {
+	p := filepath.Join(t.TempDir(), "minion-fake")
+	script := "#!/bin/sh\n# " + extra + "\nif [ \"$1\" = \"_agent\" ] && [ \"$2\" = \"version\" ]; then echo \"minion " + version + "\"; fi\n"
+	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	return p
+}
 
+func TestEnsureAgentUploadsAndVerifies(t *testing.T) {
+	home := t.TempDir()
 	c := localClient(home)
+	platform, err := c.RemotePlatform()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "minion-testver-" + strings.ReplaceAll(platform, "/", "-")
+
+	fake := fakeAgent(t, "testver", "")
 	binaryFor := func(string) (string, error) { return fake, nil }
 	invoke, err := c.EnsureAgent("~/state", "testver", binaryFor)
 	if err != nil {
 		t.Fatalf("EnsureAgent: %v", err)
 	}
-	if want := `"$HOME"/'state'/bin/minion`; invoke != want {
+	if want := `"$HOME"/'state'/bin/'` + name + `'`; invoke != want {
 		t.Fatalf("invoke = %q, want %q", invoke, want)
 	}
 	if fi, err := os.Stat(filepath.Join(home, "state")); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("state dir not private: %v %v", fi.Mode(), err)
 	}
 
-	got := filepath.Join(home, "state/bin/minion")
+	got := filepath.Join(home, "state/bin", name)
 	fi, err := os.Stat(got)
 	if err != nil {
 		t.Fatalf("uploaded binary missing: %v", err)
@@ -104,6 +115,39 @@ func TestEnsureAgentUploadsAndVerifies(t *testing.T) {
 	// second call hits the fast path (present, matching version).
 	if _, err := c.EnsureAgent("~/state", "testver", binaryFor); err != nil {
 		t.Fatalf("EnsureAgent (cached): %v", err)
+	}
+}
+
+// A re-upload (dev builds always re-upload) replaces the file by a rename: an
+// agent that has the old file open, or runs it, keeps the old bytes.
+func TestEnsureAgentNeverRewritesInPlace(t *testing.T) {
+	home := t.TempDir()
+	c := localClient(home)
+	first := fakeAgent(t, "dev", "first")
+	if _, err := c.EnsureAgent("~/state", "dev", func(string) (string, error) { return first, nil }); err != nil {
+		t.Fatal(err)
+	}
+	matches, _ := filepath.Glob(filepath.Join(home, "state/bin/minion-dev-*"))
+	if len(matches) != 1 {
+		t.Fatalf("agents: %v", matches)
+	}
+	running, err := os.Open(matches[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer running.Close()
+
+	second := fakeAgent(t, "dev", "second")
+	if _, err := c.EnsureAgent("~/state", "dev", func(string) (string, error) { return second, nil }); err != nil {
+		t.Fatal(err)
+	}
+	old, _ := io.ReadAll(running)
+	now, _ := os.ReadFile(matches[0])
+	if !strings.Contains(string(old), "first") || !strings.Contains(string(now), "second") {
+		t.Fatalf("old file now %q, path now %q", old, now)
+	}
+	if left, _ := filepath.Glob(filepath.Join(home, "state/bin/.upload.*")); len(left) != 0 {
+		t.Errorf("temp files left: %v", left)
 	}
 }
 
