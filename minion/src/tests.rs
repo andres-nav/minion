@@ -655,7 +655,10 @@ fn queue_runs_every_run_and_restores() {
         // factory puts back what fast changed: a run never inherits the one before.
         let no_turbo = if r["profile"] == "fast" { "1" } else { "0" };
         assert_eq!(run["state"]["before"]["cpu.turbo"]["no_turbo"], no_turbo);
-        assert_eq!(run["drift"], false);
+        assert_eq!(
+            (&run["drift"], &run["leftovers"]),
+            (&json!(false), &json!(false))
+        );
         assert!(run["meters"]["rapl"]["zones"]["intel-rapl:0"].is_object());
         let stdout = fs::read_to_string(d.join("stdout")).unwrap();
         assert_eq!(stdout, if ok { "out\n" } else { "" });
@@ -927,15 +930,16 @@ fn drift_is_flagged_and_the_next_run_reapplies() {
     let f = Fake::new("queue-drift");
     let gov = f.file("cpufreq/policy0/scaling_governor");
     let mark = f.root.join("changed");
-    // The first run changes the governor 0.1 s after it ends, while the second settles.
-    let script = format!(
-        "[ -e {m} ] || {{ touch {m}; (sleep 0.1; echo powersave > {g}) & }}",
+    // The notify of the first run_done changes the governor, between runs.
+    let notify = format!(
+        "[ $MINION_EVENT = run_done ] && [ ! -e {m} ] && touch {m} && echo powersave > {g}; true",
         m = mark.display(),
         g = gov.display()
     );
     let (code, dir) = f.queue(json!({
         "name": "drift", "profiles": {"fast": stable()},
-        "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 3, "settle_s": 0.5,
+        "workloads": {"w": {"cmd": ["true"]}}, "reps": 3,
+        "notify": {"cmd": ["sh", "-c", notify]},
     }));
     assert_eq!(code, 0);
     let kinds = kinds(&dir);
@@ -1020,15 +1024,19 @@ fn a_late_restore_hook_leaves_the_running_queue_alone() {
 }
 
 #[test]
-fn a_hanging_notify_is_killed_with_its_process_group() {
+fn a_notify_is_marked_and_killed_with_its_process_group() {
     let _serial = serial();
     let f = Fake::new("queue-hang");
-    let late = f.root.join("late");
-    let hang = format!("(sleep 0.5; touch {}) & sleep 10", late.display());
+    let pids = f.root.join("pids");
+    // Every notify leaves a child behind; the one for run_done also hangs.
+    let notify = format!(
+        "sleep 30 & echo \"$! $MINION_WORKLOAD\" >> {}; [ $MINION_EVENT != run_done ] || sleep 10",
+        pids.display()
+    );
     let t = Instant::now();
     let (code, dir) = f.queue(json!({
         "name": "hang", "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}}, "reps": 1,
-        "notify": {"cmd": ["sh", "-c", hang], "timeout_s": 0.1},
+        "notify": {"cmd": ["sh", "-c", notify], "timeout_s": 0.5},
     }));
     assert!(
         t.elapsed() < Duration::from_secs(3),
@@ -1039,8 +1047,29 @@ fn a_hanging_notify_is_killed_with_its_process_group() {
         kinds(&dir),
         ["queue_started", "run_done", "restore_ok", "queue_done"]
     );
-    std::thread::sleep(Duration::from_secs(1));
-    assert!(!late.exists(), "the notify's child outlived it");
+    let id = dir.file_name().unwrap().to_str().unwrap();
+    let mark = crate::lock::mark(&f.root.join("lock"), id);
+    let pids = fs::read_to_string(&pids).unwrap();
+    for (pid, m) in pids.lines().map(|l| l.split_once(' ').unwrap()) {
+        assert_eq!(m, mark);
+        wait("the notify's child to die", || !alive(pid));
+    }
+}
+
+#[test]
+fn a_workloads_leftovers_are_killed_at_its_end() {
+    let _serial = serial();
+    let f = Fake::new("leftovers");
+    let pid = f.root.join("child");
+    let script = format!("sleep 30 & echo $! > {}", pid.display());
+    let (code, dir) = f.queue(json!({
+        "name": "left", "profiles": {"p": {}}, "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 1,
+    }));
+    assert_eq!(code, 0);
+    let run = read_json(&dir.join("runs/0001-w-p-r01/run.json"));
+    assert_eq!(run["leftovers"], true);
+    let child = fs::read_to_string(&pid).unwrap();
+    wait("the leftover to die", || !alive(child.trim()));
 }
 
 #[test]

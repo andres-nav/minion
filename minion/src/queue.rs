@@ -298,8 +298,8 @@ impl Running<'_> {
             ("MINION_STATUS", status),
             ("MINION_DETAIL", detail),
         ];
-        let mut cmd = Command::new(prog);
-        cmd.args(args).envs(env).stdin(Stdio::null());
+        let mut cmd = workload(prog, args, &lock::mark(&self.o.lock, &self.id));
+        cmd.envs(env);
         let timeout = self.q.notify_timeout;
         match run_with_timeout(cmd, timeout) {
             Ok(Some(s)) if s.success() => {}
@@ -317,10 +317,10 @@ impl Run {
     }
 }
 
-/// Runs cmd in its own process group, and kills the group if cmd still runs
+/// Runs cmd, then kills its process group when cmd exits or, if it still runs,
 /// after timeout. Returns the exit status, or None if it was killed.
 fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
-    let mut child = cmd.process_group(0).spawn()?;
+    let mut child = cmd.spawn()?;
     let pid = child.id() as i32;
     let (exited, wait) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
@@ -329,15 +329,14 @@ fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Opti
         status
     });
     let killed = wait.recv_timeout(timeout).is_err();
-    if killed {
-        kill(-pid, SIGKILL);
-    }
+    kill(-pid, SIGKILL);
     let status = waiter.join().unwrap()?;
     Ok((!killed).then_some(status))
 }
 
-/// A workload: stdin from /dev/null, in its own process group, with MARK set,
-/// and killed if the runner dies. Its own children are left to reap.
+/// A workload or notify: stdin from /dev/null, in its own process group, with
+/// MARK set, and killed if the runner dies. Its group is killed when it exits;
+/// if the runner dies first, its children are left to reap.
 pub fn workload(prog: &str, args: &[String], mark: &str) -> Command {
     let mut c = Command::new(prog);
     c.args(args)
