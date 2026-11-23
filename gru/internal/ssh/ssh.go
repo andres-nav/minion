@@ -162,7 +162,7 @@ func (c *Client) Output(command string) (string, error) {
 	cmd := c.cmd(command)
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("%s: %s: %v: %s", c.Host, command, err, strings.TrimSpace(errb.String()))
+		return "", fmt.Errorf("%s: %v: %s", c.Host, err, strings.TrimSpace(errb.String()))
 	}
 	return strings.TrimSpace(out.String()), nil
 }
