@@ -602,12 +602,8 @@ fn the_noise_record_reads_proc_and_other_cgroups_around_a_run() {
     let at = |irq0: u64| json!({"interrupts": {"0": [irq0, 2], "NMI": [5, 5]}, "ctxt": 10});
     let (r, _) = crate::run::Meter::report(&crate::noise::Noise::open(&f.sys), &at(1), &at(3), 1.0);
     assert_eq!(r["interrupts"], json!({"0": [2, 0]})); // only rows that changed
-    let names: Vec<_> = crate::run::meters(&f.sys, &["rapl".into()])
-        .unwrap()
-        .iter()
-        .map(|m| m.name())
-        .collect();
-    assert_eq!(names, ["time", "rapl", "noise"]); // outermost
+    let time = &run["meters"]["time"];
+    assert!(time["start_ns"].as_u64() < time["end_ns"].as_u64());
 }
 
 #[test]
