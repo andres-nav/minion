@@ -24,6 +24,7 @@
               go-tools       # staticcheck
               cargo          # runner/
               rustc
+              clippy
               gnumake
               git
             ];

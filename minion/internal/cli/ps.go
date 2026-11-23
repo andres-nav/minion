@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andres-nav/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/remote"
 )
 
 type psRow struct {

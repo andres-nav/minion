@@ -6,8 +6,8 @@ import (
 	"io"
 	"os"
 
-	"github.com/andres-nav/minion/internal/remote"
-	"github.com/andres-nav/minion/internal/sync"
+	"github.com/andres-nav/minion/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/sync"
 )
 
 func cmdSync(args []string) int {

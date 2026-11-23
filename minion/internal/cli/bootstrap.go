@@ -4,7 +4,7 @@ import (
 	"os"
 	"runtime"
 
-	"github.com/andres-nav/minion/internal/ssh"
+	"github.com/andres-nav/minion/minion/internal/ssh"
 )
 
 // agentBinaryFor resolves the local minion binary to upload for the remote's

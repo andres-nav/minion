@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/andres-nav/minion/internal/remote"
+	"github.com/andres-nav/minion/minion/internal/remote"
 )
 
 // ResolveAgentBinary picks the local minion binary to upload for the remote's

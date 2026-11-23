@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/andres-nav/minion/internal/config"
+	"github.com/andres-nav/minion/minion/internal/config"
 )
 
 type listOutput struct {

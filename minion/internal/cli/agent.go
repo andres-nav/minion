@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/andres-nav/minion/internal/notify"
-	"github.com/andres-nav/minion/internal/sync"
+	"github.com/andres-nav/minion/minion/internal/notify"
+	"github.com/andres-nav/minion/minion/internal/sync"
 )
 
 // cmdAgent is the hidden remote-side counterpart invoked over ssh.

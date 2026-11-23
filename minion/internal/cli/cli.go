@@ -8,7 +8,7 @@ import (
 )
 
 // version is overridden at build time via
-// -ldflags "-X github.com/andres-nav/minion/internal/cli.version=...".
+// -ldflags "-X github.com/andres-nav/minion/minion/internal/cli.version=...".
 var version = "dev"
 
 type command struct {
