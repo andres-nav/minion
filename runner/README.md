@@ -113,8 +113,8 @@ Each queue writes to a new directory, `<out>/<name>-<YYYYMMDDTHHMMSSZ>/`:
 
 ```
 queue.json    the queue as given; the resolved seed, settle, meters and profiles; the settings
-              at the start; the queue's start and end on both clocks (`time`, the end added
-              when it finishes); the runner version; the MINION_* variables (job id, task, host)
+              at the start; the queue's start on both clocks (`time`; its end is the
+              queue_done event); the runner version; the MINION_* variables (job id, task, host)
 plan.json     the seed and every run: id, round, position, workload, profile
 events.jsonl  one line per event: event, time, time_utc, queue, run, status, detail
 runs/0001-ep-stable-r01/
