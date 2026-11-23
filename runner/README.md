@@ -2,6 +2,10 @@
 
 Sets machine settings for a measurement, puts the originals back (also after a crash), runs a
 command between meter reads, and runs whole queues of them. Design: [ENERGY.md](../docs/ENERGY.md).
+All times are UTC: names use `20261123T142501Z`, every wall-clock epoch has an ISO 8601 `*_utc`
+twin (`2026-11-23T14:25:01Z`; monotonic times have none), and log lines start with the UTC time.
+Local time is never used.
+
 This first slice handles three settings, written in this order:
 
 | setting | files | values |
@@ -71,8 +75,8 @@ Runs a whole queue as the user, in the foreground, and puts the settings back at
 ```
 
 `seed` (default: from the clock), `settle_s` (default 1), `meters` (default `["time", "rapl"]`;
-`time` is always read) and `notify` are optional. Unknown keys, settings, objects, values and
-meters are refused before anything runs. Names take letters, digits, `.`, `_` and `-`.
+`time` is always read) and `notify` (with `timeout_s`, default 30) are optional. Unknown keys,
+settings, objects, values and meters are refused before anything runs. Names take letters, digits, `.`, `_` and `-`.
 
 - **Plan.** `reps` rounds; each round runs every (profile, workload) pair once, in an order
   shuffled by Fisher-Yates with splitmix64 from the seed. The whole plan goes to plan.json first.
@@ -83,7 +87,8 @@ meters are refused before anything runs. Names take letters, digits, `.`, `_` an
 - **Machine lock.** A blocking `flock` on `/run/lock/energy-runner.lock` (world-writable, gone at
   reboot), held to the end. The holder writes its queue id into the file; a second queue logs
   that id and sleeps in the kernel until the lock is free, then runs.
-- **Runs.** First, a journal left open by a crash is restored (`sudo -n energy-runner restore`).
+- **Runs.** First, a journal left open by a crash is restored (`sudo -n energy-runner restore
+  --held`).
   Then each run: apply if needed, settle, run the workload with `run`'s meters (stdin from
   `/dev/null`, stdout and stderr to files, in its own process group). A run whose settings
   changed during it or differ from its profile is flagged `drift`, and the next run applies its
@@ -92,16 +97,21 @@ meters are refused before anything runs. Names take letters, digits, `.`, `_` an
   queue restores the settings, then releases the lock. It exits 0 when every run succeeded and
   the restore worked, 128 + the signal when stopped, and 1 otherwise.
 
-`apply` and `restore` need a sudoers rule that lets the user run them without a password; sudo
-finds `energy-runner` on its `secure_path`, so install it there, owned by root.
+`apply`, `restore` and `restore --held` need a sudoers rule that lets the user run them without a
+password; sudo finds `energy-runner` on its `secure_path`, so install it there, owned by root.
 
-Each queue writes to a new directory, `<out>/<name>-<YYYYMMDD-HHMMSS, UTC>/`:
+`restore` first takes the machine lock without waiting. While a queue holds it, `restore` does
+nothing and says so: that queue restored any leftover journal when it started, so a late restore
+would only undo its profile. `--held` tells `restore` that the caller is the queue holding the
+lock.
+
+Each queue writes to a new directory, `<out>/<name>-<YYYYMMDDTHHMMSSZ>/`:
 
 ```
 queue.json    the queue as given; the resolved seed, settle, meters and profiles; the settings
               at the start; the runner version; the MINION_* variables (job id, task, host)
 plan.json     the seed and every run: id, round, position, workload, profile
-events.jsonl  one line per event
+events.jsonl  one line per event: event, time, time_utc, queue, run, status, detail
 runs/0001-ep-stable-r01/
   run.json    as for `run` (cmd, exit, meters, state before and after, drift), plus the
               queue, run id, round, position, workload and profile
@@ -112,7 +122,9 @@ runs/0001-ep-stable-r01/
 
 Each event is appended to events.jsonl and logged. Then, and only between runs, `notify.cmd` runs
 once with the event in `RUNNER_EVENT`, `RUNNER_QUEUE`, `RUNNER_RUN`, `RUNNER_STATUS` and
-`RUNNER_DETAIL`. A failing notify command is logged and never changes the queue's outcome.
+`RUNNER_DETAIL`. It runs in its own process group, which is killed if it still runs after
+`notify.timeout_s`. A failing or killed notify command is logged and never changes the queue's
+outcome.
 
 | event | status | detail |
 |---|---|---|
@@ -139,14 +151,15 @@ minion run energy --arg q.json --detach
 ```
 
 `minion kill` sends SIGTERM: the queue stops its workload and restores. If the runner dies
-without restoring (`kill -9`, a crash), the `always` hook restores, and so does the next queue
-before it starts.
+without restoring (`kill -9`, a crash), the `always` hook restores. If another queue was waiting
+and took the lock first, that queue restores before its first run, and the hook does nothing.
 
 ## Journal
 
 `journal.jsonl` in the state dir, one fsynced JSON line per step: `open`, `saved` (the full
 original state, written once), `apply` (the intent), `applied` (the read-back), `restored`,
-`close`. On close it moves to `done/<ns>.jsonl`. `restore` puts back every saved value except
+`close`. Each line has `time` (epoch seconds) and `time_utc`. On close it moves to
+`done/<YYYYMMDDTHHMMSS.nnnnnnnnnZ>.jsonl`. `restore` puts back every saved value except
 objects that differ from both the saved and the last applied value: someone else changed those, so
 they are kept and reported. After a crash between `apply` and `applied`, every object is restored.
 Restoring twice is harmless.

@@ -6,13 +6,15 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
-use crate::journal::{self, now_ns};
+use crate::journal;
 use crate::run::{self, Meter, WORKLOAD};
 use crate::settings::{self, State};
+use crate::utc::{self, log, now_ns};
 use crate::{NAME, Opts, engine};
 
 const KEYS: [&str; 9] = [
@@ -27,8 +29,10 @@ const KEYS: [&str; 9] = [
     "notify",
 ];
 const SETTLE: Duration = Duration::from_secs(1);
+const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
+const SIGKILL: i32 = 9;
 const SIGTERM: i32 = 15;
 
 unsafe extern "C" {
@@ -49,6 +53,7 @@ pub struct Queue {
     pub meters: Vec<String>,
     pub out: PathBuf,
     pub notify: Vec<String>,
+    pub notify_timeout: Duration,
 }
 
 pub struct Run {
@@ -75,7 +80,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     }
     let meters = run::meters(&o.sysfs, &q.meters)?;
     let plan = plan(&q);
-    let id = format!("{}-{}", q.name, utc(now_ns() / 1_000_000_000));
+    let id = format!("{}-{}", q.name, utc::stamp(now_ns(), false));
 
     let (_lock, waited) = lock(&o.lock, &id)?;
     stop_on_signals();
@@ -163,6 +168,7 @@ impl Running<'_> {
             "resolved": {
                 "seed": self.q.seed, "settle_s": self.q.settle.as_secs_f64(),
                 "meters": self.q.meters, "profiles": targets,
+                "notify_timeout_s": self.q.notify_timeout.as_secs_f64(),
             },
             "start": start,
             "runner": {
@@ -283,22 +289,23 @@ impl Running<'_> {
                     .collect();
                 kept.join("; ")
             }),
-            (false, Verb::Apply(p)) => sudo("apply", &serde_json::to_vec(p).unwrap()),
-            (false, Verb::Restore) => sudo("restore", b""),
+            (false, Verb::Apply(p)) => sudo(&["apply"], &serde_json::to_vec(p).unwrap()),
+            (false, Verb::Restore) => sudo(&["restore", "--held"], b""),
         }
     }
 
     /// Appends the event to events.jsonl, logs it and runs the notify command
     /// with it. Called only between runs. A failing notify is only logged.
     fn send(&mut self, event: &str, run: &str, status: &str, detail: &str) {
+        let now = utc::now_s();
         let line = json!({
-            "event": event, "time": (now_ns() / 1_000_000_000) as u64, "queue": self.id,
+            "event": event, "time": now, "time_utc": utc::iso(now), "queue": self.id,
             "run": run, "status": status, "detail": detail,
         });
         if let Err(e) = writeln!(self.events, "{line}") {
-            eprintln!("{NAME}: write events.jsonl: {e}");
+            log(format!("write events.jsonl: {e}"));
         }
-        eprintln!("{NAME}: {line}");
+        log(&line);
         let Some((prog, args)) = self.q.notify.split_first() else {
             return;
         };
@@ -309,15 +316,14 @@ impl Running<'_> {
             ("RUNNER_STATUS", status),
             ("RUNNER_DETAIL", detail),
         ];
-        match Command::new(prog)
-            .args(args)
-            .envs(env)
-            .stdin(Stdio::null())
-            .status()
-        {
-            Ok(s) if s.success() => {}
-            Ok(s) => eprintln!("{NAME}: notify {event}: {s}"),
-            Err(e) => eprintln!("{NAME}: notify {event}: {prog}: {e}"),
+        let mut cmd = Command::new(prog);
+        cmd.args(args).envs(env).stdin(Stdio::null());
+        let timeout = self.q.notify_timeout;
+        match run_with_timeout(cmd, timeout) {
+            Ok(Some(s)) if s.success() => {}
+            Ok(Some(s)) => log(format!("notify {event}: {s}")),
+            Ok(None) => log(format!("notify {event}: killed after {timeout:?}")),
+            Err(e) => log(format!("notify {event}: {prog}: {e}")),
         }
     }
 }
@@ -329,24 +335,45 @@ impl Run {
     }
 }
 
-pub fn sudo_command(verb: &str) -> Command {
+/// Runs cmd in its own process group, and kills the group if cmd still runs
+/// after timeout. Returns the exit status, or None if it was killed.
+fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
+    let mut child = cmd.process_group(0).spawn()?;
+    let pid = child.id() as i32;
+    let (exited, wait) = mpsc::channel();
+    let waiter = std::thread::spawn(move || {
+        let status = child.wait();
+        let _ = exited.send(());
+        status
+    });
+    let killed = wait.recv_timeout(timeout).is_err();
+    if killed {
+        kill(-pid, SIGKILL);
+    }
+    let status = waiter.join().unwrap()?;
+    Ok((!killed).then_some(status))
+}
+
+pub fn sudo_command(args: &[&str]) -> Command {
     let mut c = Command::new("sudo");
-    c.args(["-n", NAME, verb])
+    c.args(["-n", NAME])
+        .args(args)
         .stdin(Stdio::piped())
         .stderr(Stdio::piped());
     c
 }
 
 /// Runs a privileged verb through sudo. Returns its stderr.
-fn sudo(verb: &str, input: &[u8]) -> Result<String, String> {
-    let mut child = sudo_command(verb)
+fn sudo(args: &[&str], input: &[u8]) -> Result<String, String> {
+    let mut child = sudo_command(args)
         .spawn()
         .map_err(|e| format!("sudo: {e}"))?;
     let _ = child.stdin.take().unwrap().write_all(input); // a failure shows in the exit status
     let out = child.wait_with_output().map_err(|e| format!("sudo: {e}"))?;
     let text = String::from_utf8_lossy(&out.stderr).trim().to_string();
     if !out.status.success() {
-        return Err(format!("sudo -n {NAME} {verb}: {}: {text}", out.status));
+        let cmd = args.join(" ");
+        return Err(format!("sudo -n {NAME} {cmd}: {}: {text}", out.status));
     }
     Ok(text)
 }
@@ -363,7 +390,10 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
         .as_object()
         .ok_or("workloads: needs an object")?
     {
-        workloads.insert(name.clone(), command(w, &format!("workload {name}"))?);
+        workloads.insert(
+            name.clone(),
+            command(w, &format!("workload {name}"), &["cmd"])?,
+        );
     }
     let q = Queue {
         name: get("name").as_str().ok_or("name: needs a string")?.into(),
@@ -375,13 +405,7 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
             Value::Null => now_ns() as u64,
             s => s.as_u64().ok_or("seed: needs an unsigned integer")?,
         },
-        settle: match get("settle_s") {
-            Value::Null => SETTLE,
-            s => s
-                .as_f64()
-                .and_then(|s| Duration::try_from_secs_f64(s).ok())
-                .ok_or("settle_s: needs seconds >= 0")?,
-        },
+        settle: seconds(get("settle_s"), SETTLE, "settle_s")?,
         meters: match get("meters") {
             Value::Null => vec!["time".into(), "rapl".into()],
             v => serde_json::from_value(v.clone()).map_err(|e| format!("meters: {e}"))?,
@@ -389,8 +413,13 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
         out: get("out").as_str().ok_or("out: needs a string")?.into(),
         notify: match get("notify") {
             Value::Null => vec![],
-            n => command(n, "notify")?,
+            n => command(n, "notify", &["cmd", "timeout_s"])?,
         },
+        notify_timeout: seconds(
+            &get("notify")["timeout_s"],
+            NOTIFY_TIMEOUT,
+            "notify timeout_s",
+        )?,
         profiles,
         workloads,
     };
@@ -420,15 +449,26 @@ fn object<'a>(v: &'a Value, what: &str, keys: &[&str]) -> Result<&'a Map<String,
     }
 }
 
-/// The command of a {"cmd": [...]} object.
-fn command(v: &Value, what: &str) -> Result<Vec<String>, String> {
-    let cmd = object(v, what, &["cmd"])?.get("cmd").cloned();
+/// The command of a {"cmd": [...]} object with only the given keys.
+fn command(v: &Value, what: &str, keys: &[&str]) -> Result<Vec<String>, String> {
+    let cmd = object(v, what, keys)?.get("cmd").cloned();
     let cmd: Vec<String> =
         serde_json::from_value(cmd.unwrap_or_default()).map_err(|e| format!("{what} cmd: {e}"))?;
     if cmd.is_empty() {
         return Err(format!("{what} cmd: needs a command"));
     }
     Ok(cmd)
+}
+
+/// v in seconds, or default if v is missing.
+fn seconds(v: &Value, default: Duration, what: &str) -> Result<Duration, String> {
+    match v {
+        Value::Null => Ok(default),
+        s => s
+            .as_f64()
+            .and_then(|s| Duration::try_from_secs_f64(s).ok())
+            .ok_or(format!("{what}: needs seconds >= 0")),
+    }
 }
 
 pub struct SplitMix64(pub u64);
@@ -509,16 +549,16 @@ fn matches(state: &Value, target: &State) -> bool {
 /// and writes id into it. Returns the lock and, if it waited, for whom.
 fn lock(path: &Path, id: &str) -> Result<(File, Option<String>), String> {
     let err = |e: std::io::Error| format!("lock {}: {e}", path.display());
-    let f = open_lock(path).map_err(err)?;
+    let f = open_lock(path, true).map_err(err)?;
     let waited = match f.try_lock() {
         Ok(()) => None,
         Err(TryLockError::WouldBlock) => {
             let mut holder = String::new();
             let _ = (&f).read_to_string(&mut holder);
-            eprintln!(
-                "{NAME}: waiting for queue {holder:?}, which holds {}",
+            log(format!(
+                "waiting for queue {holder:?}, which holds {}",
                 path.display()
-            );
+            ));
             let t = Instant::now();
             f.lock().map_err(err)?;
             let secs = t.elapsed().as_secs_f64();
@@ -532,12 +572,24 @@ fn lock(path: &Path, id: &str) -> Result<(File, Option<String>), String> {
     Ok((f, waited))
 }
 
+/// The machine lock if no queue holds it, without waiting. Root calls this, so
+/// it never writes the file.
+pub fn try_lock(path: &Path) -> Result<Option<File>, String> {
+    let err = |e: std::io::Error| format!("lock {}: {e}", path.display());
+    let f = open_lock(path, false).map_err(err)?;
+    match f.try_lock() {
+        Ok(()) => Ok(Some(f)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(e)) => Err(err(e)),
+    }
+}
+
 /// Opens the lock file, creating it writable by all. An existing file is opened
 /// without O_CREAT, which protected_regular refuses for another user's file in
 /// a sticky directory such as /run/lock.
-fn open_lock(path: &Path) -> std::io::Result<File> {
+fn open_lock(path: &Path, write: bool) -> std::io::Result<File> {
     loop {
-        match OpenOptions::new().read(true).write(true).open(path) {
+        match OpenOptions::new().read(true).write(write).open(path) {
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             r => return r,
         }
@@ -580,23 +632,4 @@ fn exit_text(s: ExitStatus) -> String {
         Some(c) => format!("exit {c}"),
         None => format!("signal {}", s.signal().unwrap_or(0)),
     }
-}
-
-/// secs since the epoch as YYYYMMDD-HHMMSS in UTC (Hinnant's civil_from_days).
-pub fn utc(secs: u128) -> String {
-    let (days, s) = ((secs / 86_400) as u64, secs % 86_400);
-    let z = days + 719_468;
-    let (era, doe) = (z / 146_097, z % 146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = yoe + era * 400 + u64::from(m <= 2);
-    format!(
-        "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
-        s / 3600,
-        s / 60 % 60,
-        s % 60
-    )
 }

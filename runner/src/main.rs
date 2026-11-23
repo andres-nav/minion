@@ -5,6 +5,7 @@ mod run;
 mod settings;
 #[cfg(test)]
 mod tests;
+mod utc;
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -16,11 +17,12 @@ const NAME: &str = env!("CARGO_PKG_NAME");
 const USAGE: &str = concat!(
     "usage: ",
     env!("CARGO_PKG_NAME"),
-    " <verb> [--sysfs DIR] [--state-dir DIR] [--lock FILE] [--out FILE] [Q.json] [-- CMD...]
+    " <verb> [--sysfs DIR] [--state-dir DIR] [--lock FILE] [--out FILE] [--held] [Q.json] [-- CMD...]
 
   snapshot   print the current settings as JSON
   apply      apply a profile (JSON on stdin), saving the original settings first
-  restore    put the original settings back and close the journal
+  restore    put the original settings back and close the journal; does nothing while a queue
+             holds the lock, as that queue restores at its start (--held: the caller is it)
   status     show the open journal and what differs from the original settings
   run        run CMD, reading the meters right before and after it, into --out (default run.json)
   queue      run every run of the queue in Q.json under its profile, then restore
@@ -39,6 +41,8 @@ struct Opts {
     lock: PathBuf,
     out: PathBuf,
     args: Vec<String>,
+    /// The caller holds the machine lock.
+    held: bool,
     /// Set by a test override: queue then calls the privileged verbs in-process.
     test: bool,
 }
@@ -48,7 +52,7 @@ fn main() -> ExitCode {
     match run(&args) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
-            eprintln!("{NAME}: {e}");
+            utc::log(e);
             ExitCode::FAILURE
         }
     }
@@ -76,12 +80,7 @@ fn run(args: &[String]) -> Result<u8, String> {
                 serde_json::from_reader(io::stdin().lock()).map_err(|e| format!("profile: {e}"))?;
             engine::apply(&o.sysfs, &o.state_dir, &profile)
         }
-        "restore" => {
-            for c in engine::restore(&o.sysfs, &o.state_dir)? {
-                eprintln!("{NAME}: kept {c}: changed by someone else");
-            }
-            Ok(())
-        }
+        "restore" => restore(&o),
         "status" => print(engine::status(&o.sysfs, &o.state_dir)?),
         _ => Err(USAGE.into()),
     }
@@ -96,6 +95,7 @@ fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
         lock: format!("/run/lock/{NAME}.lock").into(),
         out: "run.json".into(),
         args: vec![],
+        held: false,
         test: false,
     };
     let mut it = args.iter();
@@ -105,6 +105,10 @@ fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
             "--state-dir" => &mut o.state_dir,
             "--lock" => &mut o.lock,
             "--out" => &mut o.out,
+            "--held" => {
+                o.held = true;
+                continue;
+            }
             a if !a.starts_with('-') => {
                 o.args.push(a.into());
                 continue;
@@ -118,6 +122,28 @@ fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
         o.test |= flag != "--out";
     }
     Ok(o)
+}
+
+/// Restores, unless a queue holds the machine lock: a late `always` hook must not
+/// undo the queue that started after a crash, which restores the leftover itself.
+fn restore(o: &Opts) -> Result<(), String> {
+    let _lock = if o.held {
+        None
+    } else {
+        let lock = queue::try_lock(&o.lock)?;
+        if lock.is_none() {
+            let held = o.lock.display();
+            utc::log(format!(
+                "a queue holds {held}, so it restores: nothing done"
+            ));
+            return Ok(());
+        }
+        lock
+    };
+    for c in engine::restore(&o.sysfs, &o.state_dir)? {
+        utc::log(format!("kept {c}: changed by someone else"));
+    }
+    Ok(())
 }
 
 fn print(v: Value) -> Result<(), String> {
