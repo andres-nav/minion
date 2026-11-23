@@ -114,7 +114,6 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
         events,
         id,
         started,
-        queue: Value::Null,
         ran: 0,
         failed: 0,
     };
@@ -136,11 +135,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     if let Err(e) = result {
         detail += &format!("; {e}");
     }
-    let ended = run::clocks();
     r.send("queue_done", "", status, &detail);
-    if let Ok(ended) = ended {
-        r.finish(&ended);
-    }
     Ok(code)
 }
 
@@ -153,8 +148,6 @@ struct Running<'a> {
     events: File,
     id: String,
     started: Vec<u64>,
-    /// queue.json once written.
-    queue: Value,
     ran: usize,
     failed: usize,
 }
@@ -199,26 +192,9 @@ impl Running<'_> {
             "minion": minion,
         });
         run::write_new(&self.dir.join("queue.json"), &queue)?;
-        self.queue = queue;
         let waited = waited.map_or(String::new(), |w| format!("; {w}"));
         self.send("queue_started", "", "", &format!("{runs} runs{waited}"));
         Ok(targets)
-    }
-
-    /// Adds the queue's end to queue.json: written to a new file, then renamed over it.
-    fn finish(&mut self, ended: &[u64]) {
-        if self.queue.is_null() {
-            return;
-        }
-        let time = run::edges(&[("start", &self.started), ("end", ended)]);
-        self.queue["time"] = time.into();
-        let (new, path) = (self.dir.join("queue.json.new"), self.dir.join("queue.json"));
-        let renamed = run::write_new(&new, &self.queue).and_then(|()| {
-            fs::rename(&new, &path).map_err(|e| format!("rename {}: {e}", new.display()))
-        });
-        if let Err(e) = renamed {
-            log(e);
-        }
     }
 
     /// Runs the plan in order, applying a run's profile only when the machine is

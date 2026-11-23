@@ -610,15 +610,14 @@ fn queue_runs_every_run_and_restores() {
     let (q, r) = (&queue["time"], &first["meters"]["time"]);
     let ns = |v: &Value, edge: &str| v[format!("{edge}_realtime_ns")].as_u64().unwrap();
     assert!(ns(q, "start") <= ns(r, "start") && ns(r, "start") <= ns(r, "end"));
-    assert!(ns(r, "end") <= ns(q, "end"));
+    assert!(q.get("end_ns").is_none()); // the end is the queue_done event: queue.json is written once
     assert!(utc::now_ns() as u64 - ns(q, "start") < 60_000_000_000); // wall-clock, not monotonic
-    for (v, edge) in [(q, "start"), (q, "end"), (r, "start"), (r, "end")] {
+    for (v, edge) in [(q, "start"), (r, "start"), (r, "end")] {
         assert_eq!(
             v[format!("{edge}_utc")],
             utc::iso(ns(v, edge) / 1_000_000_000)
         );
     }
-    assert!(!dir.join("queue.json.new").exists());
     assert_eq!(queue["given"]["reps"], 2);
     assert_eq!(queue["resolved"]["seed"], 7);
     assert_eq!(queue["resolved"]["meters"], json!(["time", "rapl"]));
