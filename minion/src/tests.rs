@@ -1173,6 +1173,23 @@ fn times_are_utc() {
 }
 
 #[test]
+fn a_lock_only_root_may_create_says_so() {
+    let f = Fake::new("lock-root");
+    let dir = f.root.join("run-lock");
+    fs::create_dir_all(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    let lock = dir.join("minion.lock");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    refused(crate::lock::take(&lock), "root must create it");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    put(&lock, "");
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o444)).unwrap(); // as if root's 0644
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
+    refused(crate::lock::take(&lock), "0666 root root");
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[test]
 fn restore_refuses_a_lock_that_is_not_a_regular_file() {
     let f = Fake::new("fifo-lock");
     let lock = f.root.join("lock");
