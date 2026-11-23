@@ -76,12 +76,15 @@ func cmdAgent(args []string) int {
 
 // agentNotify announces a finished job as the notify block in --config says (a
 // resolved block as JSON, in a file or - for stdin). The outcome comes from the
-// MINION_* env the run wrapper exported. Run hooks also see $MINION_SUBJECT,
-// $MINION_BODY and the block's env.
+// MINION_* env the run wrapper exported, unless --subject/--body give the
+// message: then it is sent as is, without the `on` gate (for a task's own
+// events). Run hooks also see $MINION_SUBJECT, $MINION_BODY and the block's env.
 func agentNotify(args []string) int {
 	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
 	path := fs.String("config", "", "notify block as JSON: a file, or - for stdin")
 	logPath := fs.String("log", "", "job log file, tailed into the message body")
+	subject := fs.String("subject", "", "the message's subject, sent without the on gate")
+	body := fs.String("body", "", "the message's body, sent without the on gate")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -102,20 +105,23 @@ func agentNotify(args []string) int {
 		Duration: atoiOr(os.Getenv("MINION_DURATION"), 0),
 		LogTail:  tailFile(*logPath, 30),
 	}
-	if !n.Fires(res.Exit) {
+	subj, text := res.Subject(), res.Body()
+	if *subject != "" || *body != "" {
+		subj, text = *subject, *body
+	} else if !n.Fires(res.Exit) {
 		return 0
 	}
 	code := 0
 	if e := n.Email; e != nil {
 		sink := notify.Email{Addr: e.SMTP, From: e.From, To: splitList(e.To), User: e.User, Pass: e.Pass}
-		if err := sink.Send(res.Subject(), res.Body()); err != nil {
+		if err := sink.Send(subj, text); err != nil {
 			fmt.Fprintf(os.Stderr, "[minion] notify: email failed: %v\n", err)
 			code = 1
 		}
 	}
 	for _, c := range n.Run {
 		cmd := exec.Command("sh", "-c", c)
-		cmd.Env = append(os.Environ(), "MINION_SUBJECT="+res.Subject(), "MINION_BODY="+res.Body())
+		cmd.Env = append(os.Environ(), "MINION_SUBJECT="+subj, "MINION_BODY="+text)
 		for _, k := range sortedKeys(n.Env) {
 			cmd.Env = append(cmd.Env, k+"="+n.Env[k])
 		}
