@@ -91,7 +91,7 @@ func TestCommandBuildersReferenceJobDir(t *testing.T) {
 	if jd != `"$HOME"/'.minion'/jobs/abc` {
 		t.Fatalf("JobDir = %q", jd)
 	}
-	for _, c := range []string{LaunchCommand("~/.minion", "abc"), AttachCommand(jd), KillCommand(jd)} {
+	for _, c := range []string{LaunchCommand("~/.minion", "abc"), AttachCommand("minion", jd), KillCommand(jd)} {
 		if !strings.Contains(c, jd) {
 			t.Errorf("command missing job dir %q: %s", jd, c)
 		}

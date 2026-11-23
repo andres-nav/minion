@@ -16,24 +16,29 @@ func cmdAttach(args []string) int {
 		return 2
 	}
 
-	client, alias, state, err := executorFor(*host)
+	cfg, r, err := resolveContext()
 	if err != nil {
 		return errf("%v", err)
 	}
+	rt, err := dialRemote(cfg, r, *host) // the agent follows the log
+	if err != nil {
+		return errf("%v", err)
+	}
+	defer rt.close()
 
 	if id == "" { // no id → most recent job
-		latest, err := client.Output(remote.LatestJobCommand(state))
+		latest, err := rt.exec.Output(remote.LatestJobCommand(rt.state))
 		if err != nil {
 			return errf("%v", err)
 		}
 		if latest == "" {
-			return errf("no jobs on %s", alias)
+			return errf("no jobs on %s", rt.alias)
 		}
 		id = latest
 		fmt.Fprintf(os.Stderr, "attaching latest: %s\n", id)
 	}
 
-	code, err := client.Run(remote.AttachCommand(remote.JobDir(state, id)), nil, os.Stdout, os.Stderr)
+	code, err := rt.exec.Run(remote.AttachCommand(notifyInvoke(rt), remote.JobDir(rt.state, id)), nil, os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("%v", err)
 	}
