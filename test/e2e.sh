@@ -40,7 +40,7 @@ put "$rapl/max_energy_range_uj" 262143328850
 put "$rapl/constraint_0_max_power_uw" 150000000
 cp -r "$sys/devices" "$T/sys.orig"
 
-# The project: a queue task on the fake machine, restored by the always hook.
+# The project: a queue task on the fake machine, cleaned up by the always hooks.
 R="--sysfs $sys --state-dir $T/runner --lock $T/lock"
 cat > "$MINION_CONFIG" << EOF
 {
@@ -138,7 +138,7 @@ notified() {
 machine_clean() {
   diff -r "$T/sys.orig" "$sys/devices" || fail "settings not restored"
   [ ! -e "$T/runner/journal.jsonl" ] || fail "journal still open"
-  flock -n "$T/lock" true || fail "machine lock still held"
+  flock -n "$T/lock" true || fail "queue lock still held"
   [ ! -e "$T/sudo.log" ] || fail "called sudo: $(cat "$T/sudo.log")"
 }
 
@@ -314,7 +314,7 @@ check_snapshot() {
 failed=0
 n=0
 for c in "remote:remote path through test/ssh" "localhost:--host localhost" \
-  "detach:detach, ps, attach, kill, crash" "two:queues sharing the machine lock" \
+  "detach:detach, ps, attach, kill, crash" "two:queues sharing the queue lock" \
   "utc:every time in UTC (TZ=$TZ)" "exit:exit codes and broken queue files" \
   "snapshot:energy-runner snapshot and run on the real /sys"; do
   n=$((n + 1))
