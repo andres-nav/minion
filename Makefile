@@ -14,7 +14,7 @@ build: ## build gru (gru/bin/) and minion (minion/target/release/)
 cross: ## cross-compile the gru agents (gru/bin/gru-linux-*)
 	@$(MAKE) -C gru cross
 
-install: ## install gru (see gru/Makefile)
+install: ## install gru, its agents and the skill (see gru/Makefile)
 	@$(MAKE) -C gru install
 
 test: ## test and lint both
