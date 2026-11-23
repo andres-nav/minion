@@ -38,9 +38,9 @@ periodic timer ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
 
 A queue's workload runs in its own process group with `PR_SET_PDEATHSIG(SIGKILL)`, so it dies
 with the runner; a stop signal only makes the runner send `SIGTERM` to that group. The window
-does not wait for children that outlive the main process: they keep running into later runs until
-`reap` kills them (the `always` hook after the queue, or the next queue's start). The [tighter
-window](#tighter-window) closes that gap.
+ends when the main process exits; what happens to what it left behind is in
+[minion/README.md](../minion/README.md#queue). The [tighter window](#tighter-window) waits for
+them instead.
 
 ### Settings and privileged verbs
 
@@ -116,8 +116,8 @@ in [RESEARCH.md](RESEARCH.md#2-linux-mechanisms).
 Phase 5.
 - The runner becomes a child subreaper, so the window ends when no workload process is left;
   from [isolation](#isolation) on, when the run's cgroup empties, and `cgroup.kill` ends the rest.
-- A per-workload `timeout_s` and a grace period: leftovers, overruns and a workload that ignores
-  `SIGTERM` are killed, and the run is flagged.
+- A per-workload `timeout_s` and a grace period: overruns and a workload that ignores `SIGTERM`
+  are killed, and the run is flagged.
 - Phase marks: the workload writes a line to a FIFO at `$MINION_MARK` and the runner reads the
   meters. The runner then waits in one `poll()` on a `signalfd` and the FIFO (opened `O_RDWR`, so
   a closed writer can't make it spin).
