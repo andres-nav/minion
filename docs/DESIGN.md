@@ -16,47 +16,47 @@ Sources and related tools: [RESEARCH.md](RESEARCH.md).
 gru is a user-level CLI with no dependencies: a host needs only a POSIX shell, and gru uploads its
 own static agent. It works for any repo and any host, measured or not.
 
-minion needs what gru must not: root for machine settings (through one sudoers rule), NVML (a C
-library), and control over every wakeup on the host. Rust has no runtime threads or garbage
-collector, while an idle Go program still wakes every minute or two (`runtime/proc.go`). Kept
-apart, gru stays small, and minion is installed only where measurements run (it can move to its
-own repository later).
+minion needs what gru must not: root for machine settings (through one sudoers rule), later NVML
+(a C library), and control over every wakeup on the host. Rust has no runtime threads or garbage
+collector, while an idle Go program still wakes every minute or two
+([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)). Kept apart, gru stays small, and minion is
+installed only where measurements run (it can move to its own repository later).
 
 ## How they connect
 
 minion knows gru only through environment variables; without gru it runs the same under `setsid`
-or tmux, minus the hooks.
+or tmux, minus the hooks. Setup: [minion/README.md](../minion/README.md#with-gru).
 
 - **The job runs the queue.** `gru run energy --arg q.json --detach` starts a detached gru job
   whose task is `minion queue $GRU_ARGS`. The queue runs in the job's foreground, so `gru ps`,
-  `attach`, `kill` and the log apply to it; `gru kill` stops the queue, which restores.
+  `attach`, `kill` and the log apply to it; `gru kill` sends `SIGTERM`, and the queue restores
+  before it exits.
 - **Notify.** minion's `notify.cmd` calls gru's agent, which reads the 0600 notify file in the job
   dir, so secrets stay out of the queue and the environment: `"$GRU_AGENT" _agent notify --config
   "$GRU_NOTIFY" --subject "$MINION_EVENT $MINION_QUEUE" --body "$MINION_DETAIL"`.
-- **Results and fetch.** minion writes each queue under `<remote_dir>/results/` and records the
-  job's `GRU_*` variables (job id, task, host, commit, dirty flag) in `queue.json`. A `fetch` glob
-  brings it back, with the job's `run.json` and log in `_gru/`.
+- **Results and fetch.** minion writes each queue under its `out` dir, relative to the job's
+  directory (`remote_dir`), and records the job's `GRU_*` variables (job id, task, host, commit,
+  dirty flag) in `queue.json`. A `fetch` glob over `out` brings it back; `gru fetch <id>` also
+  brings the job's `run.json` and log into `_gru/`.
 - **Reap and restore hooks.** The template's `always` hooks, `minion reap` and `sudo -n minion
-  restore`, clean up after a runner that died without restoring. They act only while no queue
-  holds the queue lock. Setup: [minion/README.md](../minion/README.md#with-gru).
+  restore`, clean up after a runner that died without restoring. `restore` acts only while no
+  queue holds the queue lock, and `reap` spares the workloads of the queue that holds it.
 
 ## Principles
 
 - **Nothing runs in a measured window.** Between the meter reads at a run's start and end, minion
-  doesn't log, write, send or fork; notifications, helpers and sudo calls run between runs
-  ([the rule](MINION.md#the-rule-stay-out-of-the-measured-window)).
-- **Exact restore.** Every setting gets its original value back, also after `kill -9` or a crash,
-  from an on-disk journal ([restore](MINION.md#restore-crashes-and-reboots)); reboots once the
-  boot unit exists.
+  only starts the workload and waits; notifications and sudo calls run between runs
+  ([the rule](MINION.md#stay-out-of-the-measured-window)).
+- **Exact restore.** Every setting gets its original value back from an on-disk journal, also
+  after `kill -9` or a crash, except values someone else changed, which are kept and reported
+  ([journal](MINION.md#journal)). Reboots are covered once the boot unit exists.
 - **Any experiment.** A workload is any command and meters are plugins.
-- **Several machines.** gru drives any number of hosts, and one experiment can span hosts, a
-  leader driving followers over SSH ([later](MINION.md#several-machines-later-phase)).
-- **GPUs and devices.** Devices are setting objects like CPUs, saved, applied and restored the
-  same way ([devices](MINION.md#devices)).
+- **Several machines and devices.** gru drives any number of hosts; experiments across hosts and
+  GPU settings are [planned](MINION.md#planned).
 - **All times UTC.** Experiments span machines and time zones, so local time is never used.
-  Machine fields are epoch seconds or nanoseconds, and every wall-clock epoch has an ISO 8601
-  `*_utc` twin (`2026-11-23T14:25:01Z`); monotonic times have none. Ids, dirs and file names use
-  `20261123T142501Z`. Displays and log lines show UTC with the `Z`.
+  Machine fields are epoch seconds or nanoseconds, and minion gives every wall-clock epoch an ISO
+  8601 `*_utc` twin (`2026-11-23T14:25:01Z`); monotonic times have none. Ids, dirs and file names
+  use `20261123T142501Z`. Displays and minion's log lines show UTC with the `Z`.
 
 ## Repository layout
 
@@ -72,13 +72,12 @@ gives Go and Rust.
 
 ## Status and plan
 
-- **gru**: v1 works, with the changes minion needed merged: a state dir per host, unique UTC job
-  ids, an agent per build, quiet attach, provenance and notify for tasks
-  ([list](MINION.md#gru-changes)).
+- **gru**: v1 works, with the changes minion needed merged (#3, #6, #7, #8, #10): a state dir
+  per host, unique UTC job ids, an agent file per build, quiet attach, provenance, notify for tasks.
 - **minion**: the state engine (governor, turbo, idle states), `run` with the `time` and `rapl`
   meters, and `queue` with the queue lock, reap and notifications are merged. `make e2e` runs them
   through gru on a fake sysfs in CI; real RAPL and cpufreq writes, sudo, real ssh and several
   hosts still need a real machine.
-- **Next** ([plan](MINION.md#plan)): meters, noise record and isolation; the opt-in machine lock;
-  several machines; GPU and device state; a boot unit; the RQ3 analysis. Open questions are in
-  [MINION.md](MINION.md#open-questions).
+- **Next** ([plan](MINION.md#plan)): measurement quality (meters, noise record, isolation, more
+  settings); the opt-in machine lock; several machines; GPU and device state; a boot unit; the
+  RQ3 analysis. Open questions: [MINION.md](MINION.md#open-questions).
