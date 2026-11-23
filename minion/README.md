@@ -107,6 +107,14 @@ letters, digits, `.`, `_` and `-`.
   group is killed (`leftovers` in run.json, and a warning). A run whose settings changed during it
   or differ from its profile is flagged `drift`, and the next run applies its profile again. A
   failing workload is recorded and the queue goes on.
+- **Thermal wait.** With `"thermal": {"band_c": 2, "timeout_s": 600}` (those are the defaults),
+  the queue reads every hwmon temperature (`class/hwmon/hwmon*/temp*_input`) before its first
+  apply, as the baseline. After each settle it waits, checking once a second, until every
+  temperature is at most `band_c` above its baseline, up to `timeout_s`; then the run starts
+  anyway and `thermal_timeout` is sent. run.json gets `thermal`: the baseline, the temperatures
+  at the start, the seconds waited and the sensors still too hot. A stop signal ends the wait.
+  One baseline serves every profile, so a profile that idles hotter than `band_c` above the start
+  waits for the timeout before each of its runs.
 - **End.** At the end, or on SIGTERM, SIGINT or SIGHUP (which also stop the running workload or the
   settle), the queue restores the settings, then releases the lock. It exits 0 when every run
   succeeded and the restore worked, 128 + the signal when stopped, and 1 otherwise.
@@ -161,6 +169,7 @@ runs. A failing or killed notify command is logged and never changes the queue's
 | `queue_started` | | the number of runs, and the wait for the lock |
 | `run_done`, `run_failed` | `exit N`, `signal N` or `error` | seconds, or the error |
 | `drift` | | the settings changed or differ from profile P |
+| `thermal_timeout` | | the sensors still above the start + `band_c`, after how long |
 | `restore_ok`, `restore_failed` | `ok`, `failed` | leftover journal or end of queue; what was kept, or the error |
 | `queue_done` | `ok`, `failed`, `stopped` | runs done and failed, and why it stopped |
 

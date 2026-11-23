@@ -971,6 +971,82 @@ fn a_failing_notify_does_not_fail_the_queue() {
 }
 
 #[test]
+fn a_thermal_wait_holds_each_run_until_the_machine_is_back_near_its_start() {
+    let _serial = serial();
+    let f = Fake::new("thermal");
+    let temp = f.sys.join("class/hwmon/hwmon0/temp1_input");
+    put(&temp, "40000");
+    put(&f.sys.join("class/hwmon/hwmon0/name"), "coretemp");
+    let heat = format!("echo 50000 > {}", temp.display());
+    let q = |timeout: f64| {
+        json!({"name": "hot", "profiles": {"p": {}}, "reps": 2, "workloads": {"w": {"cmd": ["sh", "-c", heat]}},
+               "thermal": {"band_c": 2, "timeout_s": timeout}})
+    };
+    let runs = |dir: &Path| -> Vec<Value> {
+        let mut runs: Vec<_> = fs::read_dir(dir.join("runs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        runs.sort();
+        runs.iter()
+            .map(|r| read_json(&r.join("run.json"))["thermal"].clone())
+            .collect()
+    };
+
+    // The first run starts at once; the second times out hot, flagged.
+    let t = Instant::now();
+    let (code, dir) = f.queue(q(0.3));
+    assert_eq!(code, 0);
+    let [first, second] = &runs(&dir)[..] else {
+        panic!()
+    };
+    assert_eq!(
+        (&first["hot"], &first["baseline"]["hwmon0/temp1"]),
+        (&json!([]), &json!(40.0))
+    );
+    assert_eq!(
+        (&second["hot"], &second["now"]["hwmon0/temp1"]),
+        (&json!(["hwmon0/temp1"]), &json!(50.0))
+    );
+    let waited = second["waited_s"].as_f64().unwrap();
+    assert!(
+        (0.3..0.9).contains(&waited),
+        "waited {waited} s, not about the timeout"
+    );
+    assert!(t.elapsed() < Duration::from_secs(3));
+    assert!(kinds(&dir).contains(&"thermal_timeout".to_string()));
+
+    // The second waits until the machine cools down.
+    fs::remove_dir_all(f.root.join("results")).unwrap();
+    put(&temp, "40000");
+    let (code, dir) = std::thread::scope(|s| {
+        s.spawn(|| {
+            wait("the first run", || {
+                fs::read_dir(f.root.join("results"))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|q| {
+                        q.path()
+                            .join("runs")
+                            .read_dir()
+                            .is_ok_and(|r| r.count() > 0)
+                    })
+            });
+            std::thread::sleep(Duration::from_millis(1500));
+            put(&temp, "41000");
+        });
+        f.queue(q(30.0))
+    });
+    assert_eq!(code, 0);
+    let w = runs(&dir)[1]["waited_s"].as_f64().unwrap();
+    assert!((1.0..10.0).contains(&w), "waited {w} s");
+    assert_eq!(runs(&dir)[1]["hot"], json!([]));
+    assert!(!kinds(&dir).contains(&"thermal_timeout".to_string()));
+}
+
+#[test]
 fn bad_queues_are_refused_before_anything_runs() {
     let f = Fake::new("queue-refused");
     let ok = json!({
@@ -1032,6 +1108,18 @@ fn bad_queues_are_refused_before_anything_runs() {
         (
             with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
             "timeout_s: needs seconds",
+        ),
+        (
+            with("thermal", json!({"band": 2})),
+            r#"thermal: unknown key "band""#,
+        ),
+        (
+            with("thermal", json!({"band_c": -1})),
+            "band_c: needs degrees >= 0",
+        ),
+        (
+            with("thermal", json!({"timeout_s": "x"})),
+            "thermal timeout_s: needs seconds",
         ),
     ] {
         fs::write(&file, q.to_string()).unwrap();
