@@ -222,6 +222,7 @@ pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, Strin
             _ => return Err(format!("unknown meter {n:?}")),
         }
     }
+    meters.push(Box::new(crate::noise::Noise::open(sys)));
     meters.sort_by_key(|m| m.slow());
     Ok(meters)
 }

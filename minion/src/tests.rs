@@ -571,6 +571,46 @@ fn a_later_meter_is_read_around_the_earlier_ones() {
 }
 
 #[test]
+fn the_noise_record_reads_proc_and_other_cgroups_around_a_run() {
+    let table = "      CPU0   CPU1\n  0:   14   0   IO-APIC   2-edge   timer\nNMI:  1  2  Non-maskable\nERR:  3\n";
+    assert_eq!(
+        Value::from(crate::noise::per_cpu(table)),
+        json!({"0": [14, 0], "NMI": [1, 2], "ERR": [3]})
+    );
+
+    let f = Fake::new("noise");
+    let a = f.sys.join("fs/cgroup/a.slice/cpu.stat");
+    put(&a, "usage_usec 100\nuser_usec 60\n");
+    put(&f.sys.join("fs/cgroup/b.slice/cpu.stat"), "usage_usec 7\n");
+    let me = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let ours = me
+        .lines()
+        .find_map(|l| l.strip_prefix("0::/")?.split('/').next());
+    let ours = ours.filter(|o| !o.is_empty()).unwrap_or("our.slice"); // left out of the record
+    put(
+        &f.sys.join("fs/cgroup").join(ours).join("cpu.stat"),
+        "usage_usec 1\n",
+    );
+    let (_, run) = f.run(&format!("printf 'usage_usec 250\\n' > {}", a.display()));
+    let n = &run["meters"]["noise"];
+    assert_eq!(n["cgroups_usec"], json!({"a.slice": 150, "b.slice": 0}));
+    assert!(
+        n["ctxt"].as_u64().is_some() && n["interrupts"].is_object() && n["softirqs"].is_object()
+    );
+    assert_eq!(n["load"]["start"].as_array().unwrap().len(), 3);
+    assert!(n["users"]["end"].is_array() || n["users"]["end"].is_null());
+    let at = |irq0: u64| json!({"interrupts": {"0": [irq0, 2], "NMI": [5, 5]}, "ctxt": 10});
+    let (r, _) = crate::run::Meter::report(&crate::noise::Noise::open(&f.sys), &at(1), &at(3), 1.0);
+    assert_eq!(r["interrupts"], json!({"0": [2, 0]})); // only rows that changed
+    let names: Vec<_> = crate::run::meters(&f.sys, &["rapl".into()])
+        .unwrap()
+        .iter()
+        .map(|m| m.name())
+        .collect();
+    assert_eq!(names, ["time", "rapl", "noise"]); // outermost
+}
+
+#[test]
 fn run_leaves_out_joules_that_may_have_wrapped_twice() {
     let f = Fake::new("run-wrap");
     f.zone(
