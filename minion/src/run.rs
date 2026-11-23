@@ -201,7 +201,7 @@ pub static WORKLOAD: AtomicI32 = AtomicI32::new(0);
 /// The signal that stops the queue, or 0.
 pub static STOP: AtomicI32 = AtomicI32::new(0);
 
-/// The named meters, opened once. `time` is always read, first: it gives the duration.
+/// The named meters, opened once, `time` first.
 pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, String> {
     let mut meters: Vec<Box<dyn Meter>> = vec![Box::new(Clock)];
     for n in names {
@@ -214,8 +214,7 @@ pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, Strin
     Ok(meters)
 }
 
-/// Runs cmd, reading every meter right before it starts and right after it
-/// exits, and writes run.json to out. Returns the command's exit code.
+/// Runs cmd as measure does and writes run.json to out. Returns its exit code.
 pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, String> {
     if euid == 0 {
         return Err("run is refused as root: it runs your command".into());

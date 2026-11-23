@@ -11,6 +11,7 @@ pub const SIGINT: i32 = 2;
 pub const SIGKILL: i32 = 9;
 pub const SIGTERM: i32 = 15;
 pub const SIG_IGN: usize = 1;
+pub const EBUSY: i32 = 16;
 pub const PR_SET_PDEATHSIG: i32 = 1;
 pub const CLOCK_REALTIME: i32 = 0;
 pub const CLOCK_MONOTONIC: i32 = 1;

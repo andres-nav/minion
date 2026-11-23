@@ -3,14 +3,13 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::ffi::EBUSY;
+
 /// Object ("policy0", "cpu3/state2") -> value as the kernel shows it.
 pub type Values = BTreeMap<String, String>;
-/// Setting id -> its values.
 pub type State = BTreeMap<String, Values>;
 /// Object -> the sysfs file that holds its value.
 pub type Files = BTreeMap<String, PathBuf>;
-
-const EBUSY: i32 = 16;
 
 /// A group of sysfs files, one per object. Objects are found under the sysfs
 /// root, so a caller's object name is only a key and never becomes a path.
@@ -134,10 +133,6 @@ fn numbered(dir: &Path, prefix: &str) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-fn find(id: &str) -> Option<&'static dyn Setting> {
-    SETTINGS.into_iter().find(|s| s.id() == id)
-}
-
 pub fn snapshot(sys: &Path) -> Result<State, String> {
     SETTINGS
         .iter()
@@ -148,7 +143,9 @@ pub fn snapshot(sys: &Path) -> Result<State, String> {
 /// Refuses unknown settings, unknown objects and values outside the allowlist.
 pub fn validate(sys: &Path, profile: &State) -> Result<(), String> {
     for (id, want) in profile {
-        find(id)
+        SETTINGS
+            .into_iter()
+            .find(|s| s.id() == id)
             .ok_or(format!("unknown setting {id:?}"))?
             .validate(sys, want)?;
     }

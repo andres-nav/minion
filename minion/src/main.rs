@@ -158,7 +158,7 @@ fn privileged(o: &Opts, verb: &str, held: bool, input: &[u8]) -> Result<String, 
             serde_json::from_value(profile.clone()).map_err(|e| format!("profile: {e}"))?;
         return engine::apply(&mut j, &o.sysfs, &profile).map(|()| String::new());
     }
-    if !j.exists() {
+    if j.lines.is_empty() {
         return Ok(String::new());
     }
     let kept = engine::restore(j, &o.sysfs)?;
