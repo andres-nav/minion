@@ -81,3 +81,40 @@ func flagSet() *flag.FlagSet {
 	hostFlag(fs)
 	return fs
 }
+
+// The latest job is this project's newest by start time, whatever the dirs' mtimes.
+func TestJobsNewestFirst(t *testing.T) {
+	state := t.TempDir()
+	host, _ := os.Hostname()
+	for id, repo := range map[string]string{"a-20261123T100000Z": "proj", "b-20261123T110000Z": "other", "c-20261123T090000Z": "proj"} {
+		d := filepath.Join(state, "jobs", id)
+		os.MkdirAll(d, 0o700)
+		os.WriteFile(filepath.Join(d, "hostname"), []byte(host+"\n"), 0o600)
+		os.WriteFile(filepath.Join(d, "repo"), []byte(repo), 0o600)
+		os.WriteFile(filepath.Join(d, "task"), []byte("t"), 0o600)
+		os.WriteFile(filepath.Join(d, "status"), []byte("0\n"), 0o600)
+	}
+	tg := &target{Client: ssh.Local(), state: state, r: &config.Resolved{Root: "/x/proj"}}
+	ids := func(all bool) (out []string) {
+		js, err := jobs(tg, all)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, j := range js {
+			out = append(out, j.id+" "+j.status)
+		}
+		return out
+	}
+	if got := strings.Join(ids(false), ","); got != "a-20261123T100000Z exit 0,c-20261123T090000Z exit 0" {
+		t.Errorf("jobs = %s", got)
+	}
+	if got := len(ids(true)); got != 3 {
+		t.Errorf("all jobs = %d", got)
+	}
+	if id, err := jobID(tg, ""); id != "a-20261123T100000Z" || err != nil {
+		t.Errorf("latest = %q %v", id, err)
+	}
+	if _, err := jobID(tg, "../x"); err == nil {
+		t.Error("a bad id was accepted")
+	}
+}
