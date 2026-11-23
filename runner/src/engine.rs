@@ -6,8 +6,7 @@ use crate::journal::{self, Journal};
 use crate::settings::{self, SETTINGS, State, Values};
 
 /// Applies a profile. The first apply of a journal saves the full state first.
-pub fn apply(sys: &Path, dir: &Path, profile: &State) -> Result<(), String> {
-    let mut j = Journal::open(dir)?;
+pub fn apply(j: &mut Journal, sys: &Path, profile: &State) -> Result<(), String> {
     settings::validate(sys, profile)?;
     if last(&j.lines, "saved").is_none() {
         if j.lines.is_empty() {
@@ -37,8 +36,7 @@ pub fn apply(sys: &Path, dir: &Path, profile: &State) -> Result<(), String> {
 /// Puts back every saved value and closes the journal. An object that differs
 /// from both its saved and its last applied value was changed by someone else:
 /// it is kept and returned as a conflict.
-pub fn restore(sys: &Path, dir: &Path) -> Result<Vec<Value>, String> {
-    let mut j = Journal::open(dir)?;
+pub fn restore(mut j: Journal, sys: &Path) -> Result<Vec<Value>, String> {
     if !j.exists() {
         return Ok(vec![]);
     }
