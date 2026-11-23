@@ -1,5 +1,6 @@
 mod engine;
 mod journal;
+mod run;
 mod settings;
 #[cfg(test)]
 mod tests;
@@ -14,12 +15,13 @@ const NAME: &str = env!("CARGO_PKG_NAME");
 const USAGE: &str = concat!(
     "usage: ",
     env!("CARGO_PKG_NAME"),
-    " <verb> [--sysfs DIR] [--state-dir DIR]
+    " <verb> [--sysfs DIR] [--state-dir DIR] [--out FILE] [-- CMD...]
 
   snapshot   print the current settings as JSON
   apply      apply a profile (JSON on stdin), saving the original settings first
   restore    put the original settings back and close the journal
   status     show the open journal and what differs from the original settings
+  run        run CMD, reading the meters right before and after it, into --out (default run.json)
 
 --sysfs and --state-dir are for tests and are refused as root."
 );
@@ -31,12 +33,13 @@ unsafe extern "C" {
 struct Opts {
     sysfs: PathBuf,
     state_dir: PathBuf,
+    out: PathBuf,
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match run(&args) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
             eprintln!("{NAME}: {e}");
             ExitCode::FAILURE
@@ -44,11 +47,18 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(args: &[String]) -> Result<(), String> {
+fn run(args: &[String]) -> Result<u8, String> {
     let Some((verb, rest)) = args.split_first() else {
         return Err(USAGE.into());
     };
-    let o = parse_opts(rest, geteuid())?;
+    let (opts, cmd) = match rest.iter().position(|a| a == "--") {
+        Some(i) => (&rest[..i], &rest[i + 1..]),
+        None => (rest, &[][..]),
+    };
+    let o = parse_opts(opts, geteuid())?;
+    if verb == "run" {
+        return run::run(&o.sysfs, &o.out, cmd, geteuid());
+    }
     match verb.as_str() {
         "snapshot" => print(json!(settings::snapshot(&o.sysfs)?)),
         "apply" => {
@@ -65,6 +75,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "status" => print(engine::status(&o.sysfs, &o.state_dir)?),
         _ => Err(USAGE.into()),
     }
+    .map(|()| 0)
 }
 
 /// Root must not let a caller point its reads and writes at other files.
@@ -72,12 +83,14 @@ fn parse_opts(args: &[String], euid: u32) -> Result<Opts, String> {
     let mut o = Opts {
         sysfs: "/sys".into(),
         state_dir: ["/var/lib", NAME].iter().collect(),
+        out: "run.json".into(),
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
         let field = match flag.as_str() {
             "--sysfs" => &mut o.sysfs,
             "--state-dir" => &mut o.state_dir,
+            "--out" => &mut o.out,
             _ => return Err(format!("unknown option {flag:?}\n\n{USAGE}")),
         };
         if euid == 0 {

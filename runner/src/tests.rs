@@ -243,3 +243,130 @@ fn snapshot_of_the_real_sysfs() {
         ["cpu.governor", "cpu.idle.disable", "cpu.turbo"]
     );
 }
+
+impl Fake {
+    /// A powercap zone with a counter at uj and, if given, a power limit.
+    fn zone(&self, id: &str, name: &str, uj: u64, range_uj: u64, limit_uw: Option<u64>) -> PathBuf {
+        let d = self.sys.join("class/powercap").join(id);
+        put(&d.join("name"), name);
+        put(&d.join("energy_uj"), &uj.to_string());
+        put(&d.join("max_energy_range_uj"), &range_uj.to_string());
+        if let Some(w) = limit_uw {
+            put(&d.join("constraint_0_power_limit_uw"), &w.to_string());
+            put(&d.join("constraint_0_max_power_uw"), "0");
+        }
+        d.join("energy_uj")
+    }
+
+    /// Runs sh -c script under the runner and returns its exit code and run.json.
+    fn run(&self, script: &str) -> (u8, serde_json::Value) {
+        let out = self.root.join("run.json");
+        let _ = fs::remove_file(&out);
+        let cmd = ["sh", "-c", script].map(String::from);
+        let code = crate::run::run(&self.sys, &out, &cmd, 1000).unwrap();
+        (
+            code,
+            serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap(),
+        )
+    }
+}
+
+const RANGE: u64 = 262_143_999_999;
+
+#[test]
+fn run_reports_energy_per_zone() {
+    let f = Fake::new("run");
+    fs::create_dir_all(f.sys.join("class/powercap/intel-rapl")).unwrap(); // a control type, not a zone
+    let p0 = f.zone(
+        "intel-rapl:0",
+        "package-0",
+        1_000_000,
+        RANGE,
+        Some(200_000_000),
+    );
+    let p1 = f.zone(
+        "intel-rapl:1",
+        "package-1",
+        RANGE - 1_000_000,
+        RANGE,
+        Some(200_000_000),
+    );
+    f.zone("intel-rapl:0:0", "dram", 7, RANGE, None);
+    let script = format!(
+        "echo 5000000 > {}; echo 2000000 > {}; exit 3",
+        p0.display(),
+        p1.display()
+    );
+
+    let (code, run) = f.run(&script);
+    assert_eq!(
+        (code, &run["exit"], &run["drift"]),
+        (3, &json!(3), &json!(false))
+    );
+    let secs = run["meters"]["time"]["seconds"].as_f64().unwrap();
+    assert!(secs > 0.0);
+    let zones = &run["meters"]["rapl"]["zones"];
+    assert_eq!(zones.as_object().unwrap().len(), 3);
+    assert_eq!(zones["intel-rapl:0"]["joules"], 4.0);
+    let watts = zones["intel-rapl:0"]["watts"].as_f64().unwrap();
+    assert!((watts * secs / 4.0 - 1.0).abs() < 1e-12); // JSON floats parse within an ulp
+    assert_eq!(zones["intel-rapl:1"]["joules"], 3.0); // wrapped once
+    assert_eq!(zones["intel-rapl:0:0"]["joules"], json!(null)); // no limit: can't rule out two wraps
+    assert_eq!(run["state"]["before"], run["state"]["after"]);
+}
+
+#[test]
+fn run_leaves_out_joules_that_may_have_wrapped_twice() {
+    let f = Fake::new("run-wrap");
+    f.zone(
+        "intel-rapl:0",
+        "package-0",
+        0,
+        1_000_000,
+        Some(1_000_000_000),
+    ); // wraps in 1 ms
+    let (_, run) = f.run("sleep 0.01");
+    let z = &run["meters"]["rapl"]["zones"]["intel-rapl:0"];
+    assert_eq!(
+        (&z["joules"], &z["wrap_seconds"]),
+        (&json!(null), &json!(0.001))
+    );
+}
+
+#[test]
+fn run_flags_drift() {
+    let f = Fake::new("run-drift");
+    let gov = f.file("cpufreq/policy0/scaling_governor");
+    let (code, run) = f.run(&format!("echo performance > {}", gov.display()));
+    assert_eq!((code, &run["drift"]), (0, &json!(true)));
+    assert_eq!(
+        run["state"]["after"]["cpu.governor"]["policy0"],
+        "performance"
+    );
+}
+
+#[test]
+fn run_lists_unreadable_zones() {
+    let f = Fake::new("run-unreadable");
+    let uj = f.zone("intel-rapl:0", "package-0", 0, RANGE, Some(1));
+    fs::set_permissions(&uj, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let (_, run) = f.run("true");
+    assert_eq!(
+        run["meters"]["rapl"],
+        json!({"zones": {}, "unreadable": ["intel-rapl:0"]})
+    );
+}
+
+#[test]
+fn run_refusals() {
+    let f = Fake::new("run-refused");
+    let out = f.root.join("run.json");
+    let marker = f.root.join("ran");
+    let cmd = ["touch".into(), marker.display().to_string()];
+    assert!(crate::run::run(&f.sys, &out, &cmd, 0).is_err()); // root
+    assert!(crate::run::run(&f.sys, &out, &[], 1000).is_err()); // no command
+    fs::write(&out, "old").unwrap();
+    assert!(crate::run::run(&f.sys, &out, &cmd, 1000).is_err()); // never overwrite a result
+    assert!(!marker.exists());
+    assert_eq!(fs::read_to_string(&out).unwrap(), "old");
+}
