@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 
 use serde_json::{Map, Value, json};
 
-use crate::ffi::{CLOCK_MONOTONIC, CLOCK_REALTIME, Timespec, clock_gettime};
+use crate::ffi::{CLOCK_MONOTONIC, CLOCK_REALTIME, SIGKILL, Timespec, clock_gettime, kill};
 use crate::{settings, utc};
 
 /// Something read at the edges of a run, never in between.
@@ -229,7 +229,8 @@ pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, Stri
 }
 
 /// Runs command, reading the meters right before it starts and right after it
-/// exits, and logs the warnings. Returns the run record and the exit status.
+/// exits, then kills what it left in its process group, and logs the warnings.
+/// Returns the run record and the exit status.
 pub fn measure(
     sys: &Path,
     meters: &[Box<dyn Meter>],
@@ -242,13 +243,17 @@ pub fn measure(
     let before = settings::snapshot(sys)?;
 
     let start = read_all(meters)?;
+    let mut pid = 0;
     let status = command.spawn().and_then(|mut child| {
-        WORKLOAD.store(child.id() as i32, SeqCst);
+        pid = child.id() as i32;
+        WORKLOAD.store(pid, SeqCst);
         let status = child.wait();
         WORKLOAD.store(0, SeqCst);
         status
     });
-    let end = read_all(meters)?;
+    let end = read_all(meters);
+    let leftovers = pid > 0 && kill(-pid, SIGKILL) == 0;
+    let end = end?;
 
     let status = status.map_err(|e| format!("run {}: {e}", cmd[0]))?;
     let after = settings::snapshot(sys)?;
@@ -260,6 +265,9 @@ pub fn measure(
         report.insert(m.name().into(), v);
         warnings.extend(w);
     }
+    if leftovers {
+        warnings.push("the workload left processes running; killed them".into());
+    }
     let drift = before != after;
     if drift {
         warnings.push("the settings changed during the run (drift)".into());
@@ -270,6 +278,7 @@ pub fn measure(
     let run = json!({
         "cmd": cmd, "exit": status.code(), "signal": status.signal(),
         "meters": report, "state": {"before": before, "after": after}, "drift": drift,
+        "leftovers": leftovers,
     });
     Ok((run, status))
 }
