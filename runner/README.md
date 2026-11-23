@@ -1,7 +1,8 @@
 # energy-runner
 
-Sets machine settings for a measurement and puts the originals back, also after a crash. Design:
-[ENERGY.md](../docs/ENERGY.md). This first slice handles three settings, written in this order:
+Sets machine settings for a measurement, puts the originals back (also after a crash), and runs
+a command between meter reads. Design: [ENERGY.md](../docs/ENERGY.md). This first slice handles
+three settings, written in this order:
 
 | setting | files | values |
 |---|---|---|
@@ -29,6 +30,21 @@ Every value is checked before anything is written: unknown settings, objects or 
 refused. `apply` and `restore` read only stdin and `/sys`, and write only `/sys` and the journal in
 `/var/lib/energy-runner`.
 
+## Run
+
+```sh
+energy-runner run [--out run.json] -- <cmd...>
+```
+
+Runs the command as the user (refused as root) and reads the meters right before it starts and
+right after it exits: no timer and no polling in between, the runner just waits in `waitpid`.
+Meters are plugins (`time` always, `rapl` now). run.json holds the command, its exit code,
+`meters.time` (`CLOCK_MONOTONIC` ns, seconds), `meters.rapl` (per zone: counters, joules and mean
+watts, corrected for one counter wrap), the settings snapshot before and after, and `drift` if they
+differ. It is never overwritten. Zones whose `energy_uj` can't be read (root-only by default) are
+listed as `unreadable`. A zone's joules are left out, with a warning, when the run was long enough
+to wrap its counter twice at the zone's highest power limit, or when the zone has no power limit.
+
 ## Journal
 
 `journal.jsonl` in the state dir, one fsynced JSON line per step: `open`, `saved` (the full
@@ -41,7 +57,7 @@ Restoring twice is harmless.
 ## Test
 
 ```sh
-cargo test     # on a fake sysfs in a temp dir; one test reads the real /sys
+cargo test     # on a fake sysfs and powercap tree in a temp dir; one test reads the real /sys
 ```
 
 `--sysfs DIR` and `--state-dir DIR` point the runner at a test tree. They are refused as root.

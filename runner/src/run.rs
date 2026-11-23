@@ -1,0 +1,229 @@
+use std::fs::{self, File};
+use std::os::unix::fs::FileExt;
+use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
+use std::process::Command;
+
+use serde_json::{Map, Value, json};
+
+use crate::settings;
+
+/// Something read at the edges of a run, never in between.
+pub trait Meter {
+    fn name(&self) -> &'static str;
+    fn read(&self) -> Result<Vec<u64>, String>;
+    /// What happened between two readings taken `secs` apart.
+    fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>);
+}
+
+/// CLOCK_MONOTONIC in ns. Always the first meter: it gives the run's duration.
+struct Clock;
+
+/// The readable `energy_uj` counters of the powercap zones.
+struct Rapl {
+    zones: Vec<Zone>,
+    unreadable: Vec<String>,
+}
+
+struct Zone {
+    id: String,
+    name: String,
+    file: File,
+    range_uj: u64,
+    max_uw: Option<u64>,
+}
+
+#[repr(C)]
+struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+unsafe extern "C" {
+    fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+}
+
+const CLOCK_MONOTONIC: i32 = 1;
+
+impl Meter for Clock {
+    fn name(&self) -> &'static str {
+        "time"
+    }
+    fn read(&self) -> Result<Vec<u64>, String> {
+        let mut ts = Timespec { sec: 0, nsec: 0 };
+        // SAFETY: ts is a valid timespec for the call to fill.
+        if unsafe { clock_gettime(CLOCK_MONOTONIC, &mut ts) } != 0 {
+            return Err("clock_gettime failed".into());
+        }
+        Ok(vec![ts.sec as u64 * 1_000_000_000 + ts.nsec as u64])
+    }
+    fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>) {
+        let v = json!({"start_ns": start[0], "end_ns": end[0], "seconds": secs});
+        (v, vec![])
+    }
+}
+
+impl Rapl {
+    /// Opens every zone's counter once, so an edge is only one pread per zone.
+    fn open(sys: &Path) -> Rapl {
+        let mut rapl = Rapl {
+            zones: vec![],
+            unreadable: vec![],
+        };
+        let mut dirs: Vec<_> = fs::read_dir(sys.join("class/powercap"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|d| d.join("energy_uj").exists())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+            let range = read_u64(&dir.join("max_energy_range_uj"));
+            match (File::open(dir.join("energy_uj")), range) {
+                (Ok(file), Some(range_uj)) => rapl.zones.push(Zone {
+                    name: fs::read_to_string(dir.join("name"))
+                        .unwrap_or_default()
+                        .trim()
+                        .into(),
+                    max_uw: max_power_uw(&dir),
+                    id,
+                    file,
+                    range_uj,
+                }),
+                _ => rapl.unreadable.push(id),
+            }
+        }
+        rapl
+    }
+}
+
+impl Meter for Rapl {
+    fn name(&self) -> &'static str {
+        "rapl"
+    }
+    fn read(&self) -> Result<Vec<u64>, String> {
+        let mut buf = [0u8; 32];
+        self.zones
+            .iter()
+            .map(|z| {
+                let n = z
+                    .file
+                    .read_at(&mut buf, 0)
+                    .map_err(|e| format!("read {}: {e}", z.id))?;
+                let s = String::from_utf8_lossy(&buf[..n]);
+                s.trim()
+                    .parse()
+                    .map_err(|e| format!("{} energy_uj {s:?}: {e}", z.id))
+            })
+            .collect()
+    }
+    /// Joules are corrected for one wrap of the counter, and left out when the
+    /// run was long enough to wrap it twice at the zone's highest power.
+    fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>) {
+        let mut zones = Map::new();
+        let mut warnings = vec![];
+        for (z, (&a, &b)) in self.zones.iter().zip(start.iter().zip(end)) {
+            let uj = if b >= a { b - a } else { b + z.range_uj - a };
+            let wrap_s = z.max_uw.map(|w| z.range_uj as f64 / w as f64);
+            let joules = wrap_s.is_some_and(|w| secs < w).then(|| uj as f64 / 1e6);
+            if joules.is_none() {
+                let why = match wrap_s {
+                    Some(w) => format!("the counter can wrap in {w:.3} s"),
+                    None => "no power limit is known".into(),
+                };
+                warnings.push(format!(
+                    "rapl {} ({}): {why}, so the {secs:.3} s run may have wrapped it twice; joules left out",
+                    z.id, z.name
+                ));
+            }
+            zones.insert(
+                z.id.clone(),
+                json!({"name": z.name, "start_uj": a, "end_uj": b, "range_uj": z.range_uj,
+                       "wrap_seconds": wrap_s, "joules": joules, "watts": joules.map(|j| j / secs)}),
+            );
+        }
+        if !self.unreadable.is_empty() {
+            warnings.push(format!(
+                "rapl: can't read {:?} (energy_uj is often root-only)",
+                self.unreadable
+            ));
+        }
+        (
+            json!({"zones": zones, "unreadable": self.unreadable}),
+            warnings,
+        )
+    }
+}
+
+fn read_u64(path: &Path) -> Option<u64> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// The highest power the zone may draw over its time windows: the largest of
+/// its constraints' maximum power and power limits.
+fn max_power_uw(dir: &Path) -> Option<u64> {
+    fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            n.starts_with("constraint_")
+                && (n.ends_with("_max_power_uw") || n.ends_with("_power_limit_uw"))
+        })
+        .filter_map(|e| read_u64(&e.path()))
+        .filter(|&w| w > 0)
+        .max()
+}
+
+/// Runs cmd, reading every meter right before it starts and right after it
+/// exits, and writes run.json to out. Returns the command's exit code.
+pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, String> {
+    if euid == 0 {
+        return Err("run is refused as root: it runs your command".into());
+    }
+    let (prog, args) = cmd.split_first().ok_or("run needs a command after --")?;
+    if out.exists() {
+        return Err(format!("{} exists", out.display()));
+    }
+    let meters: [Box<dyn Meter>; 2] = [Box::new(Clock), Box::new(Rapl::open(sys))];
+    let before = settings::snapshot(sys)?;
+    let mut command = Command::new(prog);
+    command.args(args);
+
+    let start = read_all(&meters)?;
+    let status = command.status();
+    let end = read_all(&meters)?;
+
+    let status = status.map_err(|e| format!("run {prog}: {e}"))?;
+    let after = settings::snapshot(sys)?;
+    let secs = (end[0][0] - start[0][0]) as f64 / 1e9;
+    let mut report = Map::new();
+    let mut warnings = vec![];
+    for (m, (a, b)) in meters.iter().zip(start.iter().zip(&end)) {
+        let (v, w) = m.report(a, b, secs);
+        report.insert(m.name().into(), v);
+        warnings.extend(w);
+    }
+    let drift = before != after;
+    if drift {
+        warnings.push("the settings changed during the run (drift)".into());
+    }
+    let run = json!({
+        "cmd": cmd, "exit": status.code(), "signal": status.signal(),
+        "meters": report, "state": {"before": before, "after": after}, "drift": drift,
+    });
+    File::create_new(out)
+        .and_then(|f| serde_json::to_writer_pretty(f, &run).map_err(Into::into))
+        .map_err(|e| format!("write {}: {e}", out.display()))?;
+    for w in warnings {
+        eprintln!("{}: WARNING: {w}", env!("CARGO_PKG_NAME"));
+    }
+    Ok(status.code().unwrap_or(128 + status.signal().unwrap_or(0)) as u8)
+}
+
+fn read_all(meters: &[Box<dyn Meter>]) -> Result<Vec<Vec<u64>>, String> {
+    meters.iter().map(|m| m.read()).collect()
+}
