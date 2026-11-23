@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -30,6 +30,16 @@ const KEYS: [&str; 9] = [
 ];
 const SETTLE: Duration = Duration::from_secs(1);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
+compile_error!("O_NONBLOCK is only known here for Linux on x86_64 and aarch64");
 const SIGHUP: i32 = 1;
 const SIGINT: i32 = 2;
 const SIGKILL: i32 = 9;
@@ -84,6 +94,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
 
     let (_lock, waited) = lock(&o.lock, &id)?;
     stop_on_signals();
+    let started = run::clocks()?;
     let dir = q.out.join(&id);
     fs::create_dir_all(&q.out)
         .and_then(|()| fs::create_dir(&dir))
@@ -102,6 +113,8 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
         meters,
         events,
         id,
+        started,
+        queue: Value::Null,
         ran: 0,
         failed: 0,
     };
@@ -123,7 +136,11 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     if let Err(e) = result {
         detail += &format!("; {e}");
     }
+    let ended = run::clocks();
     r.send("queue_done", "", status, &detail);
+    if let Ok(ended) = ended {
+        r.finish(&ended);
+    }
     Ok(code)
 }
 
@@ -135,6 +152,9 @@ struct Running<'a> {
     meters: Vec<Box<dyn Meter>>,
     events: File,
     id: String,
+    started: Vec<u64>,
+    /// queue.json once written.
+    queue: Value,
     ran: usize,
     failed: usize,
 }
@@ -171,6 +191,7 @@ impl Running<'_> {
                 "notify_timeout_s": self.q.notify_timeout.as_secs_f64(),
             },
             "start": start,
+            "time": run::edges(&[("start", &self.started)]),
             "runner": {
                 "version": env!("CARGO_PKG_VERSION"), "lock": self.o.lock,
                 "privileged": if self.o.test { "in-process" } else { "sudo" },
@@ -178,9 +199,26 @@ impl Running<'_> {
             "minion": minion,
         });
         run::write_new(&self.dir.join("queue.json"), &queue)?;
+        self.queue = queue;
         let waited = waited.map_or(String::new(), |w| format!("; {w}"));
         self.send("queue_started", "", "", &format!("{runs} runs{waited}"));
         Ok(targets)
+    }
+
+    /// Adds the queue's end to queue.json: written to a new file, then renamed over it.
+    fn finish(&mut self, ended: &[u64]) {
+        if self.queue.is_null() {
+            return;
+        }
+        let time = run::edges(&[("start", &self.started), ("end", ended)]);
+        self.queue["time"] = time.into();
+        let (new, path) = (self.dir.join("queue.json.new"), self.dir.join("queue.json"));
+        let renamed = run::write_new(&new, &self.queue).and_then(|()| {
+            fs::rename(&new, &path).map_err(|e| format!("rename {}: {e}", new.display()))
+        });
+        if let Err(e) = renamed {
+            log(e);
+        }
     }
 
     /// Runs the plan in order, applying a run's profile only when the machine is
@@ -586,12 +624,20 @@ pub fn try_lock(path: &Path) -> Result<Option<File>, String> {
 
 /// Opens the lock file, creating it writable by all. An existing file is opened
 /// without O_CREAT, which protected_regular refuses for another user's file in
-/// a sticky directory such as /run/lock.
+/// a sticky directory such as /run/lock; and with O_NONBLOCK, so a FIFO put
+/// there is refused instead of blocking.
 fn open_lock(path: &Path, write: bool) -> std::io::Result<File> {
     loop {
-        match OpenOptions::new().read(true).write(write).open(path) {
+        let open = OpenOptions::new()
+            .read(true)
+            .write(write)
+            .custom_flags(O_NONBLOCK)
+            .open(path);
+        match open {
+            Ok(f) if f.metadata()?.is_file() => return Ok(f),
+            Ok(_) => return Err(std::io::Error::other("not a regular file")),
             Err(e) if e.kind() == ErrorKind::NotFound => {}
-            r => return r,
+            Err(e) => return Err(e),
         }
         let new = OpenOptions::new()
             .read(true)

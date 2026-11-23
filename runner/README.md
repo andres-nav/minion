@@ -43,10 +43,11 @@ energy-runner run [--out run.json] -- <cmd...>
 Runs the command as the user (refused as root) and reads the meters right before it starts and
 right after it exits: no timer and no polling in between, the runner just waits in `waitpid`.
 Meters are plugins (`time` always, `rapl` now). run.json holds the command, its exit code,
-`meters.time` (`CLOCK_MONOTONIC` ns, seconds), `meters.rapl` (per zone: counters, joules and mean
-watts, corrected for one counter wrap), the settings snapshot before and after, and `drift` if they
-differ. It is never overwritten. Zones whose `energy_uj` can't be read (root-only by default) are
-listed as `unreadable`. A zone's joules are left out, with a warning, when the run was long enough
+`meters.time` (at each edge `CLOCK_MONOTONIC` and `CLOCK_REALTIME` in ns, read back to back, the
+realtime also as `*_utc`, and the duration in seconds from the monotonic clock), `meters.rapl`
+(per zone: counters, joules and mean watts, corrected for one counter wrap), the settings snapshot
+before and after, and `drift` if they differ. It is never overwritten. Zones whose `energy_uj`
+can't be read (root-only by default) are listed as `unreadable`. A zone's joules are left out, with a warning, when the run was long enough
 to wrap its counter twice at the zone's highest power limit, or when the zone has no power limit.
 
 ## Queue
@@ -76,7 +77,8 @@ Runs a whole queue as the user, in the foreground, and puts the settings back at
 
 `seed` (default: from the clock), `settle_s` (default 1), `meters` (default `["time", "rapl"]`;
 `time` is always read) and `notify` (with `timeout_s`, default 30) are optional. Unknown keys,
-settings, objects, values and meters are refused before anything runs. Names take letters, digits, `.`, `_` and `-`.
+settings, objects, values and meters are refused before anything runs. Names take letters,
+digits, `.`, `_` and `-`.
 
 - **Plan.** `reps` rounds; each round runs every (profile, workload) pair once, in an order
   shuffled by Fisher-Yates with splitmix64 from the seed. The whole plan goes to plan.json first.
@@ -103,13 +105,15 @@ password; sudo finds `energy-runner` on its `secure_path`, so install it there, 
 `restore` first takes the machine lock without waiting. While a queue holds it, `restore` does
 nothing and says so: that queue restored any leftover journal when it started, so a late restore
 would only undo its profile. `--held` tells `restore` that the caller is the queue holding the
-lock.
+lock. The lock is opened with `O_NONBLOCK`, and anything but a regular file is refused, so a FIFO
+put in its place can't block a restore.
 
 Each queue writes to a new directory, `<out>/<name>-<YYYYMMDDTHHMMSSZ>/`:
 
 ```
 queue.json    the queue as given; the resolved seed, settle, meters and profiles; the settings
-              at the start; the runner version; the MINION_* variables (job id, task, host)
+              at the start; the queue's start and end on both clocks (`time`, the end added
+              when it finishes); the runner version; the MINION_* variables (job id, task, host)
 plan.json     the seed and every run: id, round, position, workload, profile
 events.jsonl  one line per event: event, time, time_utc, queue, run, status, detail
 runs/0001-ep-stable-r01/
