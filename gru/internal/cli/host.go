@@ -19,6 +19,14 @@ func errf(format string, a ...any) int {
 	return 1
 }
 
+// exit returns a command's exit code, or 1 after printing err.
+func exit(code int, err error) int {
+	if err != nil {
+		return errf("%v", err)
+	}
+	return code
+}
+
 // project loads the config and resolves the project of the current directory.
 // Its Config includes the project's .gru.json hosts and templates.
 func project() (*config.Resolved, error) {
@@ -31,6 +39,15 @@ func project() (*config.Resolved, error) {
 		return nil, err
 	}
 	return cfg.Resolve(cwd)
+}
+
+// connect resolves the project of the current directory and dials its host.
+func connect(override string, agent bool) (*target, error) {
+	r, err := project()
+	if err != nil {
+		return nil, err
+	}
+	return dial(r, override, agent)
 }
 
 // target is a host to run on: a client (ssh, or this machine for localhost),

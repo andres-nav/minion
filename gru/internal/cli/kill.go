@@ -22,17 +22,9 @@ func cmdKill(args []string) int {
 	if err := remote.CheckID(id); err != nil {
 		return errf("%v", err)
 	}
-	r, err := project()
+	t, err := connect(*host, false)
 	if err != nil {
 		return errf("%v", err)
 	}
-	t, err := dial(r, *host, false)
-	if err != nil {
-		return errf("%v", err)
-	}
-	code, err := t.Run(remote.KillCommand(remote.JobDir(t.state, id)), nil, os.Stdout, os.Stderr)
-	if err != nil {
-		return errf("%v", err)
-	}
-	return code
+	return exit(t.Run(remote.KillCommand(remote.JobDir(t.state, id)), nil, os.Stdout, os.Stderr))
 }

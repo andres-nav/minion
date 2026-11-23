@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // version is overridden at build time via
@@ -12,7 +13,6 @@ import (
 var version = "dev"
 
 type command struct {
-	name    string
 	use     string
 	summary string
 	run     func(args []string) int
@@ -22,18 +22,18 @@ type command struct {
 // cmdHelp → usage → commands.
 func commands() []command {
 	return []command{
-		{"run", "run <task>", "run a task of this project (--host, --detach, --arg, --no-sync)", cmdRun},
-		{"list", "", "show the resolved template and tasks for this project (--json)", cmdList},
-		{"sync", "", "copy modified files to the remote (--host, --delete)", cmdSync},
-		{"fetch", "fetch [<id>]", "pull result files back from the remote (--host, --into)", cmdFetch},
-		{"attach", "attach [<id>]", "watch a job's output (default: the latest) (--host)", cmdAttach},
-		{"kill", "kill <id>", "stop a running job (--host)", cmdKill},
-		{"ps", "", "list this project's jobs (--all for every job) (--host)", cmdPs},
-		{"ssh", "", "open an interactive shell on the host, in the project dir (--host)", cmdSSH},
-		{"doctor", "", "check the config and hosts; --notify also sends a test notification (--host)", cmdDoctor},
-		{"version", "", "print the gru version", cmdVersion},
-		{"help", "", "show this help", cmdHelp},
-		{"_agent", "", "", cmdAgent},
+		{"run <task>", "run a task of this project (--host, --detach, --arg, --no-sync)", cmdRun},
+		{"list", "show the resolved template and tasks for this project (--json)", cmdList},
+		{"sync", "copy modified files to the remote (--host, --delete)", cmdSync},
+		{"fetch [<id>]", "pull result files back from the remote (--host, --into)", cmdFetch},
+		{"attach [<id>]", "watch a job's output (default: the latest) (--host)", cmdAttach},
+		{"kill <id>", "stop a running job (--host)", cmdKill},
+		{"ps", "list this project's jobs (--all for every job) (--host)", cmdPs},
+		{"ssh", "open an interactive shell on the host, in the project dir (--host)", cmdSSH},
+		{"doctor", "check the config and hosts; --notify also sends a test notification (--host)", cmdDoctor},
+		{"version", "print the gru version", cmdVersion},
+		{"help", "show this help", cmdHelp},
+		{"_agent", "", cmdAgent},
 	}
 }
 
@@ -52,7 +52,7 @@ func Run(args []string) int {
 	}
 
 	for _, c := range commands() {
-		if c.name == name {
+		if strings.Fields(c.use)[0] == name {
 			return c.run(args[1:])
 		}
 	}
@@ -83,10 +83,6 @@ commands:
 		if c.summary == "" {
 			continue
 		}
-		label := c.name
-		if c.use != "" {
-			label = c.use
-		}
-		fmt.Fprintf(w, "  %-13s %s\n", label, c.summary)
+		fmt.Fprintf(w, "  %-13s %s\n", c.use, c.summary)
 	}
 }

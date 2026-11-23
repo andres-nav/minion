@@ -15,11 +15,7 @@ func cmdAttach(args []string) int {
 	if err != nil {
 		return 2
 	}
-	r, err := project()
-	if err != nil {
-		return errf("%v", err)
-	}
-	t, err := dial(r, *host, true) // the agent follows the log
+	t, err := connect(*host, true) // the agent follows the log
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -34,9 +30,5 @@ func cmdAttach(args []string) int {
 	if latest {
 		fmt.Fprintf(os.Stderr, "attaching latest: %s\n", id)
 	}
-	code, err := t.Run(remote.AttachCommand(t.agent, remote.JobDir(t.state, id)), nil, os.Stdout, os.Stderr)
-	if err != nil {
-		return errf("%v", err)
-	}
-	return code
+	return exit(t.Run(remote.AttachCommand(t.agent, remote.JobDir(t.state, id)), nil, os.Stdout, os.Stderr))
 }

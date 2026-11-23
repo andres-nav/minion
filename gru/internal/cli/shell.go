@@ -15,11 +15,7 @@ func cmdSSH(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	r, err := project()
-	if err != nil {
-		return errf("%v", err)
-	}
-	t, err := dial(r, *host, false)
+	t, err := connect(*host, false)
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -27,9 +23,5 @@ func cmdSSH(args []string) int {
 		return errf("%s is this machine", t.alias)
 	}
 	fmt.Fprintf(os.Stderr, "%s: opening shell in %s\n", t.alias, t.dir)
-	code, err := t.Interactive(fmt.Sprintf("cd %s 2>/dev/null; exec ${SHELL:-sh} -l", remote.RemotePath(t.dir)))
-	if err != nil {
-		return errf("%v", err)
-	}
-	return code
+	return exit(t.Interactive(fmt.Sprintf("cd %s 2>/dev/null; exec ${SHELL:-sh} -l", remote.RemotePath(t.dir))))
 }

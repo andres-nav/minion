@@ -52,11 +52,7 @@ func cmdPs(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	r, err := project()
-	if err != nil {
-		return errf("%v", err)
-	}
-	t, err := dial(r, *host, false)
+	t, err := connect(*host, false)
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -75,7 +71,7 @@ func cmdPs(args []string) int {
 	if len(js) == 0 && *all {
 		fmt.Printf("(no jobs on %s)\n", t.alias)
 	} else if len(js) == 0 {
-		fmt.Printf("(no jobs for %q on %s — use --all)\n", filepath.Base(r.Root), t.alias)
+		fmt.Printf("(no jobs for %q on %s — use --all)\n", filepath.Base(t.r.Root), t.alias)
 	}
 	return 0
 }
