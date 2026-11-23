@@ -44,11 +44,12 @@ Runs the command as the user (refused as root) and reads the meters right before
 right after it exits: no timer and no polling in between, the runner just waits in `waitpid`.
 Meters are plugins (`time` always, `rapl` now). run.json holds the command, its exit code,
 `meters.time` (at each edge `CLOCK_MONOTONIC` and `CLOCK_REALTIME` in ns, read back to back, the
-realtime also as `*_utc`, and the duration in seconds from the monotonic clock), `meters.rapl`
-(per zone: counters, joules and mean watts, corrected for one counter wrap), the settings snapshot
+realtime also as `*_utc`, and the duration in seconds from the monotonic clock), `meters.rapl` (per
+zone: counters, joules and mean watts, corrected for one counter wrap), the settings snapshot
 before and after, and `drift` if they differ. It is never overwritten. Zones whose `energy_uj`
-can't be read (root-only by default) are listed as `unreadable`. A zone's joules are left out, with a warning, when the run was long enough
-to wrap its counter twice at the zone's highest power limit, or when the zone has no power limit.
+can't be read (root-only by default) are listed as `unreadable`. A zone's joules are left out, with
+a warning, when the run was long enough to wrap its counter twice at the zone's highest power
+limit, or when the zone has no power limit.
 
 ## Queue
 
