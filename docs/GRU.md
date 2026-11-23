@@ -21,7 +21,7 @@ JSON. Global `~/.config/gru/config.json` (honors `GRU_CONFIG`, `XDG_CONFIG_HOME`
   - `host`: default host (a `hosts` key or raw ssh alias). **No global default** — if a remote op needs a host and none is set, gru fails loudly.
   - `remote_dir`: overrides the host's (e.g. a workspace slot).
   - `exclude`: extra sync-ignore globs (on top of `.gitignore`).
-  - `env`: `["KEY=VALUE"]`, exported before the command and hooks; values expand on the host.
+  - `env`: `["KEY=VALUE"]`, exported before the command and hooks; values expand on the host. A `KEY` that is not a shell variable name is refused.
   - `before` / `on_success` / `on_failure` / `always`: lifecycle hooks (shell commands).
   - `needs`: sibling dirs synced before the project (e.g. Brazil packages), each to its own `{repo}` dir; `push`: local dirs (e.g. `~/.midway`) copied to the same path on the host. Only `run` does these two.
   - `fetch`: result globs to pull back; `fetch_into`: where (`{id}`, `{ts}` in UTC, `{repo}`; default the project dir, so each fetch replaces the files of the last).
@@ -51,7 +51,7 @@ Every run is a job (`internal/remote`) — local and remote differ only by the e
 Pure-Go, file-level, over the system `ssh` transport:
 
 - **Git-aware**: `git ls-files --cached --others --exclude-standard` respects `.gitignore`, global excludes, and `.git/info/exclude` (falls back to a filesystem walk outside git). Template `exclude` globs apply on top. Symlinks to regular files are followed and synced as files.
-- Local vs remote manifests are diffed by **size + mtime**; only changed files transfer. mtime is preserved on write, so re-syncs are no-ops.
+- Local vs remote manifests are diffed by **size + mtime + mode**, so a `chmod` alone is synced too; only changed files transfer. mtime is preserved on write, so re-syncs are no-ops.
 - Wire protocol: newline-JSON header + raw bytes per file, atomic temp+rename, mode/mtime preserved; `..` paths rejected.
 - `--delete` removes remote files absent locally, except those matched by `exclude` or ignored by git here (results, build output).
 - Agent verbs: `_agent manifest <dir>` (list), `_agent recv <dir>` (write stream), `_agent send <dir> <globs>` (stream matches back for `fetch`).
@@ -76,7 +76,7 @@ Build: `make build` (host), `make cross` (linux amd64/arm64 agents), `make insta
 
 ## Known limitations
 
-- Change detection is by size + mtime at 1-second resolution; a same-size in-place edit within the same second as the recorded mtime may be missed.
+- Change detection is by size, mtime and mode, with mtime at 1-second resolution; a same-size in-place edit within the same second as the recorded mtime may be missed.
 - `kill` relies on `setsid` for clean process-group termination (present on Linux). On hosts without it (bare macOS) the wrapper's children may survive.
 - `run.json` `dirty`/`git` reflect the whole repo, not just the synced subtree.
 

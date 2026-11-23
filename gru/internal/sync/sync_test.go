@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -173,14 +174,16 @@ func TestChanged(t *testing.T) {
 		"same":    {Size: 1, Mtime: 100},
 		"newer":   {Size: 2, Mtime: 200},
 		"created": {Size: 3, Mtime: 300},
+		"chmod":   {Size: 4, Mtime: 400, Mode: 0o755},
 	}
 	remote := Manifest{
 		"same":  {Size: 1, Mtime: 100},
 		"newer": {Size: 2, Mtime: 150}, // different mtime
+		"chmod": {Size: 4, Mtime: 400, Mode: 0o644},
 	}
 	got := Changed(local, remote)
-	want := []string{"created", "newer"} // sorted
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"chmod", "created", "newer"} // sorted
+	if !slices.Equal(got, want) {
 		t.Fatalf("Changed = %v, want %v", got, want)
 	}
 }

@@ -185,11 +185,11 @@ func Match(root string, patterns []string) ([]string, error) {
 	return out, nil
 }
 
-// Changed returns the local paths absent from remote or differing in size/mtime.
+// Changed returns the local paths absent from remote or differing in size, mtime or mode.
 func Changed(local, remote Manifest) []string {
 	var out []string
 	for p, l := range local {
-		if r, ok := remote[p]; !ok || r.Size != l.Size || r.Mtime != l.Mtime {
+		if r, ok := remote[p]; !ok || r != l {
 			out = append(out, p)
 		}
 	}
