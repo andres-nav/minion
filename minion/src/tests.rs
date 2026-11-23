@@ -553,6 +553,9 @@ impl crate::run::Meter for Stamp {
     fn report(&self, start: &Value, end: &Value, _: f64) -> (Value, Vec<String>) {
         (json!([start, end]), vec![])
     }
+    fn slow(&self) -> bool {
+        true
+    }
 }
 
 #[test]

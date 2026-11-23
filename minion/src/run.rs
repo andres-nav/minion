@@ -15,12 +15,16 @@ use crate::{settings, utc};
 
 /// Something read at the edges of a run, never in between. Meters nest: the
 /// start reads them last to first, the end first to last, so `time`, first, is
-/// innermost and a slow meter goes last.
+/// innermost and the slow ones are outermost.
 pub trait Meter {
     fn name(&self) -> &'static str;
     fn read(&self) -> Result<Value, String>;
     /// What happened between two readings taken `secs` apart.
     fn report(&self, start: &Value, end: &Value, secs: f64) -> (Value, Vec<String>);
+    /// Whether a read takes long, like starting a command.
+    fn slow(&self) -> bool {
+        false
+    }
 }
 
 /// CLOCK_MONOTONIC and CLOCK_REALTIME in ns. Always the first meter: the
@@ -218,6 +222,7 @@ pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, Strin
             _ => return Err(format!("unknown meter {n:?}")),
         }
     }
+    meters.sort_by_key(|m| m.slow());
     Ok(meters)
 }
 
