@@ -23,9 +23,13 @@ attributing energy to tenants or processes, a benchmark framework, dashboards, a
 
 ## What is built
 
-The verbs `snapshot`, `apply`, `restore`, `status`, `run`, `queue` and `reap`; three settings
-(`cpu.governor`, `cpu.turbo`, `cpu.idle.disable`); the meters `time` and `rapl`. `make e2e` runs
-queues through gru on a fake sysfs; real sysfs writes, RAPL, sudo and ssh are not tested yet.
+- Settings: `cpu.governor`, `cpu.turbo` and `cpu.idle.disable`.
+- Verbs: `snapshot`, `apply`, `restore`, `status`, `run`, `queue` and `reap`.
+- Meters: `time` and `rapl`.
+- Between runs: the settle.
+
+`make e2e` runs queues through gru on a fake sysfs; real sysfs writes, RAPL, sudo and ssh are not
+tested yet.
 
 ### Stay out of the measured window
 
