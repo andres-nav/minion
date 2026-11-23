@@ -233,6 +233,7 @@ func TestConfigErrors(t *testing.T) {
 		`{"notify": {"on": "faliure", "run": ["x"]}}`:              `notify.on "faliure"`,
 		`{"templates": {"x": {"notify": {"email": {"to": "a"}}}}}`: "template x: notify.email needs",
 		`{"hosts": `: "unexpected EOF",
+		`{"templates": {"x": {"env": ["MY-VAR=1"]}}}`: `template x: env "MY-VAR=1": not a variable name`,
 	} {
 		os.WriteFile(path, []byte(body), 0o644)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), path) {
@@ -244,6 +245,7 @@ func TestConfigErrors(t *testing.T) {
 	for body, want := range map[string]string{
 		`{"use": "latex", "test": "x"}`:         `unknown field "test"`,
 		`{"notify": {"on": "x", "run": ["y"]}}`: `notify.on "x"`,
+		`{"env": ["A=1", "2B"]}`:                `env "2B": not a variable name`,
 	} {
 		writeRepo(t, root, body)
 		if _, err := cfg.Resolve(root); err == nil || !strings.Contains(err.Error(), want) {

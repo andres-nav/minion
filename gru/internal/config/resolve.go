@@ -96,7 +96,7 @@ func (c *Config) resolveRepo(root, path string, b []byte) (*Resolved, error) {
 	if len(rc.Env) > 0 {
 		r.Template.Env = append(slices.Clone(base.Env), rc.Env...)
 	}
-	return r, r.Template.Notify.Validate()
+	return r, r.Template.validate()
 }
 
 // detect returns, sorted, the templates with a detection marker present in root.
