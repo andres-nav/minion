@@ -5,7 +5,10 @@
 # Run it with `make e2e`; E2E_KEEP=1 keeps the temp dir. Linux only.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
-for b in gru/bin/gru minion/target/release/minion; do
+arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+# M is the minion build that gru uploads to this machine; checks by hand call it.
+M=$root/gru/bin/minion-linux-$arch
+for b in gru/bin/gru gru/bin/minion-linux-$arch; do
   [ -x "$root/$b" ] || { echo "e2e: no $b, run make build" >&2; exit 2; }
 done
 
@@ -15,7 +18,7 @@ export TZ=Europe/Zurich HOME=$T/home GRU_CONFIG=$T/config.json PATH=$T/bin:$PATH
 # test/ssh runs "remote" commands with this home, so ~ differs on both sides.
 export E2E_REMOTE_HOME=$T/rhome
 mkdir -p "$T/bin" "$HOME" "$E2E_REMOTE_HOME" "$T/proj/work"
-ln -s "$root/gru/bin/gru" "$root/minion/target/release/minion" "$root/test/ssh" "$T/bin/"
+ln -s "$root/gru/bin/gru" "$root/test/ssh" "$T/bin/"
 printf '#!/bin/sh\necho "sudo $*" >> %s/sudo.log\nexit 1\n' "$T" > "$T/bin/sudo"
 chmod +x "$T/bin/sudo"
 
@@ -58,8 +61,8 @@ cat > "$T/proj/.gru.json" << EOF
 {
   "use": "energy",
   "templates": {"energy": {
-    "tasks": {"energy": "minion queue $R \$GRU_ARGS"},
-    "always": ["minion reap $R", "minion restore $R"],
+    "tasks": {"energy": "\"\$GRU_MINION\" queue $R \$GRU_ARGS"},
+    "always": ["\"\$GRU_MINION\" reap $R", "\"\$GRU_MINION\" restore $R"],
     "fetch": ["results"],
     "fetch_into": "$T/fetched/{ts}/{id}"
   }}
@@ -156,20 +159,28 @@ machine_clean() {
 check_remote() {
   queue remote 2 "$BASE, $PERF" "$OK, $FAIL"
   gru run energy --host fake --arg remote.json > "$T/remote.out" 2>&1
-  local code=$? id v dest
+  local code=$? id v dest m before
   cat "$T/remote.out"
   [ "$code" -eq 1 ] || fail "gru run: exit $code, want 1 (a workload fails)"
   id=$(started "$T/remote.out")
   v=$(gru version | cut -d' ' -f2)
   "$T"/state/bin/gru-"$v"-linux-* _agent version | grep -qx "gru $v" ||
     fail "no agent gru-$v-linux-* in $T/state/bin"
+  # gru uploaded minion, named by its version, platform and hash.
+  m=$T/state/bin/minion-$v-linux-$arch-$(sha256sum < "$M" | cut -c1-12)
+  cmp "$m" "$M" || fail "no upload of $M as $m"
   dest=$(echo "$T"/fetched/*/"$id")
   queue_ok "$dest"/results/energy/remote-* 8 4
   has "$dest"/results/energy/remote-*/queue.json "\"GRU_JOB_ID\":\"$id\""
+  has "$dest"/results/energy/remote-*/queue.json "\"version\":\"$v\"" # minion's is gru's
   has "$dest/_gru/run.json" '"exit":1'
   [ -s "$dest/_gru/log" ] || fail "no job log fetched"
   notified remote queue_started run_done run_failed queue_done
   machine_clean
+  # The next command finds the upload there and leaves it as it is.
+  before=$(ls -i "$T"/state/bin/minion-*)
+  gru sync --host fake > /dev/null || fail "gru sync"
+  [ "$(ls -i "$T"/state/bin/minion-*)" = "$before" ] || fail "minion uploaded again"
 
   # A config typo, and a needs dir that would land on the project's own remote
   # dir, are refused before anything runs.
@@ -226,7 +237,7 @@ check_detach() {
   queue crash 1 "$PERF" "\"slow\": {\"cmd\": [\"sh\", \"-c\", \"sleep ${s}1 & sleep ${s}2\"]}"
   crash=$(gru run energy --host fake --arg crash.json --detach) || fail "gru run --detach"
   wait_for 20 pgrep -x -f "sleep ${s}1"
-  pkill -9 -f "minion queue $R crash.json" || fail "no runner to kill"
+  pkill -9 -f "queue $R crash.json" || fail "no runner to kill"
   wait_for 20 test -e "$T/state/jobs/$crash/status"
   [ "$(cat "$T/state/jobs/$crash/status")" = 137 ] || fail "crashed job: want status 137"
   ! pgrep -a -f "^sleep ${s}[12]$" || fail "the workload outlived its runner"
@@ -256,7 +267,7 @@ check_two() {
   touch "$T/go1"
   wait_for 30 exists "$T/remote/proj/results/energy/second-*/runs/0001-*/stdout"
   # The first job's always hook, run late, must not undo the second queue's profile.
-  minion restore $R || fail "late restore"
+  "$M" restore $R || fail "late restore"
   grep -qx performance "$gov" || fail "a late restore undid the second queue's profile"
   touch "$T/go2"
   wait_for 30 test -e "$T/state/jobs/$a/status"
@@ -306,7 +317,8 @@ check_cli() {
     "tasks": {
       "hello": "mkdir -p out && echo \"\$GREETING \$GRU_ARGS\" | tee out/hello.txt",
       "fail": "sleep 1; exit 4",
-      "show": "cat src/a.txt"
+      "show": "cat src/a.txt",
+      "minion": "echo \"minion=\$GRU_MINION\""
     }
   }}
 }
@@ -355,6 +367,11 @@ EOF
   grep -qx one "$T/show.out" || fail "--no-sync synced"
   # local is localhost: the job runs here, in the project dir, with nothing to sync or fetch.
   want 0 here gru run show --host local --no-sync
+  # A local job gets the minion bundled with gru; a remote one the upload.
+  want 0 minion-local gru run minion --host local --no-sync
+  grep -qx "minion=$(readlink -f "$M")" "$T/minion-local.out" || fail "local GRU_MINION is not $M"
+  want 0 minion-remote gru run minion --no-sync
+  cmp "$(sed -n 's/^minion=//p' "$T/minion-remote.out")" "$M" || fail "remote GRU_MINION is not the upload"
   grep -qx second "$T/here.out" || fail "--host local: not run in the project dir"
   gru sync --host local | grep -q "nothing to sync" || fail "sync --host local"
   want 1 fetchlocal gru fetch --host localhost
@@ -390,7 +407,7 @@ EOF
 
   # doctor, ssh, version and help.
   want 1 doctor gru doctor
-  grep -q "^host fake2 .*OK" "$T/doctor.out" || fail "doctor: fake2 not OK"
+  grep -q "^host fake2 .*OK.*, minion .*minion-.*-linux-$arch-" "$T/doctor.out" || fail "doctor: fake2 not OK with its minion"
   grep -q "^host down .*FAIL .*down.invalid" "$T/doctor.out" || fail "doctor: down not FAIL"
   grep -q "^1 problem" "$T/doctor.out" || fail "doctor: not 1 problem"
   gru doctor --notify --host fake2 || fail "doctor --notify"
@@ -461,21 +478,21 @@ check_exit() {
   machine_clean
 
   # The privileged verbs by hand, with the profile and the queue id on stdin.
-  echo '{"cpu.governor": {"policy0": "performance"}}' | minion apply $R || fail "minion apply"
+  echo '{"cpu.governor": {"policy0": "performance"}}' | "$M" apply $R || fail "minion apply"
   grep -qx performance "$gov" || fail "apply: governor not set"
-  minion status $R | tr -d ' \n' | grep -q '"policy0":"performance"' || fail "status: no change shown"
-  echo '{"queue": "nope"}' | minion restore --held $R 2> "$T/held.out" && fail "restore --held ran for another queue"
+  "$M" status $R | tr -d ' \n' | grep -q '"policy0":"performance"' || fail "status: no change shown"
+  echo '{"queue": "nope"}' | "$M" restore --held $R 2> "$T/held.out" && fail "restore --held ran for another queue"
   grep -q "doesn't hold the queue lock" "$T/held.out" || fail "restore --held: no clear message"
-  minion restore $R || fail "minion restore"
+  "$M" restore $R || fail "minion restore"
   machine_clean
 }
 
 check_snapshot() {
-  minion snapshot > "$T/snapshot.json" || fail "minion snapshot on /sys"
+  "$M" snapshot > "$T/snapshot.json" || fail "minion snapshot on /sys"
   cat "$T/snapshot.json"
   for k in cpu.governor cpu.turbo cpu.idle.disable; do has "$T/snapshot.json" "\"$k\":{"; done
   [ ! -d /sys/devices/system/cpu/cpu0/cpuidle/state0 ] || has "$T/snapshot.json" '"cpu0/state0":'
-  minion run --out "$T/run.json" -- true || fail "minion run on /sys"
+  "$M" run --out "$T/run.json" -- true || fail "minion run on /sys"
   has "$T/run.json" '"time":{'
 }
 

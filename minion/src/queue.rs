@@ -18,7 +18,7 @@ use crate::lock;
 use crate::run::{self, Meter, STOP, WORKLOAD};
 use crate::settings::{self, State};
 use crate::utc::{self, log, now_ns};
-use crate::{NAME, Opts};
+use crate::{NAME, Opts, VERSION};
 
 #[rustfmt::skip]
 const KEYS: [&str; 9] = ["name", "profiles", "workloads", "reps", "seed", "settle_s", "meters", "out", "notify"];
@@ -154,7 +154,7 @@ impl Running<'_> {
             "start": start,
             "time": run::edges(&[("start", started)]),
             "runner": {
-                "version": env!("CARGO_PKG_VERSION"), "lock": self.o.lock,
+                "version": VERSION, "lock": self.o.lock,
                 "privileged": if self.o.test { "in-process" } else { "sudo" },
             },
             "gru": gru,

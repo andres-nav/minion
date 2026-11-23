@@ -102,7 +102,7 @@ func cmdRun(args []string) int {
 // returns the job's id once it ended ("" if detached or still running) and
 // the exit code.
 func start(t *target, job remote.Job, detach bool) (string, int) {
-	job.Repo, job.Agent = filepath.Base(t.r.Root), t.agent
+	job.Repo, job.Agent, job.Minion = filepath.Base(t.r.Root), t.agent, t.minion
 	id, err := launch(t, stamp(time.Now()), func(id string) string {
 		job.ID = id
 		return remote.Script(t.dir, remote.JobDir(t.state, id), job)
