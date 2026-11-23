@@ -1,4 +1,4 @@
-// Command gru is a thin remote dev-loop orchestrator. See DESIGN.md.
+// Command gru is a thin remote dev-loop orchestrator. See docs/GRU.md.
 package main
 
 import (

@@ -1,7 +1,7 @@
 # minion
 
 Sets machine settings for a measurement, puts the originals back (also after a crash), runs a
-command between meter reads, and runs whole queues of them. Design: [ENERGY.md](../docs/ENERGY.md).
+command between meter reads, and runs whole queues of them. Design: [MINION.md](../docs/MINION.md).
 All times are UTC: names use `20261123T142501Z`, every wall-clock epoch has an ISO 8601 `*_utc`
 twin (`2026-11-23T14:25:01Z`; monotonic times have none), and log lines start with the UTC time.
 Local time is never used.

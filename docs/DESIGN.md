@@ -1,82 +1,84 @@
-# minion — design
+# Design: gru and minion
 
-**Status:** v1 implemented and validated end-to-end against a real host (`dgx-spark-08.ethz.ch`, linux/arm64).
+This repository holds two tools: one runs builds, tests and experiments on other machines, the
+other measures them there without disturbing them. Energy is the first use case; the goals follow
+the project task description (M. Friedman, CORES Lab, ETH Zurich, 2026).
 
-## What minion is
+| Tool | Where | Language | Does | Design |
+|---|---|---|---|---|
+| **gru** | laptop | Go, stdlib only | syncs a repo, runs its tasks as detached jobs on a host, notifies, fetches results | [GRU.md](GRU.md) |
+| **minion** | measured host | Rust | applies and restores machine settings, runs queues of measured runs, reads the meters | [MINION.md](MINION.md) |
 
-A single static Go binary that **dispatches** a repo's build/test/experiment commands — locally or on a remote SSH host — reusing each repo's existing tooling. It is **not a build system**: it owns *where* to run, *what command* to invoke (delegating to `make`/`brazil-build`/`latexmk`/`pytest`/…), and *what happens around it* (sync, lifecycle hooks, fetch, notify).
+Sources and related tools: [RESEARCH.md](RESEARCH.md).
 
-One verb works in every repo (`minion run <task>`, resolving build/test/lint/clean or any freeform task), and `minion list --json` makes capabilities machine-discoverable for AI agents and a future Emacs frontend.
+## Why two tools
 
-**Zero external dependencies** — the module has no third-party `require`s (stdlib only). The remote needs only a POSIX shell + coreutils (no tmux, no rsync, no Python).
+gru is a user-level CLI with no dependencies: a host needs only a POSIX shell, and gru uploads its
+own static agent. It works for any repo and any host, measured or not.
 
-## Configuration
+minion needs what gru must not: root for machine settings (through one sudoers rule), NVML (a C
+library), and control over every wakeup on the host. Rust has no runtime threads or garbage
+collector, while an idle Go program still wakes every minute or two (`runtime/proc.go`). Kept
+apart, gru stays small, and minion is installed only where measurements run (it can move to its
+own repository later).
 
-JSON, parsed with `encoding/json`. Global `~/.config/minion/config.json` (honors `MINION_CONFIG`, `XDG_CONFIG_HOME`), optionally overridden by a per-project `.minion.json`.
+## How they connect
 
-- **`hosts`**: name → `{ ssh, remote_dir, state_dir }`. `ssh` is the alias passed to the system `ssh` (so `~/.ssh/config` — ProxyJump, ControlMaster, etc. — is inherited). If a master from the user's own `ControlPath` is already running (`ssh -O check <alias>`), minion multiplexes over it instead of opening its own, so hosts that need interactive 2FA work after one manual `ssh <alias>`. `remote_dir` supports `{repo}`, a leading `~`, and `$VAR` / `${VAR}` expanded by the **remote** shell (e.g. `/scratch/$USER/{repo}`); an unset or empty variable fails the command instead of resolving to another directory. `state_dir` (default `~/.minion`, same expansion) holds the jobs and the agent; point it at local disk when the home is on NFS, so logs and job scripts stay off the network and other machines.
-- **`templates`**: name → a repo-type:
-  - `detect`: filename markers; a template matches if **any** is present.
-  - `host`: default host (a `hosts` key or raw ssh alias). **No global default** — if a remote op needs a host and none is set, minion fails loudly.
-  - `exclude`: extra sync-ignore globs (on top of `.gitignore`).
-  - `before` / `on_success` / `on_failure` / `always`: lifecycle hooks (shell commands).
-  - `fetch`: result globs to pull back.
-  - `notify`: announce a finished job. `on` (`always`|`failure`|`success`, default `always`); `email` (`{ smtp: "host:port", from, to, user, pass }`, sent by the agent via `net/smtp` — no `curl` needed); `run` (shell commands run at job end, e.g. a `curl` webhook to Slack/Matrix — the target must have whatever the command uses); `env` (`{ KEY: value }` extra vars exported for the `run` hooks). A top-level `notify` is the default; a template's `notify` overrides it. `run` hooks additionally see `$MINION_SUBJECT` (the one-line summary email uses) and `$MINION_BODY` (the full summary with a log tail), composed on the target by the agent. `pass` and each `env` value accept `${ENV}` (or bare `$ENV`), resolved on the **local** machine at launch so credentials/tokens never live in the config or repo (put a webhook bearer token in `env`, not inline in the `run` string). Any value beginning with `$` is treated as an env reference, so a literal secret that starts with `$` must be supplied through the referenced variable rather than inline.
-  - Standard verbs `build`/`test`/`run`/`lint`/`clean` + a freeform `tasks` map.
+minion knows gru only through environment variables; without gru it runs the same under `setsid`
+or tmux, minus the hooks.
 
-**Resolution** (`internal/config`): walk up from cwd; the first dir with a `.minion.json` or matching `detect` markers is the **project root** (handles monorepos like `paperwork/<app>/main.tex`). The **git root** is tracked separately. A per-project `.minion.json` selects a template via `use` and overrides any field. It may also define its own `templates` and `hosts` maps, merged over the global config before resolution (local wins on name collision) — so a project can `use` a template defined right in its `.minion.json`, with no global config entry.
+- **The job runs the queue.** `gru run energy --arg q.json --detach` starts a detached gru job
+  whose task is `minion queue $GRU_ARGS`. The queue runs in the job's foreground, so `gru ps`,
+  `attach`, `kill` and the log apply to it; `gru kill` stops the queue, which restores.
+- **Notify.** minion's `notify.cmd` calls gru's agent, which reads the 0600 notify file in the job
+  dir, so secrets stay out of the queue and the environment: `"$GRU_AGENT" _agent notify --config
+  "$GRU_NOTIFY" --subject "$MINION_EVENT $MINION_QUEUE" --body "$MINION_DETAIL"`.
+- **Results and fetch.** minion writes each queue under `<remote_dir>/results/` and records the
+  job's `GRU_*` variables (job id, task, host, commit, dirty flag) in `queue.json`. A `fetch` glob
+  brings it back, with the job's `run.json` and log in `_gru/`.
+- **Reap and restore hooks.** The template's `always` hooks, `minion reap` and `sudo -n minion
+  restore`, clean up after a runner that died without restoring. They act only while no queue
+  holds the queue lock. Setup: [minion/README.md](../minion/README.md#with-gru).
 
-## Interface
+## Principles
 
-- Run: `run <task>` — the sole task entry point; the name resolves to a standard verb (`build`/`test`/`lint`/`clean`) or a freeform `tasks` entry. `list [--json]` enumerates them.
-- Remote: `sync [--delete]`, `fetch [--into]`, `attach [<id>]` (default: latest), `kill <id>`, `ps` (job/task/age/status), `ssh`, `doctor [--notify]`.
-- Meta: `version`, `help`. Hidden: `_agent` (remote counterpart).
-- Bootstrap (agent upload) is automatic inside `sync`/`run`/`fetch`. `ssh` opens an interactive shell on the host in the project's remote dir. `doctor` validates the config and checks every host (reachable + agent bootstraps) — the explicit health check; there is no separate `ping`/`bootstrap` command. `doctor --notify` additionally sends a synthetic email through the resolved config from the target host, verifying credentials end to end.
+- **Nothing runs in a measured window.** Between the meter reads at a run's start and end, minion
+  doesn't log, write, send or fork; notifications, helpers and sudo calls run between runs
+  ([the rule](MINION.md#the-rule-stay-out-of-the-measured-window)).
+- **Exact restore.** Every setting gets its original value back, also after `kill -9` or a crash,
+  from an on-disk journal ([restore](MINION.md#restore-crashes-and-reboots)); reboots once the
+  boot unit exists.
+- **Any experiment.** A workload is any command and meters are plugins.
+- **Several machines.** gru drives any number of hosts, and one experiment can span hosts, a
+  leader driving followers over SSH ([later](MINION.md#several-machines-later-phase)).
+- **GPUs and devices.** Devices are setting objects like CPUs, saved, applied and restored the
+  same way ([devices](MINION.md#devices)).
+- **All times UTC.** Experiments span machines and time zones, so local time is never used.
+  Machine fields are epoch seconds or nanoseconds, and every wall-clock epoch has an ISO 8601
+  `*_utc` twin (`2026-11-23T14:25:01Z`); monotonic times have none. Ids, dirs and file names use
+  `20261123T142501Z`. Displays and log lines show UTC with the `Z`.
 
-## Execution
-
-Every run is a job (`internal/remote`) — local and remote differ only by the executor (`internal/ssh` remote, or a local `sh -c`). It's **tmux-free**: minion generates an sh wrapper (hooks run in `( )` subshells so a task's `exit`/`cd` can't kill it; order `before → command → on_success|on_failure → always`, a failing `before` still runs `always`), launches it detached via `setsid` (fallback `nohup`) with output to `<state_dir>/jobs/<id>/log` and the exit code to `.../status`. The job dir is created with a plain `mkdir` under `umask 077` (private, since the script may export secrets); an id is a random name plus the start time (`brave_otter-20261123T142501Z`, UTC), and a taken id draws another name, so a job never reuses an old job's files. Each job dir records the target's `uname -n` in `hostname`. Detached ⇒ **survives disconnect**; hooks and notifications run on the target, after the exit code is recorded, so a slow/failing notify never changes the job's status. Hooks and `notify` see `$MINION_EXIT`/`STATUS`/`DURATION`/`JOB_ID`/`TASK`/`HOST`.
-
-- **Remote host:** `run` = sync → launch → attach (stream log until done, exit with the job's code) → **auto-fetch results (regardless of exit code)**. `--detach` skips attach/fetch and prints the id.
-- **`--host localhost`** (or `local`): the job runs **on this machine** with no ssh/sync/bootstrap, in the project dir; `ps`/`attach`/`kill` read the local `<state_dir>/jobs`.
-- **No host resolved ⇒ error** (pass `--host`; `--host localhost` to run here).
-- `attach [<id>]` replays the log and follows (defaults to the latest job); `ps` lists jobs (name/task/started in UTC, e.g. `2026-11-23 14:25Z`/status); `kill <id>` stops the process group; `ps` and the latest-job lookup (`attach`/`fetch` without an id) see only jobs launched on this host, and `kill` refuses another host's job, so machines sharing a state dir don't touch each other's jobs; each run writes `run.json` provenance (id, task, host, git SHA, dirty, start/end, exit).
-
-## Sync (`internal/sync`)
-
-Pure-Go, file-level, over the system `ssh` transport:
-
-- **Git-aware**: `git ls-files --cached --others --exclude-standard` respects `.gitignore`, global excludes, and `.git/info/exclude` (falls back to a filesystem walk outside git). Template `exclude` globs apply on top. Symlinks to regular files are followed and synced as files.
-- Local vs remote manifests are diffed by **size + mtime**; only changed files transfer. mtime is preserved on write, so re-syncs are no-ops.
-- Wire protocol: newline-JSON header + raw bytes per file, atomic temp+rename, mode/mtime preserved; `--delete` mirrors by removing remote files absent locally; `..` paths rejected.
-- Agent verbs: `_agent manifest <dir>` (list), `_agent recv <dir>` (write stream), `_agent send <dir> <globs>` (stream matches back for `fetch`).
-
-## Bootstrap (`internal/ssh`)
-
-`EnsureAgent` checks for a matching-version `minion` in `<state_dir>/bin` on the remote and, if missing/stale, uploads one for the **remote's** platform (`uname -sm` → GOOS/GOARCH). The running executable serves its own platform; cross-arch targets use a sibling `minion-<goos>-<goarch>` produced by `make cross`. Uploaded binaries are static (no libc dependency). `dev` builds always re-upload.
-
-## Layout
+## Repository layout
 
 ```
-main.go                  tiny entrypoint → cli.Run
-internal/cli/            command dispatch + subcommands (build/run/sync/fetch/attach/kill/ps/ssh/doctor/list/agent)
-internal/config/         load + layer + detect/resolve
-internal/ssh/            system-ssh transport + cross-arch bootstrap
-internal/sync/           git-aware walk, diff, wire protocol
-internal/remote/         detached-run script + command builders
+gru/      gru, the Go CLI: go.mod, main.go, internal/, Makefile
+minion/   minion, the Rust runner: Cargo.toml, src/, README.md (usage)
+test/     make e2e: gru and minion end to end, with no ssh and no root
+docs/     this design, GRU.md, MINION.md, RESEARCH.md, and ai/SKILL.md (the AI skill for gru)
 ```
 
-Build: `make build` (host), `make cross` (linux amd64/arm64 agents), `make install` (→ `~/.local/bin`, incl. cross agents). Dev shell via `flake.nix` (Go toolchain).
+The root `Makefile` builds and tests both (`make build`, `make test`, `make e2e`); `flake.nix`
+gives Go and Rust.
 
-## Known limitations
+## Status and plan
 
-- `sync --delete` mirrors: it removes remote files that are absent locally and not covered by `exclude`. Excluded paths (e.g. `build/`) are protected; other remote-only files are removed by design.
-- Change detection is by size + mtime at 1-second resolution; a same-size in-place edit within the same second as the recorded mtime may be missed.
-- `kill` relies on `setsid` for clean process-group termination (present on Linux). On hosts without it (bare macOS) the wrapper's children may survive.
-- `run.json` `dirty`/`git` reflect the whole repo, not just the synced subtree.
-
-## Deferred
-
-`watch` (sync-on-save loop), batch/sweep scheduler, `pack`/`unpack` compression, richer `run.json`, and the Emacs elisp frontend (the binary already emits `--json` + clean exit codes for it).
-
-Energy experiments (a host-side runner with reversible machine state, a local queue and low-overhead meters): see [ENERGY.md](ENERGY.md).
+- **gru**: v1 works, with the changes minion needed merged: a state dir per host, unique UTC job
+  ids, an agent per build, quiet attach, provenance and notify for tasks
+  ([list](MINION.md#gru-changes)).
+- **minion**: the state engine (governor, turbo, idle states), `run` with the `time` and `rapl`
+  meters, and `queue` with the queue lock, reap and notifications are merged. `make e2e` runs them
+  through gru on a fake sysfs in CI; real RAPL and cpufreq writes, sudo, real ssh and several
+  hosts still need a real machine.
+- **Next** ([plan](MINION.md#plan)): meters, noise record and isolation; the opt-in machine lock;
+  several machines; GPU and device state; a boot unit; the RQ3 analysis. Open questions are in
+  [MINION.md](MINION.md#open-questions).

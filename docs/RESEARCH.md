@@ -1,6 +1,6 @@
-# Energy runner — research
+# minion — research
 
-What existing tools and Linux mechanisms offer for the design in [ENERGY.md](ENERGY.md), and
+What existing tools and Linux mechanisms offer for the design in [MINION.md](MINION.md), and
 which features are worth adding. Searched 2026-11-23; tool docs and source were read from each
 project's default branch on that date and may change.
 
@@ -224,7 +224,7 @@ survives a reboot unless it says so.
 ## 4. Features worth adding (ranked)
 
 Ranked by how much each helps the project's questions per unit of work. "In design" means it is
-already in [ENERGY.md](ENERGY.md).
+already in [MINION.md](MINION.md).
 
 1. **A/A and injected-regression modes.** They give the false-positive rate and the detection rate
    against the number of runs, which is RQ3, and nobody reports them for energy. Sources: Laaber
