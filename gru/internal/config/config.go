@@ -9,7 +9,9 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strings"
 )
 
 type Config struct {
@@ -107,6 +109,18 @@ type Template struct {
 	Tasks     map[string]string `json:"tasks"`
 }
 
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// validate refuses a bad notify block, and an env name the job's export would fail on.
+func (t Template) validate() error {
+	for _, e := range t.Env {
+		if k, _, _ := strings.Cut(e, "="); !envName.MatchString(k) {
+			return fmt.Errorf("env %q: not a variable name", e)
+		}
+	}
+	return t.Notify.Validate()
+}
+
 // TaskNames lists the template's tasks by name.
 func (t Template) TaskNames() []string {
 	return slices.Sorted(maps.Keys(t.Tasks))
@@ -140,7 +154,7 @@ func Load() (*Config, error) {
 	}
 	for name, t := range c.Templates {
 		if err == nil {
-			if err = t.Notify.Validate(); err != nil {
+			if err = t.validate(); err != nil {
 				err = fmt.Errorf("template %s: %w", name, err)
 			}
 		}
