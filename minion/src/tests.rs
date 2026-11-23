@@ -1,6 +1,7 @@
 use std::fs::{self, File};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering::SeqCst;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -796,7 +797,7 @@ fn sigterm_stops_the_queue_restores_and_releases_the_lock() {
     let before = snapshot(&f.sys).unwrap();
     let t = Instant::now();
     let (code, dir) = f.queue(json!({
-        "name": "term", "profiles": {"fast": stable()},
+        "name": "term", "profiles": {"fast": stable(), "factory": {}},
         "workloads": {"w": {"cmd": ["sh", "-c", "sleep 0.1; kill -TERM $PPID; sleep 5"]}}, "reps": 3,
     }));
     assert!(
@@ -812,8 +813,25 @@ fn sigterm_stops_the_queue_restores_and_releases_the_lock() {
     assert_eq!(ev[1]["status"], "signal 15");
     assert_eq!(ev[3]["status"], "stopped");
     assert_eq!(fs::read_dir(dir.join("runs")).unwrap().count(), 1);
+    // The second run's profile is never applied.
+    assert_eq!(
+        f.done(),
+        ["open", "saved", "apply", "applied", "restored", "close"]
+    );
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(f.lock_is_free());
+}
+
+#[test]
+fn a_stop_just_before_the_workload_starts_reaches_it() {
+    let _serial = serial();
+    let f = Fake::new("stop-early");
+    let meters = crate::run::meters(&f.sys, &[]).unwrap();
+    let cmd = crate::queue::workload("sleep", &strings(&["5"]), "none");
+    crate::run::STOP.store(15, SeqCst);
+    let measured = crate::run::measure(&f.sys, &meters, cmd);
+    crate::run::STOP.store(0, SeqCst);
+    assert_eq!(measured.unwrap().1.signal(), Some(15));
 }
 
 #[test]
