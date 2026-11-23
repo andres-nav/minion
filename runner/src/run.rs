@@ -1,8 +1,10 @@
 use std::fs::{self, File};
+use std::iter;
 use std::os::unix::fs::FileExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 
 use serde_json::{Map, Value, json};
 
@@ -178,6 +180,22 @@ fn max_power_uw(dir: &Path) -> Option<u64> {
         .max()
 }
 
+/// The pid of the command being measured, or 0.
+pub static WORKLOAD: AtomicI32 = AtomicI32::new(0);
+
+/// The named meters, opened once. `time` is always read, first: it gives the duration.
+pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, String> {
+    let mut meters: Vec<Box<dyn Meter>> = vec![Box::new(Clock)];
+    for n in names {
+        match n.as_str() {
+            "time" => {}
+            "rapl" => meters.push(Box::new(Rapl::open(sys))),
+            _ => return Err(format!("unknown meter {n:?}")),
+        }
+    }
+    Ok(meters)
+}
+
 /// Runs cmd, reading every meter right before it starts and right after it
 /// exits, and writes run.json to out. Returns the command's exit code.
 pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, String> {
@@ -188,16 +206,37 @@ pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, Stri
     if out.exists() {
         return Err(format!("{} exists", out.display()));
     }
-    let meters: [Box<dyn Meter>; 2] = [Box::new(Clock), Box::new(Rapl::open(sys))];
-    let before = settings::snapshot(sys)?;
+    let meters = meters(sys, &["rapl".into()])?;
     let mut command = Command::new(prog);
     command.args(args);
+    let (run, status) = measure(sys, &meters, command)?;
+    write_new(out, &run)?;
+    Ok(status.code().unwrap_or(128 + status.signal().unwrap_or(0)) as u8)
+}
 
-    let start = read_all(&meters)?;
-    let status = command.status();
-    let end = read_all(&meters)?;
+/// Runs command, reading the meters right before it starts and right after it
+/// exits, and logs the warnings. Returns the run record and the exit status.
+pub fn measure(
+    sys: &Path,
+    meters: &[Box<dyn Meter>],
+    mut command: Command,
+) -> Result<(Value, ExitStatus), String> {
+    let cmd: Vec<_> = iter::once(command.get_program())
+        .chain(command.get_args())
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let before = settings::snapshot(sys)?;
 
-    let status = status.map_err(|e| format!("run {prog}: {e}"))?;
+    let start = read_all(meters)?;
+    let status = command.spawn().and_then(|mut child| {
+        WORKLOAD.store(child.id() as i32, SeqCst);
+        let status = child.wait();
+        WORKLOAD.store(0, SeqCst);
+        status
+    });
+    let end = read_all(meters)?;
+
+    let status = status.map_err(|e| format!("run {}: {e}", cmd[0]))?;
     let after = settings::snapshot(sys)?;
     let secs = (end[0][0] - start[0][0]) as f64 / 1e9;
     let mut report = Map::new();
@@ -211,17 +250,21 @@ pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, Stri
     if drift {
         warnings.push("the settings changed during the run (drift)".into());
     }
+    for w in warnings {
+        eprintln!("{}: WARNING: {w}", env!("CARGO_PKG_NAME"));
+    }
     let run = json!({
         "cmd": cmd, "exit": status.code(), "signal": status.signal(),
         "meters": report, "state": {"before": before, "after": after}, "drift": drift,
     });
-    File::create_new(out)
-        .and_then(|f| serde_json::to_writer_pretty(f, &run).map_err(Into::into))
-        .map_err(|e| format!("write {}: {e}", out.display()))?;
-    for w in warnings {
-        eprintln!("{}: WARNING: {w}", env!("CARGO_PKG_NAME"));
-    }
-    Ok(status.code().unwrap_or(128 + status.signal().unwrap_or(0)) as u8)
+    Ok((run, status))
+}
+
+/// Writes v to a new file: a result is never overwritten.
+pub fn write_new(path: &Path, v: &Value) -> Result<(), String> {
+    File::create_new(path)
+        .and_then(|f| serde_json::to_writer_pretty(f, v).map_err(Into::into))
+        .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 fn read_all(meters: &[Box<dyn Meter>]) -> Result<Vec<Vec<u64>>, String> {

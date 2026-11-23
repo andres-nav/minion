@@ -1,9 +1,12 @@
-use std::fs;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::engine::{apply, restore, status};
+use crate::queue::{SplitMix64, parse, plan, utc};
 use crate::settings::{State, snapshot};
 
 /// A fake sysfs (2 CPUs, 2 policies, 3 idle states, intel_pstate) and a state dir in a temp dir.
@@ -224,10 +227,12 @@ fn overrides_are_refused_as_root() {
     for a in [
         args(&["--sysfs", "/tmp/x"]),
         args(&["--state-dir", "/tmp/x"]),
+        args(&["--lock", "/tmp/x"]),
     ] {
         assert!(crate::parse_opts(&a, 0).is_err());
-        assert!(crate::parse_opts(&a, 1000).is_ok());
+        assert!(crate::parse_opts(&a, 1000).unwrap().test);
     }
+    assert!(!crate::parse_opts(&args(&["q.json"]), 0).unwrap().test);
     let o = crate::parse_opts(&[], 0).unwrap();
     assert_eq!(
         (o.sysfs.to_str(), o.state_dir.to_str()),
@@ -260,6 +265,7 @@ impl Fake {
 
     /// Runs sh -c script under the runner and returns its exit code and run.json.
     fn run(&self, script: &str) -> (u8, serde_json::Value) {
+        let _serial = serial();
         let out = self.root.join("run.json");
         let _ = fs::remove_file(&out);
         let cmd = ["sh", "-c", script].map(String::from);
@@ -369,4 +375,446 @@ fn run_refusals() {
     assert!(crate::run::run(&f.sys, &out, &cmd, 1000).is_err()); // never overwrite a result
     assert!(!marker.exists());
     assert_eq!(fs::read_to_string(&out).unwrap(), "old");
+}
+
+/// Tests that run workloads take this: the stop flag, the signal handlers and
+/// the measured pid are process-wide.
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn read_json(path: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+fn events(dir: &Path) -> Vec<Value> {
+    let text = fs::read_to_string(dir.join("events.jsonl")).unwrap();
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn kinds(dir: &Path) -> Vec<String> {
+    events(dir)
+        .iter()
+        .map(|e| e["event"].as_str().unwrap().into())
+        .collect()
+}
+
+impl Fake {
+    fn opts(&self) -> crate::Opts {
+        crate::Opts {
+            sysfs: self.sys.clone(),
+            state_dir: self.state.clone(),
+            lock: self.root.join("lock"),
+            out: "run.json".into(),
+            args: vec![],
+            test: true,
+        }
+    }
+
+    /// Runs queue q, with its results under the fake root and no settle unless
+    /// given. Returns the exit code and the results dir.
+    fn queue(&self, mut q: Value) -> (u8, PathBuf) {
+        let name = q["name"].as_str().unwrap().to_string();
+        q["out"] = json!(self.root.join("results"));
+        if q.get("settle_s").is_none() {
+            q["settle_s"] = json!(0);
+        }
+        let file = self.root.join(format!("{name}.json"));
+        fs::write(&file, q.to_string()).unwrap();
+        let code = crate::queue::run(&self.opts(), &file, 1000).unwrap();
+        let dirs: Vec<_> = fs::read_dir(self.root.join("results"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(&format!("{name}-"))
+            })
+            .collect();
+        assert_eq!(dirs.len(), 1);
+        (code, dirs[0].clone())
+    }
+
+    fn lock_is_free(&self) -> bool {
+        File::open(self.root.join("lock"))
+            .unwrap()
+            .try_lock()
+            .is_ok()
+    }
+}
+
+#[test]
+fn plan_is_seeded_and_every_round_is_complete() {
+    let q = |seed: u64| {
+        parse(&json!({
+            "name": "p", "profiles": {"a": {}, "b": {}, "c": {}},
+            "workloads": {"x": {"cmd": ["true"]}, "y": {"cmd": ["true"]}},
+            "reps": 4, "seed": seed, "out": "results",
+        }))
+        .unwrap()
+    };
+    let order = |seed| {
+        let runs = plan(&q(seed));
+        runs.into_iter()
+            .map(|r| (r.round, r.position, r.profile, r.workload))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(7), order(7));
+    assert_ne!(order(7), order(8));
+
+    let runs = plan(&q(7));
+    assert_eq!(runs.len(), 24);
+    for round in 1..=4 {
+        let this: Vec<_> = runs.iter().filter(|r| r.round == round).collect();
+        let mut pairs: Vec<_> = this
+            .iter()
+            .map(|r| (r.profile.as_str(), r.workload.as_str()))
+            .collect();
+        pairs.sort();
+        let all = [
+            ("a", "x"),
+            ("a", "y"),
+            ("b", "x"),
+            ("b", "y"),
+            ("c", "x"),
+            ("c", "y"),
+        ];
+        assert_eq!(pairs, all);
+        assert_eq!(
+            this.iter().map(|r| r.position).collect::<Vec<_>>(),
+            [1, 2, 3, 4, 5, 6]
+        );
+    }
+    let last = &runs[23];
+    assert_eq!(
+        last.id,
+        format!("0024-{}-{}-r04", last.workload, last.profile)
+    );
+
+    let mut rng = SplitMix64(0);
+    assert_eq!(
+        (rng.next(), rng.next()),
+        (0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4)
+    );
+    assert_eq!(utc(0), "19700101-000000");
+    assert_eq!(utc(951_868_798), "20000229-235958");
+    assert_eq!(utc(1_795_425_125), "20261123-091205");
+}
+
+#[test]
+fn queue_runs_every_run_and_restores() {
+    let _serial = serial();
+    let f = Fake::new("queue");
+    f.zone("intel-rapl:0", "package-0", 0, RANGE, Some(200_000_000));
+    let before = snapshot(&f.sys).unwrap();
+    let log = f.root.join("notify.log");
+    let notify = format!(
+        "echo \"$RUNNER_EVENT|$RUNNER_RUN|$RUNNER_STATUS|$RUNNER_QUEUE\" >> {}",
+        log.display()
+    );
+    let (code, dir) = f.queue(json!({
+        "name": "e2e",
+        "profiles": {"factory": {}, "fast": stable()},
+        "workloads": {"ok": {"cmd": ["sh", "-c", "echo out; echo err >&2"]}, "bad": {"cmd": ["false"]}},
+        "reps": 2, "seed": 7,
+        "notify": {"cmd": ["sh", "-c", notify]},
+    }));
+
+    assert_eq!(code, 1); // the false runs failed
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+    assert!(!f.journal().exists());
+    assert!(f.lock_is_free());
+
+    let plan = read_json(&dir.join("plan.json"));
+    let plan = plan["runs"].as_array().unwrap();
+    let mut dirs: Vec<_> = fs::read_dir(dir.join("runs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    dirs.sort();
+    let ids: Vec<_> = plan.iter().map(|r| r["run"].as_str().unwrap()).collect();
+    assert_eq!(dirs, ids);
+    let mut want = vec!["queue_started"];
+    for r in plan {
+        let d = dir.join("runs").join(r["run"].as_str().unwrap());
+        let run = read_json(&d.join("run.json"));
+        let ok = r["workload"] == "ok";
+        assert_eq!(run["exit"], if ok { 0 } else { 1 });
+        for k in ["run", "round", "position", "workload", "profile"] {
+            assert_eq!(run[k], r[k]);
+        }
+        // factory puts back what fast changed: a run never inherits the one before.
+        let no_turbo = if r["profile"] == "fast" { "1" } else { "0" };
+        assert_eq!(run["state"]["before"]["cpu.turbo"]["no_turbo"], no_turbo);
+        assert_eq!(run["drift"], false);
+        assert!(run["meters"]["rapl"]["zones"]["intel-rapl:0"].is_object());
+        let stdout = fs::read_to_string(d.join("stdout")).unwrap();
+        assert_eq!(stdout, if ok { "out\n" } else { "" });
+        assert!(d.join("stderr").exists());
+        want.push(if ok { "run_done" } else { "run_failed" });
+    }
+    want.extend(["restore_ok", "queue_done"]);
+    assert_eq!(kinds(&dir), want);
+    let done = events(&dir).pop().unwrap();
+    assert_eq!(
+        (&done["status"], &done["detail"]),
+        (&json!("failed"), &json!("8 of 8 runs, 4 failed"))
+    );
+
+    let lines: Vec<_> = events(&dir)
+        .iter()
+        .map(|e| {
+            format!(
+                "{}|{}|{}|{}",
+                e["event"].as_str().unwrap(),
+                e["run"].as_str().unwrap(),
+                e["status"].as_str().unwrap(),
+                e["queue"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        lines
+    );
+
+    let queue = read_json(&dir.join("queue.json"));
+    assert_eq!(queue["given"]["reps"], 2);
+    assert_eq!(queue["resolved"]["seed"], 7);
+    assert_eq!(queue["resolved"]["meters"], json!(["time", "rapl"]));
+    assert_eq!(
+        queue["resolved"]["profiles"]["factory"]["cpu.turbo"]["no_turbo"],
+        "0"
+    );
+    assert_eq!(queue["start"], json!(before));
+    assert_eq!(queue["runner"]["privileged"], "in-process");
+}
+
+#[test]
+fn queue_restores_a_leftover_journal_first() {
+    let _serial = serial();
+    let f = Fake::new("queue-leftover");
+    let before = snapshot(&f.sys).unwrap();
+    apply(&f.sys, &f.state, &stable()).unwrap(); // the open journal of a queue that crashed
+    let (code, dir) = f.queue(json!({
+        "name": "leftover", "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}}, "reps": 1,
+    }));
+    assert_eq!(code, 0);
+    assert_eq!(
+        kinds(&dir),
+        [
+            "restore_ok",
+            "queue_started",
+            "run_done",
+            "restore_ok",
+            "queue_done"
+        ]
+    );
+    assert_eq!(events(&dir)[0]["detail"], "leftover journal");
+    let run = read_json(&dir.join("runs/0001-ok-factory-r01/run.json"));
+    assert_eq!(run["state"]["before"], json!(before));
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+}
+
+#[test]
+fn a_second_queue_waits_for_the_lock() {
+    let _serial = serial();
+    let f = Fake::new("queue-lock");
+    let before = snapshot(&f.sys).unwrap();
+    let started = f.root.join("started");
+    let q = |name: &str, script: String| {
+        json!({"name": name, "profiles": {"fast": stable()},
+               "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 1})
+    };
+    let ((ca, a), (cb, b)) = std::thread::scope(|s| {
+        let a = s.spawn(|| f.queue(q("a", format!("touch {}; sleep 1", started.display()))));
+        let t = Instant::now();
+        while !started.exists() {
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "queue a did not start"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let b = s.spawn(|| f.queue(q("b", "true".into())));
+        (a.join().unwrap(), b.join().unwrap())
+    });
+
+    assert_eq!((ca, cb), (0, 0));
+    let a_id = a.file_name().unwrap().to_str().unwrap().to_string();
+    let b_started = &events(&b)[0];
+    assert_eq!(b_started["event"], "queue_started");
+    let detail = b_started["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("waited") && detail.contains(&a_id),
+        "{detail}"
+    );
+    assert!(b_started["time"].as_u64() >= events(&a).last().unwrap()["time"].as_u64());
+    assert_eq!(
+        kinds(&b),
+        ["queue_started", "run_done", "restore_ok", "queue_done"]
+    );
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+    assert!(f.lock_is_free());
+}
+
+#[test]
+fn sigterm_stops_the_queue_restores_and_releases_the_lock() {
+    let _serial = serial();
+    let f = Fake::new("queue-term");
+    let before = snapshot(&f.sys).unwrap();
+    let t = Instant::now();
+    let (code, dir) = f.queue(json!({
+        "name": "term", "profiles": {"fast": stable()},
+        "workloads": {"w": {"cmd": ["sh", "-c", "sleep 0.1; kill -TERM $PPID; sleep 5"]}}, "reps": 3,
+    }));
+    assert!(
+        t.elapsed() < Duration::from_secs(4),
+        "the workload was not stopped"
+    );
+    assert_eq!(code, 128 + 15);
+    assert_eq!(
+        kinds(&dir),
+        ["queue_started", "run_failed", "restore_ok", "queue_done"]
+    );
+    let ev = events(&dir);
+    assert_eq!(ev[1]["status"], "signal 15");
+    assert_eq!(ev[3]["status"], "stopped");
+    assert_eq!(fs::read_dir(dir.join("runs")).unwrap().count(), 1);
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+    assert!(f.lock_is_free());
+}
+
+#[test]
+fn a_failing_notify_does_not_fail_the_queue() {
+    let _serial = serial();
+    let f = Fake::new("queue-notify");
+    for (name, cmd) in [
+        ("exits", json!(["false"])),
+        ("missing", json!(["/nonexistent/notify"])),
+    ] {
+        let (code, dir) = f.queue(json!({
+            "name": name, "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}},
+            "reps": 2, "notify": {"cmd": cmd},
+        }));
+        assert_eq!(code, 0);
+        assert_eq!(
+            kinds(&dir),
+            [
+                "queue_started",
+                "run_done",
+                "run_done",
+                "restore_ok",
+                "queue_done"
+            ]
+        );
+        assert_eq!(events(&dir).pop().unwrap()["status"], "ok");
+    }
+}
+
+#[test]
+fn bad_queues_are_refused_before_anything_runs() {
+    let f = Fake::new("queue-refused");
+    let ok = json!({
+        "name": "q", "profiles": {"p": {}}, "workloads": {"w": {"cmd": ["true"]}}, "reps": 1,
+        "out": f.root.join("results"),
+    });
+    let with = |k: &str, v: Value| {
+        let mut q = ok.clone();
+        q[k] = v;
+        q
+    };
+    let file = f.root.join("q.json");
+    for q in [
+        with("colour", json!("red")),
+        with("profiles", json!({"p": {"cpu.freq": {"policy0": "1000"}}})),
+        with(
+            "profiles",
+            json!({"p": {"cpu.governor": {"policy0": "fast"}}}),
+        ),
+        with("profiles", json!({})),
+        with("workloads", json!({"w": {"cmd": ["true"], "env": {}}})),
+        with("workloads", json!({"w": {"cmd": []}})),
+        with("workloads", json!({"../w": {"cmd": ["true"]}})),
+        with("name", json!("../up")),
+        with("reps", json!(0)),
+        with("seed", json!(-1)),
+        with("settle_s", json!(-1)),
+        with("meters", json!(["time", "gpu"])),
+        with("notify", json!({"cmd": ["true"], "events": []})),
+    ] {
+        fs::write(&file, q.to_string()).unwrap();
+        assert!(
+            crate::queue::run(&f.opts(), &file, 1000).is_err(),
+            "accepted {q}"
+        );
+    }
+    fs::write(&file, ok.to_string()).unwrap();
+    assert!(crate::queue::run(&f.opts(), &file, 0).is_err()); // root
+    assert!(!f.root.join("results").exists());
+    assert!(!f.root.join("lock").exists());
+}
+
+#[test]
+fn privileged_verbs_go_through_sudo() {
+    let c = crate::queue::sudo_command("apply");
+    assert_eq!(c.get_program().to_str(), Some("sudo"));
+    let args: Vec<_> = c.get_args().map(|a| a.to_str().unwrap()).collect();
+    assert_eq!(args, ["-n", "energy-runner", "apply"]);
+}
+
+#[test]
+fn drift_is_flagged_and_the_next_run_reapplies() {
+    let _serial = serial();
+    let f = Fake::new("queue-drift");
+    let gov = f.file("cpufreq/policy0/scaling_governor");
+    let mark = f.root.join("changed");
+    // The first run changes the governor 0.1 s after it ends, while the second settles.
+    let script = format!(
+        "[ -e {m} ] || {{ touch {m}; (sleep 0.1; echo powersave > {g}) & }}",
+        m = mark.display(),
+        g = gov.display()
+    );
+    let (code, dir) = f.queue(json!({
+        "name": "drift", "profiles": {"fast": stable()},
+        "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 3, "settle_s": 0.5,
+    }));
+    assert_eq!(code, 0);
+    let kinds = kinds(&dir);
+    assert_eq!(
+        kinds,
+        [
+            "queue_started",
+            "run_done",
+            "run_done",
+            "drift",
+            "run_done",
+            "restore_ok",
+            "queue_done"
+        ]
+    );
+    let run = |id: &str| read_json(&dir.join("runs").join(id).join("run.json"));
+    let second = run("0002-w-fast-r02");
+    assert_eq!(second["drift"], true);
+    assert_eq!(second["state"]["before"], second["state"]["after"]); // not during the run
+    assert_eq!(
+        second["state"]["before"]["cpu.governor"]["policy0"],
+        "powersave"
+    );
+    let third = run("0003-w-fast-r03");
+    assert_eq!(third["drift"], false);
+    assert_eq!(
+        third["state"]["before"]["cpu.governor"]["policy0"],
+        "performance"
+    );
 }
