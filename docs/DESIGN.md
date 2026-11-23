@@ -78,3 +78,5 @@ Build: `make build` (host), `make cross` (linux amd64/arm64 agents), `make insta
 ## Deferred
 
 `watch` (sync-on-save loop), batch/sweep scheduler, `pack`/`unpack` compression, richer `run.json`, and the Emacs elisp frontend (the binary already emits `--json` + clean exit codes for it).
+
+Energy experiments (a host-side runner with reversible machine state, a local queue and low-overhead meters): see [ENERGY.md](ENERGY.md).
