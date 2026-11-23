@@ -13,12 +13,14 @@ use crate::ffi::{
 };
 use crate::{settings, utc};
 
-/// Something read at the edges of a run, never in between.
+/// Something read at the edges of a run, never in between. Meters nest: the
+/// start reads them last to first, the end first to last, so `time`, first, is
+/// innermost and a slow meter goes last.
 pub trait Meter {
     fn name(&self) -> &'static str;
-    fn read(&self) -> Result<Vec<u64>, String>;
+    fn read(&self) -> Result<Value, String>;
     /// What happened between two readings taken `secs` apart.
-    fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>);
+    fn report(&self, start: &Value, end: &Value, secs: f64) -> (Value, Vec<String>);
 }
 
 /// CLOCK_MONOTONIC and CLOCK_REALTIME in ns. Always the first meter: the
@@ -71,11 +73,11 @@ impl Meter for Clock {
     fn name(&self) -> &'static str {
         "time"
     }
-    fn read(&self) -> Result<Vec<u64>, String> {
-        clocks()
+    fn read(&self) -> Result<Value, String> {
+        clocks().map(Value::from)
     }
-    fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>) {
-        let mut v = edges(&[("start", start), ("end", end)]);
+    fn report(&self, start: &Value, end: &Value, secs: f64) -> (Value, Vec<String>) {
+        let mut v = edges(&[("start", &u64s(start)), ("end", &u64s(end))]);
         v.insert("seconds".into(), json!(secs));
         (v.into(), vec![])
     }
@@ -121,11 +123,11 @@ impl Meter for Rapl {
     fn name(&self) -> &'static str {
         "rapl"
     }
-    fn read(&self) -> Result<Vec<u64>, String> {
+    fn read(&self) -> Result<Value, String> {
         let mut buf = [0u8; 32];
         self.zones
             .iter()
-            .map(|z| {
+            .map(|z| -> Result<u64, String> {
                 let n = z
                     .file
                     .read_at(&mut buf, 0)
@@ -135,14 +137,19 @@ impl Meter for Rapl {
                     .parse()
                     .map_err(|e| format!("{} energy_uj {s:?}: {e}", z.id))
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::from)
     }
     /// Joules are corrected for one wrap of the counter, and left out when the
     /// run was long enough to wrap it twice at the zone's highest power.
-    fn report(&self, start: &[u64], end: &[u64], secs: f64) -> (Value, Vec<String>) {
+    fn report(&self, start: &Value, end: &Value, secs: f64) -> (Value, Vec<String>) {
         let mut zones = Map::new();
         let mut warnings = vec![];
-        for (z, (&a, &b)) in self.zones.iter().zip(start.iter().zip(end)) {
+        for (z, (a, b)) in self
+            .zones
+            .iter()
+            .zip(u64s(start).into_iter().zip(u64s(end)))
+        {
             let uj = if b >= a { b - a } else { b + z.range_uj - a };
             let wrap_s = z.max_uw.map(|w| z.range_uj as f64 / w as f64);
             let joules = wrap_s.is_some_and(|w| secs < w).then(|| uj as f64 / 1e6);
@@ -248,7 +255,8 @@ pub fn measure(
         .collect();
     let before = settings::snapshot(sys)?;
 
-    let start = read_all(meters)?;
+    let mut start = read_all(meters.iter().rev())?;
+    start.reverse();
     let mut pid = 0;
     let status = command.spawn().and_then(|mut child| {
         pid = child.id() as i32;
@@ -260,13 +268,13 @@ pub fn measure(
         WORKLOAD.store(0, SeqCst);
         status
     });
-    let end = read_all(meters);
+    let end = read_all(meters.iter());
     let leftovers = pid > 0 && kill(-pid, SIGKILL) == 0;
     let end = end?;
 
     let status = status.map_err(|e| format!("run {}: {e}", cmd[0]))?;
     let after = settings::snapshot(sys)?;
-    let secs = (end[0][0] - start[0][0]) as f64 / 1e9;
+    let secs = (u64s(&end[0])[0] - u64s(&start[0])[0]) as f64 / 1e9;
     let mut report = Map::new();
     let mut warnings = vec![];
     for (m, (a, b)) in meters.iter().zip(start.iter().zip(&end)) {
@@ -299,6 +307,15 @@ pub fn write_new(path: &Path, v: &Value) -> Result<(), String> {
         .map_err(|e| format!("write {}: {e}", path.display()))
 }
 
-fn read_all(meters: &[Box<dyn Meter>]) -> Result<Vec<Vec<u64>>, String> {
-    meters.iter().map(|m| m.read()).collect()
+fn read_all<'a>(meters: impl Iterator<Item = &'a Box<dyn Meter>>) -> Result<Vec<Value>, String> {
+    meters.map(|m| m.read()).collect()
+}
+
+/// A reading that is an array of counters.
+fn u64s(v: &Value) -> Vec<u64> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_u64)
+        .collect()
 }

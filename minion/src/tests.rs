@@ -513,6 +513,33 @@ fn run_reports_energy_per_zone() {
     assert_eq!(run["state"]["before"], run["state"]["after"]);
 }
 
+/// A meter that reads the monotonic clock, to see where it sits.
+struct Stamp;
+
+impl crate::run::Meter for Stamp {
+    fn name(&self) -> &'static str {
+        "stamp"
+    }
+    fn read(&self) -> Result<Value, String> {
+        Ok(json!(crate::run::clocks()?[0]))
+    }
+    fn report(&self, start: &Value, end: &Value, _: f64) -> (Value, Vec<String>) {
+        (json!([start, end]), vec![])
+    }
+}
+
+#[test]
+fn a_later_meter_is_read_around_the_earlier_ones() {
+    let f = Fake::new("nest");
+    let mut meters = crate::run::meters(&f.sys, &[]).unwrap();
+    meters.push(Box::new(Stamp));
+    let cmd = std::process::Command::new("true");
+    let (run, _) = crate::run::measure(&f.sys, &meters, cmd).unwrap();
+    let (m, t) = (&run["meters"]["stamp"], &run["meters"]["time"]);
+    assert!(m[0].as_u64() < t["start_ns"].as_u64());
+    assert!(m[1].as_u64() > t["end_ns"].as_u64());
+}
+
 #[test]
 fn run_leaves_out_joules_that_may_have_wrapped_twice() {
     let f = Fake::new("run-wrap");
