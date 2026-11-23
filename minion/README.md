@@ -44,7 +44,8 @@ minion run [--out run.json] -- <cmd...>
 
 Runs the command as the user (refused as root) and reads the meters right before it starts and
 right after it exits: no timer and no polling in between, the runner just waits in `waitpid`.
-Meters are plugins (`time` always, `rapl` now). run.json holds the command, its exit code,
+Meters are plugins (`time` always, `rapl` now) and nest: the start reads them last to first and
+the end first to last, so `time` is innermost. run.json holds the command, its exit code,
 `meters.time` (at each edge `CLOCK_MONOTONIC` and `CLOCK_REALTIME` in ns, read back to back, the
 realtime also as `*_utc`, and the duration in seconds from the monotonic clock), `meters.rapl` (per
 zone: counters, joules and mean watts, corrected for one counter wrap), the settings snapshot
