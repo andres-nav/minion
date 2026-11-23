@@ -36,8 +36,8 @@ or tmux, minus the hooks. Setup: [minion/README.md](../minion/README.md#with-gru
   "$GRU_NOTIFY" --subject "$MINION_EVENT $MINION_QUEUE" --body "$MINION_DETAIL"`.
 - **Results and fetch.** minion writes each queue under its `out` dir, relative to the job's
   directory (`remote_dir`), and records the job's `GRU_*` variables (job id, task, host, commit,
-  dirty flag) in `queue.json`. A `fetch` glob over `out` brings it back; `gru fetch <id>` also
-  brings the job's `run.json` and log into `_gru/`.
+  dirty flag) in `queue.json`. A `fetch` glob over `out` brings it back; an attached `gru run` and
+  `gru fetch <id>` also bring the job's `run.json` and log into `_gru/`.
 - **Reap and restore hooks.** The template's `always` hooks, `minion reap` and `sudo -n minion
   restore`, clean up after a runner that died without restoring. `restore` acts only while no
   queue holds the queue lock, and `reap` spares the workloads of the queue that holds it.
