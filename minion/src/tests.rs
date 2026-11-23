@@ -1,4 +1,5 @@
 use std::fs::{self, File};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::SeqCst;
@@ -299,6 +300,18 @@ fn apply_then_restore_gives_the_original() {
 }
 
 #[test]
+fn the_state_dir_is_private() {
+    let f = Fake::new("private");
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    apply(&f.sys, &f.state, &stable()).unwrap();
+    assert_eq!(mode(&f.state), 0o700);
+    assert_eq!(mode(&f.state.join("lock")), 0o600);
+    assert_eq!(mode(&f.journal()), 0o600);
+    restore(&f.sys, &f.state).unwrap();
+    assert_eq!(mode(&f.state.join("done")), 0o700);
+}
+
+#[test]
 fn saved_is_never_overwritten() {
     let f = Fake::new("two-applies");
     let before = snapshot(&f.sys).unwrap();
@@ -527,7 +540,7 @@ fn run_flags_drift() {
 fn run_lists_unreadable_zones() {
     let f = Fake::new("run-unreadable");
     let uj = f.zone("intel-rapl:0", "package-0", 0, RANGE, Some(1));
-    fs::set_permissions(&uj, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    fs::set_permissions(&uj, fs::Permissions::from_mode(0o000)).unwrap();
     let (_, run) = f.run("true");
     assert_eq!(
         run["meters"]["rapl"],
@@ -1132,6 +1145,11 @@ fn restore_refuses_a_lock_that_is_not_a_regular_file() {
         .recv_timeout(Duration::from_secs(5))
         .expect("restore blocked on the FIFO");
     refused(r, "not a regular file");
+
+    fs::remove_file(&lock).unwrap();
+    fs::write(f.root.join("file"), "").unwrap();
+    std::os::unix::fs::symlink(f.root.join("file"), &lock).unwrap();
+    refused(crate::run(&f.restore_args()), "symbolic links");
 }
 
 #[test]
@@ -1247,4 +1265,18 @@ fn a_killed_queues_workload_dies_and_the_next_queue_reaps_its_children() {
     assert_eq!(code, 0);
     wait("the leftover child to be reaped", || !alive(&child));
     assert_eq!(kinds(&dir).last().unwrap(), "queue_done");
+}
+
+#[test]
+fn reap_reads_a_lock_path_with_a_space() {
+    let f = Fake::new("reap-space");
+    let lock = f.root.join("a b/lock");
+    fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    let mark = crate::lock::mark(&lock, "dead-1");
+    let args = strings(&["30"]);
+    let mut leftover = crate::queue::workload("sleep", &args, &mark)
+        .spawn()
+        .unwrap();
+    assert_eq!(crate::lock::reap(&lock), Ok(1));
+    assert_eq!(leftover.wait().unwrap().signal(), Some(9));
 }
