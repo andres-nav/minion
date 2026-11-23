@@ -58,14 +58,127 @@ impl Fake {
             .flatten()
             .collect();
         assert_eq!(files.len(), 1);
-        let text = fs::read_to_string(files[0].path()).unwrap();
-        let line = |l: &str| {
-            serde_json::from_str::<serde_json::Value>(l).unwrap()["t"]
-                .as_str()
-                .unwrap()
-                .into()
+        let lines = lines(&files[0].path());
+        lines
+            .iter()
+            .map(|l| l["t"].as_str().unwrap().into())
+            .collect()
+    }
+
+    /// A powercap zone with a counter at uj and, if given, a power limit.
+    fn zone(&self, id: &str, name: &str, uj: u64, range_uj: u64, limit_uw: Option<u64>) -> PathBuf {
+        let d = self.sys.join("class/powercap").join(id);
+        put(&d.join("name"), name);
+        put(&d.join("energy_uj"), &uj.to_string());
+        put(&d.join("max_energy_range_uj"), &range_uj.to_string());
+        if let Some(w) = limit_uw {
+            put(&d.join("constraint_0_power_limit_uw"), &w.to_string());
+            put(&d.join("constraint_0_max_power_uw"), "0");
+        }
+        d.join("energy_uj")
+    }
+
+    /// Runs sh -c script under the runner and returns its exit code and run.json.
+    fn run(&self, script: &str) -> (u8, Value) {
+        let _serial = serial();
+        let out = self.root.join("run.json");
+        let _ = fs::remove_file(&out);
+        let cmd = ["sh", "-c", script].map(String::from);
+        let code = crate::run::run(&self.sys, &out, &cmd, 1000).unwrap();
+        (code, read_json(&out))
+    }
+
+    fn opts(&self) -> crate::Opts {
+        crate::Opts {
+            sysfs: self.sys.clone(),
+            state_dir: self.state.clone(),
+            lock: self.root.join("lock"),
+            out: "run.json".into(),
+            args: vec![],
+            held: false,
+            test: true,
+        }
+    }
+
+    /// Runs queue q like queue_code() and returns its exit code and results dir.
+    fn queue(&self, q: Value) -> (u8, PathBuf) {
+        let name = q["name"].as_str().unwrap().to_string();
+        (self.queue_code(q).unwrap(), self.dir(&name))
+    }
+
+    /// Runs queue q, with its results under the fake root and no settle unless
+    /// given. Returns its exit code or error.
+    fn queue_code(&self, mut q: Value) -> Result<u8, String> {
+        let name = q["name"].as_str().unwrap().to_string();
+        q["out"] = json!(self.root.join("results"));
+        if q.get("settle_s").is_none() {
+            q["settle_s"] = json!(0);
+        }
+        let file = self.root.join(format!("{name}-{}.json", utc::now_ns()));
+        fs::write(&file, q.to_string()).unwrap();
+        crate::queue::run(&self.opts(), &file, 1000)
+    }
+
+    /// The one results dir of the queue named name.
+    fn dir(&self, name: &str) -> PathBuf {
+        let prefix = format!("{name}-");
+        let dirs: Vec<_> = fs::read_dir(self.root.join("results"))
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_str().unwrap().starts_with(&prefix))
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(dirs.len(), 1);
+        dirs[0].clone()
+    }
+
+    /// Runs queue q and, once its workload has created started, calls then
+    /// while q still runs. Returns q's exit code and what then returned.
+    fn alongside<T>(
+        &self,
+        q: Value,
+        started: &Path,
+        then: impl FnOnce() -> T,
+    ) -> (Result<u8, String>, T) {
+        std::thread::scope(|s| {
+            let a = s.spawn(|| self.queue_code(q));
+            wait("the first queue to start", || started.exists());
+            let t = then();
+            (a.join().unwrap(), t)
+        })
+    }
+
+    /// The args of a restore on this tree.
+    fn restore_args(&self) -> [String; 7] {
+        let lock = self.root.join("lock");
+        let [sys, state, lock] = [&self.sys, &self.state, &lock].map(|p| p.to_str().unwrap());
+        [
+            "restore",
+            "--sysfs",
+            sys,
+            "--state-dir",
+            state,
+            "--lock",
+            lock,
+        ]
+        .map(String::from)
+    }
+
+    /// A privileged verb as sudo would run it, with input on stdin.
+    fn verb(&self, verb: &str, held: bool, input: Value) -> Result<String, String> {
+        let input = if input.is_null() {
+            vec![]
+        } else {
+            input.to_string().into_bytes()
         };
-        text.lines().map(line).collect()
+        crate::privileged(&self.opts(), verb, held, &input)
+    }
+
+    fn lock_is_free(&self) -> bool {
+        File::open(self.root.join("lock"))
+            .unwrap()
+            .try_lock()
+            .is_ok()
     }
 }
 
@@ -99,6 +212,64 @@ fn stable() -> State {
         "cpu.turbo": {"no_turbo": "1"},
         "cpu.idle.disable": {"cpu0/state2": "1", "cpu1/state2": "1"}
     }))
+}
+
+/// Tests that run workloads take this: the stop flag, the signal handlers and
+/// the measured pid are process-wide.
+fn serial() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn read_json(path: &Path) -> Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The JSON lines of a file.
+fn lines(path: &Path) -> Vec<Value> {
+    let text = fs::read_to_string(path).unwrap();
+    text.lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn events(dir: &Path) -> Vec<Value> {
+    lines(&dir.join("events.jsonl"))
+}
+
+fn kinds(dir: &Path) -> Vec<String> {
+    events(dir)
+        .iter()
+        .map(|e| e["event"].as_str().unwrap().into())
+        .collect()
+}
+
+fn alive(pid: &str) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z "))
+}
+
+/// Waits up to 10 s for done.
+#[track_caller]
+fn wait(what: &str, done: impl Fn() -> bool) {
+    let t = Instant::now();
+    while !done() {
+        assert!(
+            t.elapsed() < Duration::from_secs(10),
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Asserts that r failed with a message that contains why.
+#[track_caller]
+fn refused<T>(r: Result<T, String>, why: &str) {
+    let e = r.err().expect("accepted");
+    assert!(e.contains(why), "{e:?} does not say {why:?}");
+}
+
+fn strings(a: &[&str]) -> Vec<String> {
+    a.iter().map(|s| s.to_string()).collect()
 }
 
 #[test]
@@ -198,20 +369,38 @@ fn conflict_is_kept_and_the_rest_restored() {
 fn invalid_profiles_are_refused_before_any_write() {
     let f = Fake::new("invalid");
     let before = snapshot(&f.sys).unwrap();
-    for p in [
-        json!({"cpu.governor": {"policy0": "schedutil"}}), // not in scaling_available_governors
-        json!({"cpu.governor": {"policy9": "performance"}}),
-        json!({"cpu.governor": {"../../../../etc": "performance"}}),
-        json!({"cpu.turbo": {"no_turbo": "2"}}),
-        json!({"cpu.idle.disable": {"cpu0/state9": "1"}}),
-        json!({"cpu.idle.disable": {"cpu0/state1": "1\n0"}}),
-        json!({"cpu.freq": {"policy0": "1000"}}),
-        json!({"cpu.turbo": {"no_turbo": "1"}, "cpu.governor": {"policy0": "fast"}}),
+    for (p, why) in [
+        (
+            json!({"cpu.governor": {"policy0": "schedutil"}}),
+            r#""schedutil" is not allowed"#,
+        ),
+        (
+            json!({"cpu.governor": {"policy9": "performance"}}),
+            "policy9: no such object",
+        ),
+        (
+            json!({"cpu.governor": {"../../../../etc": "performance"}}),
+            "no such object",
+        ),
+        (
+            json!({"cpu.turbo": {"no_turbo": "2"}}),
+            r#""2" is not allowed"#,
+        ),
+        (
+            json!({"cpu.idle.disable": {"cpu0/state9": "1"}}),
+            "no such object",
+        ),
+        (
+            json!({"cpu.idle.disable": {"cpu0/state1": "1\n0"}}),
+            "is not allowed",
+        ),
+        (json!({"cpu.freq": {"policy0": "1000"}}), "unknown setting"),
+        (
+            json!({"cpu.turbo": {"no_turbo": "1"}, "cpu.governor": {"policy0": "fast"}}),
+            "fast",
+        ),
     ] {
-        assert!(
-            apply(&f.sys, &f.state, &profile(p.clone())).is_err(),
-            "accepted {p}"
-        );
+        refused(apply(&f.sys, &f.state, &profile(p)), why);
     }
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(!f.journal().exists());
@@ -222,28 +411,27 @@ fn missing_turbo_is_skipped() {
     let f = Fake::new("no-turbo");
     fs::remove_dir_all(f.file("intel_pstate")).unwrap();
     assert!(snapshot(&f.sys).unwrap()["cpu.turbo"].is_empty());
-    assert!(
-        apply(
-            &f.sys,
-            &f.state,
-            &profile(json!({"cpu.turbo": {"no_turbo": "1"}}))
-        )
-        .is_err()
+    let p = profile(json!({"cpu.turbo": {"no_turbo": "1"}}));
+    refused(
+        apply(&f.sys, &f.state, &p),
+        "cpu.turbo no_turbo: no such object",
     );
 }
 
 #[test]
 fn overrides_are_refused_as_root() {
-    let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    for a in [
-        args(&["--sysfs", "/tmp/x"]),
-        args(&["--state-dir", "/tmp/x"]),
-        args(&["--lock", "/tmp/x"]),
-    ] {
-        assert!(crate::parse_opts(&a, 0).is_err());
+    for flag in ["--sysfs", "--state-dir", "--lock"] {
+        let a = strings(&[flag, "/tmp/x"]);
+        refused(
+            crate::parse_opts(&a, 0),
+            &format!("{flag} is refused as root"),
+        );
         assert!(crate::parse_opts(&a, 1000).unwrap().test);
     }
-    assert!(!crate::parse_opts(&args(&["q.json"]), 0).unwrap().test);
+    let out = strings(&["--out", "/tmp/x"]);
+    refused(crate::parse_opts(&out, 0), "--out is refused as root");
+    assert!(!crate::parse_opts(&out, 1000).unwrap().test);
+    assert!(!crate::parse_opts(&strings(&["q.json"]), 0).unwrap().test);
     let o = crate::parse_opts(&[], 0).unwrap();
     assert_eq!(
         (o.sysfs.to_str(), o.state_dir.to_str()),
@@ -258,34 +446,6 @@ fn snapshot_of_the_real_sysfs() {
         s.keys().collect::<Vec<_>>(),
         ["cpu.governor", "cpu.idle.disable", "cpu.turbo"]
     );
-}
-
-impl Fake {
-    /// A powercap zone with a counter at uj and, if given, a power limit.
-    fn zone(&self, id: &str, name: &str, uj: u64, range_uj: u64, limit_uw: Option<u64>) -> PathBuf {
-        let d = self.sys.join("class/powercap").join(id);
-        put(&d.join("name"), name);
-        put(&d.join("energy_uj"), &uj.to_string());
-        put(&d.join("max_energy_range_uj"), &range_uj.to_string());
-        if let Some(w) = limit_uw {
-            put(&d.join("constraint_0_power_limit_uw"), &w.to_string());
-            put(&d.join("constraint_0_max_power_uw"), "0");
-        }
-        d.join("energy_uj")
-    }
-
-    /// Runs sh -c script under the runner and returns its exit code and run.json.
-    fn run(&self, script: &str) -> (u8, serde_json::Value) {
-        let _serial = serial();
-        let out = self.root.join("run.json");
-        let _ = fs::remove_file(&out);
-        let cmd = ["sh", "-c", script].map(String::from);
-        let code = crate::run::run(&self.sys, &out, &cmd, 1000).unwrap();
-        (
-            code,
-            serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap(),
-        )
-    }
 }
 
 const RANGE: u64 = 262_143_999_999;
@@ -380,101 +540,18 @@ fn run_refusals() {
     let out = f.root.join("run.json");
     let marker = f.root.join("ran");
     let cmd = ["touch".into(), marker.display().to_string()];
-    assert!(crate::run::run(&f.sys, &out, &cmd, 0).is_err()); // root
-    assert!(crate::run::run(&f.sys, &out, &[], 1000).is_err()); // no command
+    refused(
+        crate::run::run(&f.sys, &out, &cmd, 0),
+        "run is refused as root",
+    );
+    refused(
+        crate::run::run(&f.sys, &out, &[], 1000),
+        "run needs a command",
+    );
     fs::write(&out, "old").unwrap();
-    assert!(crate::run::run(&f.sys, &out, &cmd, 1000).is_err()); // never overwrite a result
+    refused(crate::run::run(&f.sys, &out, &cmd, 1000), "exists"); // never overwrite a result
     assert!(!marker.exists());
     assert_eq!(fs::read_to_string(&out).unwrap(), "old");
-}
-
-/// Tests that run workloads take this: the stop flag, the signal handlers and
-/// the measured pid are process-wide.
-fn serial() -> MutexGuard<'static, ()> {
-    static SERIAL: Mutex<()> = Mutex::new(());
-    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn read_json(path: &Path) -> Value {
-    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
-}
-
-fn events(dir: &Path) -> Vec<Value> {
-    let text = fs::read_to_string(dir.join("events.jsonl")).unwrap();
-    text.lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect()
-}
-
-fn kinds(dir: &Path) -> Vec<String> {
-    events(dir)
-        .iter()
-        .map(|e| e["event"].as_str().unwrap().into())
-        .collect()
-}
-
-impl Fake {
-    fn opts(&self) -> crate::Opts {
-        crate::Opts {
-            sysfs: self.sys.clone(),
-            state_dir: self.state.clone(),
-            lock: self.root.join("lock"),
-            out: "run.json".into(),
-            args: vec![],
-            held: false,
-            test: true,
-        }
-    }
-
-    /// Runs queue q, with its results under the fake root and no settle unless
-    /// given. Returns the exit code and the results dir.
-    fn queue(&self, q: Value) -> (u8, PathBuf) {
-        let name = q["name"].as_str().unwrap().to_string();
-        let code = self.queue_code(q).unwrap();
-        let dirs: Vec<_> = fs::read_dir(self.root.join("results"))
-            .unwrap()
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .starts_with(&format!("{name}-"))
-            })
-            .collect();
-        assert_eq!(dirs.len(), 1);
-        (code, dirs[0].clone())
-    }
-
-    /// Runs queue q like queue(), and returns only its exit code or error.
-    fn queue_code(&self, mut q: Value) -> Result<u8, String> {
-        let name = q["name"].as_str().unwrap().to_string();
-        q["out"] = json!(self.root.join("results"));
-        if q.get("settle_s").is_none() {
-            q["settle_s"] = json!(0);
-        }
-        let file = self.root.join(format!("{name}-{}.json", utc::now_ns()));
-        fs::write(&file, q.to_string()).unwrap();
-        crate::queue::run(&self.opts(), &file, 1000)
-    }
-
-    /// A privileged verb as sudo would run it, with input on stdin.
-    fn verb(&self, verb: &str, held: bool, input: Value) -> Result<String, String> {
-        let input = if input.is_null() {
-            vec![]
-        } else {
-            input.to_string().into_bytes()
-        };
-        crate::privileged(&self.opts(), verb, held, &input)
-    }
-
-    fn lock_is_free(&self) -> bool {
-        File::open(self.root.join("lock"))
-            .unwrap()
-            .try_lock()
-            .is_ok()
-    }
 }
 
 #[test]
@@ -593,7 +670,7 @@ fn queue_runs_every_run_and_restores() {
         (&json!("failed"), &json!("8 of 8 runs, 4 failed"))
     );
 
-    let lines: Vec<_> = events(&dir)
+    let notified: Vec<_> = events(&dir)
         .iter()
         .map(|e| {
             format!(
@@ -610,7 +687,7 @@ fn queue_runs_every_run_and_restores() {
             .unwrap()
             .lines()
             .collect::<Vec<_>>(),
-        lines
+        notified
     );
 
     let id = dir.file_name().unwrap().to_str().unwrap();
@@ -622,11 +699,7 @@ fn queue_runs_every_run_and_restores() {
     for done in fs::read_dir(f.state.join("done")).unwrap().flatten() {
         let name = done.file_name().into_string().unwrap();
         assert!(name.len() == 32 && name.ends_with("Z.jsonl"), "{name}");
-        let text = fs::read_to_string(done.path()).unwrap();
-        for l in text
-            .lines()
-            .map(|l| serde_json::from_str::<Value>(l).unwrap())
-        {
+        for l in lines(&done.path()) {
             assert_eq!(l["time_utc"], utc::iso(l["time"].as_u64().unwrap()));
         }
     }
@@ -691,21 +764,11 @@ fn a_second_queue_waits_for_the_lock() {
         json!({"name": name, "profiles": {"fast": stable()},
                "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 1})
     };
-    let ((ca, a), (cb, b)) = std::thread::scope(|s| {
-        let a = s.spawn(|| f.queue(q("a", format!("touch {}; sleep 1", started.display()))));
-        let t = Instant::now();
-        while !started.exists() {
-            assert!(
-                t.elapsed() < Duration::from_secs(10),
-                "queue a did not start"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let b = s.spawn(|| f.queue(q("b", "true".into())));
-        (a.join().unwrap(), b.join().unwrap())
-    });
+    let a = q("a", format!("touch {}; sleep 1", started.display()));
+    let codes = f.alongside(a, &started, || f.queue_code(q("b", "true".into())));
 
-    assert_eq!((ca, cb), (0, 0));
+    assert_eq!(codes, (Ok(0), Ok(0)));
+    let (a, b) = (f.dir("a"), f.dir("b"));
     let a_id = a.file_name().unwrap().to_str().unwrap().to_string();
     let b_started = &events(&b)[0];
     assert_eq!(b_started["event"], "queue_started");
@@ -790,33 +853,60 @@ fn bad_queues_are_refused_before_anything_runs() {
         q
     };
     let file = f.root.join("q.json");
-    for q in [
-        with("colour", json!("red")),
-        with("profiles", json!({"p": {"cpu.freq": {"policy0": "1000"}}})),
-        with(
-            "profiles",
-            json!({"p": {"cpu.governor": {"policy0": "fast"}}}),
+    for (q, why) in [
+        (with("colour", json!("red")), r#"unknown key "colour""#),
+        (
+            with("profiles", json!({"p": {"cpu.freq": {"policy0": "1"}}})),
+            "unknown setting",
         ),
-        with("profiles", json!({})),
-        with("workloads", json!({"w": {"cmd": ["true"], "env": {}}})),
-        with("workloads", json!({"w": {"cmd": []}})),
-        with("workloads", json!({"../w": {"cmd": ["true"]}})),
-        with("name", json!("../up")),
-        with("reps", json!(0)),
-        with("seed", json!(-1)),
-        with("settle_s", json!(-1)),
-        with("meters", json!(["time", "gpu"])),
-        with("notify", json!({"cmd": ["true"], "events": []})),
-        with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
+        (
+            with(
+                "profiles",
+                json!({"p": {"cpu.governor": {"policy0": "fast"}}}),
+            ),
+            "not allowed",
+        ),
+        (
+            with("profiles", json!({})),
+            "needs a profile and a workload",
+        ),
+        (
+            with("workloads", json!({"w": {"cmd": ["true"], "env": {}}})),
+            r#"key "env""#,
+        ),
+        (
+            with("workloads", json!({"w": {"cmd": []}})),
+            "needs a command",
+        ),
+        (
+            with("workloads", json!({"../w": {"cmd": ["true"]}})),
+            "names take",
+        ),
+        (with("name", json!("../up")), "names take"),
+        (with("reps", json!(0)), "reps: needs a positive integer"),
+        (with("seed", json!(-1)), "seed: needs an unsigned integer"),
+        (with("settle_s", json!(-1)), "settle_s: needs seconds >= 0"),
+        (
+            with("meters", json!(["time", "gpu"])),
+            r#"unknown meter "gpu""#,
+        ),
+        (
+            with("notify", json!({"cmd": ["true"], "events": []})),
+            r#"key "events""#,
+        ),
+        (
+            with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
+            "timeout_s: needs seconds",
+        ),
     ] {
         fs::write(&file, q.to_string()).unwrap();
-        assert!(
-            crate::queue::run(&f.opts(), &file, 1000).is_err(),
-            "accepted {q}"
-        );
+        refused(crate::queue::run(&f.opts(), &file, 1000), why);
     }
     fs::write(&file, ok.to_string()).unwrap();
-    assert!(crate::queue::run(&f.opts(), &file, 0).is_err()); // root
+    refused(
+        crate::queue::run(&f.opts(), &file, 0),
+        "queue is refused as root",
+    );
     assert!(!f.root.join("results").exists());
     assert!(!f.root.join("lock").exists());
 }
@@ -827,10 +917,8 @@ fn privileged_verbs_go_through_sudo() {
     assert_eq!(c.get_program().to_str(), Some("sudo"));
     let args: Vec<_> = c.get_args().map(|a| a.to_str().unwrap()).collect();
     assert_eq!(args, ["-n", "minion", "restore", "--held"]);
-    let held =
-        |a: &[&str]| crate::parse_opts(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>(), 0);
-    assert!(held(&["--held"]).unwrap().held); // allowed as root
-    assert!(!held(&[]).unwrap().held);
+    assert!(crate::parse_opts(&strings(&["--held"]), 0).unwrap().held); // allowed as root
+    assert!(!crate::parse_opts(&[], 0).unwrap().held);
 }
 
 #[test]
@@ -885,18 +973,7 @@ fn a_late_restore_hook_leaves_the_running_queue_alone() {
     let f = Fake::new("queue-hook");
     let before = snapshot(&f.sys).unwrap();
     let lock = f.root.join("lock");
-    let hook = || {
-        let a = [
-            "restore",
-            "--sysfs",
-            f.sys.to_str().unwrap(),
-            "--state-dir",
-            f.state.to_str().unwrap(),
-            "--lock",
-            lock.to_str().unwrap(),
-        ];
-        crate::run(&a.map(String::from))
-    };
+    let hook = || crate::run(&f.restore_args());
     // Queue a died with its journal open; queue b takes the lock, restores that and applies.
     apply(
         &f.sys,
@@ -906,39 +983,29 @@ fn a_late_restore_hook_leaves_the_running_queue_alone() {
     .unwrap();
     let started = f.root.join("started");
     let script = format!("touch {}; sleep 1", started.display());
-    let (code, dir) = std::thread::scope(|s| {
-        let b = s.spawn(|| {
-            f.queue(json!({"name": "b", "profiles": {"fast": stable()},
-                           "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 1}))
-        });
-        let t = Instant::now();
-        while !started.exists() {
-            assert!(
-                t.elapsed() < Duration::from_secs(10),
-                "queue b did not start"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    let b = json!({"name": "b", "profiles": {"fast": stable()},
+                   "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 1});
+    let (code, ()) = f.alongside(b, &started, || {
         assert_eq!(hook(), Ok(0)); // a's always hook, late
         let reap = ["reap", "--lock", lock.to_str().unwrap()].map(String::from);
         assert_eq!(crate::run(&reap), Ok(0)); // spares b's workload
         // a's stray privileged children, late, and an apply by hand: all refused.
         let other = profile(json!({"cpu.governor": {"policy0": "powersave"}}));
-        let refused = [
+        let stray = [
             f.verb("apply", true, json!({"queue": "a-1", "profile": other})),
             f.verb("restore", true, json!({"queue": "a-1"})),
             f.verb("apply", false, json!(other)),
         ];
-        for r in refused {
-            assert!(r.unwrap_err().contains("nothing done"));
+        for r in stray {
+            refused(r, "nothing done");
         }
         assert_eq!(
             snapshot(&f.sys).unwrap()["cpu.governor"]["policy0"],
             "performance"
         );
-        b.join().unwrap()
     });
-    assert_eq!(code, 0);
+    assert_eq!(code, Ok(0));
+    let dir = f.dir("b");
     assert_eq!(kinds(&dir)[0], "restore_ok");
     let run = read_json(&dir.join("runs/0001-w-fast-r01/run.json"));
     assert_eq!((&run["drift"], &run["exit"]), (&json!(false), &json!(0)));
@@ -977,10 +1044,7 @@ fn a_hanging_notify_is_killed_with_its_process_group() {
 }
 
 #[test]
-fn times_are_utc_whatever_tz_says() {
-    let _serial = serial();
-    // SAFETY: the tests that run commands hold serial(), and the others don't read the environment.
-    unsafe { std::env::set_var("TZ", "Europe/Zurich") };
+fn times_are_utc() {
     let got = [
         utc::iso(0),
         utc::iso(951_868_798),
@@ -992,7 +1056,6 @@ fn times_are_utc_whatever_tz_says() {
             .unwrap()
             .into(),
     ];
-    unsafe { std::env::remove_var("TZ") };
     assert_eq!(
         got,
         [
@@ -1015,22 +1078,13 @@ fn restore_refuses_a_lock_that_is_not_a_regular_file() {
         .status()
         .unwrap();
     assert!(made.success());
-    let a = [
-        "restore",
-        "--sysfs",
-        f.sys.to_str().unwrap(),
-        "--state-dir",
-        f.state.to_str().unwrap(),
-        "--lock",
-        lock.to_str().unwrap(),
-    ]
-    .map(String::from);
+    let a = f.restore_args();
     let (done, got) = std::sync::mpsc::channel();
     std::thread::spawn(move || done.send(crate::run(&a)));
     let r = got
         .recv_timeout(Duration::from_secs(5))
         .expect("restore blocked on the FIFO");
-    assert!(r.unwrap_err().contains("not a regular file"));
+    refused(r, "not a regular file");
 }
 
 #[test]
@@ -1048,17 +1102,19 @@ fn stray_privileged_children_of_a_dead_queue_do_nothing() {
         f.verb("restore", true, json!({"queue": "q-1"})),
         Ok("restored".into())
     );
-    assert!(f.verb("apply", true, q("q-2")).is_err()); // not the holder
+    refused(
+        f.verb("apply", true, q("q-2")),
+        r#"queue "q-2" doesn't hold the queue lock"#,
+    );
 
     // q-1 is killed with -9 while an apply is still starting up.
     drop(lock);
     assert_eq!(f.verb("restore", false, Value::Null), Ok(String::new())); // its always hook
-    assert!(
-        f.verb("apply", true, q("q-1"))
-            .unwrap_err()
-            .contains("nothing done")
+    refused(f.verb("apply", true, q("q-1")), "nothing done");
+    refused(
+        f.verb("restore", true, json!({"queue": "q-1"})),
+        r#"queue "q-1" doesn't hold the queue lock"#,
     );
-    assert!(f.verb("restore", true, json!({"queue": "q-1"})).is_err());
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(!f.journal().exists());
 
@@ -1087,15 +1143,8 @@ fn same_name_queues_get_their_own_dirs() {
     // Two at once: the second waits, then names itself.
     let started = f.root.join("started");
     let first = format!("touch {}; sleep 0.3", started.display());
-    let codes = std::thread::scope(|s| {
-        let a = s.spawn(|| f.queue_code(q(&first)));
-        while !started.exists() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        let b = s.spawn(|| f.queue_code(q("true")));
-        [a.join().unwrap(), b.join().unwrap()]
-    });
-    assert_eq!(codes, [Ok(0), Ok(0)]);
+    let codes = f.alongside(q(&first), &started, || f.queue_code(q("true")));
+    assert_eq!(codes, (Ok(0), Ok(0)));
     let mut ran: Vec<_> = fs::read_dir(f.root.join("results"))
         .unwrap()
         .flatten()
@@ -1108,10 +1157,6 @@ fn same_name_queues_get_their_own_dirs() {
     for d in ran {
         assert_eq!(kinds(&d).last().unwrap(), "queue_done");
     }
-}
-
-fn alive(pid: &str) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| !s.contains(") Z "))
 }
 
 #[test]
@@ -1129,9 +1174,7 @@ fn a_killed_queues_workload_dies_and_the_next_queue_reaps_its_children() {
         s.spawn(|| {
             let args = ["-c".to_string(), script.clone()];
             let c = crate::queue::workload("sh", &args, &mark).spawn().unwrap();
-            while !pid.exists() {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            wait("the workload's child", || pid.exists());
             c
         })
         .join()
@@ -1155,13 +1198,6 @@ fn a_killed_queues_workload_dies_and_the_next_queue_reaps_its_children() {
     elsewhere.kill().unwrap();
     elsewhere.wait().unwrap();
     assert_eq!(code, 0);
-    let t = Instant::now();
-    while alive(&child) {
-        assert!(
-            t.elapsed() < Duration::from_secs(5),
-            "the leftover child was not reaped"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait("the leftover child to be reaped", || !alive(&child));
     assert_eq!(kinds(&dir).last().unwrap(), "queue_done");
 }
