@@ -1,6 +1,6 @@
-/minion/bin/
+/gru/bin/
 /result
 /.direnv/
 /.claude/
 /.envrc
-/runner/target/
+/minion/target/

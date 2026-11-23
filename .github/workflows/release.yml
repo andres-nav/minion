@@ -29,11 +29,11 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: minion (go test, go vet)
-        run: nix develop --command make -C minion test
+      - name: gru (go test, go vet)
+        run: nix develop --command make -C gru test
 
-      - name: runner (cargo test, cargo clippy)
-        run: nix develop --command sh -c 'cd runner && cargo test && cargo clippy --all-targets -- -D warnings'
+      - name: minion (cargo test, cargo clippy)
+        run: nix develop --command sh -c 'cd minion && cargo test && cargo clippy --all-targets -- -D warnings'
 
   e2e:
     runs-on: ubuntu-latest
@@ -45,7 +45,7 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
 
-      - name: minion + energy-runner end to end (no ssh, no root)
+      - name: gru + minion end to end (no ssh, no root)
         run: nix develop --command make e2e
 
   build:
@@ -74,24 +74,24 @@ jobs:
           # VERSION from `git describe` via -ldflags. CGO off → static, pure-Go
           # cross-compiles cleanly from the Linux runner.
           #
-          # Linux agent binaries minion bootstraps onto remotes (minion/bin/minion-linux-*).
-          nix develop --command make -C minion cross
-          # Host binary for this matrix platform (minion/bin/minion).
+          # Linux agent binaries gru bootstraps onto remotes (gru/bin/gru-linux-*).
+          nix develop --command make -C gru cross
+          # Host binary for this matrix platform (gru/bin/gru).
           nix develop --command env \
             GOOS='${{ matrix.goos }}' GOARCH='${{ matrix.goarch }}' CGO_ENABLED=0 \
-            make -C minion build
+            make -C gru build
 
       - name: Package
         run: |
           set -eu
-          archive="minion-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
-          tar -C minion/bin -czf "$archive" minion minion-linux-amd64 minion-linux-arm64
+          archive="gru-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+          tar -C gru/bin -czf "$archive" gru gru-linux-amd64 gru-linux-arm64
           echo "packaged → $archive"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: minion-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: minion-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
+          name: gru-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: gru-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz
           if-no-files-found: error
 
   release:
