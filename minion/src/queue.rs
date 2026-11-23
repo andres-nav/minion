@@ -11,7 +11,8 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 use crate::ffi::{
-    PR_SET_PDEATHSIG, SIGHUP, SIGINT, SIGKILL, SIGTERM, getppid, kill, prctl, signal,
+    PR_SET_PDEATHSIG, SIGHUP, SIGINT, SIGKILL, SIGTERM, Timespec, getppid, kill, nanosleep, prctl,
+    signal,
 };
 use crate::lock;
 use crate::run::{self, Meter, STOP, WORKLOAD};
@@ -179,7 +180,7 @@ impl Running<'_> {
                     .map_err(|e| format!("apply {}: {e}", r.profile))?;
                 current = Some(&r.profile);
             }
-            std::thread::sleep(self.q.settle);
+            pause(self.q.settle);
             if stopped() {
                 break;
             }
@@ -583,6 +584,21 @@ fn stop_on_signals() {
 
 fn stopped() -> bool {
     STOP.load(SeqCst) != 0
+}
+
+/// Sleeps for d, or until a stop signal, which ends nanosleep early.
+fn pause(d: Duration) {
+    let mut left = Timespec {
+        sec: d.as_secs() as i64,
+        nsec: d.subsec_nanos().into(),
+    };
+    while !stopped() {
+        let req = left;
+        // SAFETY: both point to valid timespecs.
+        if unsafe { nanosleep(&req, &mut left) } == 0 {
+            break;
+        }
+    }
 }
 
 fn exit_text(s: ExitStatus) -> String {

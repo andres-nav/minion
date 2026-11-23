@@ -21,6 +21,7 @@ pub const O_NOFOLLOW: i32 = 0o400000;
 pub const O_NOFOLLOW: i32 = 0o100000;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Timespec {
     pub sec: i64,
     pub nsec: i64,
@@ -33,4 +34,5 @@ unsafe extern "C" {
     pub safe fn prctl(option: i32, arg: u64) -> i32;
     pub fn signal(sig: i32, handler: usize) -> usize;
     pub fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
+    pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
 }

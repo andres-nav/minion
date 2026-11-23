@@ -14,6 +14,11 @@ use crate::queue::{SplitMix64, parse, plan};
 use crate::settings::{State, snapshot};
 use crate::utc;
 
+unsafe extern "C" {
+    safe fn pthread_self() -> usize;
+    safe fn pthread_kill(thread: usize, sig: i32) -> i32;
+}
+
 /// A fake sysfs (2 CPUs, 2 policies, 3 idle states, intel_pstate) and a state dir in a temp dir.
 struct Fake {
     root: PathBuf,
@@ -871,6 +876,29 @@ fn sigterm_stops_the_queue_restores_and_releases_the_lock() {
     );
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(f.lock_is_free());
+}
+
+#[test]
+fn a_stop_during_the_settle_ends_the_queue_at_once() {
+    let _serial = serial();
+    let f = Fake::new("stop-settle");
+    let t = Instant::now();
+    let q = json!({"name": "settle", "profiles": {"fast": stable()},
+        "workloads": {"w": {"cmd": ["true"]}}, "reps": 1, "settle_s": 30});
+    let applied = || fs::read_to_string(f.journal()).is_ok_and(|s| s.contains(r#""t":"applied""#));
+    let queue = pthread_self(); // a signal must reach the queue's thread, as in the one-thread runner
+    let code = std::thread::scope(|s| {
+        s.spawn(|| {
+            wait("the profile to be applied", applied);
+            pthread_kill(queue, crate::ffi::SIGTERM);
+        });
+        f.queue_code(q)
+    });
+    assert_eq!(code, Ok(128 + 15));
+    assert!(
+        t.elapsed() < Duration::from_secs(10),
+        "it stopped only after the settle"
+    );
 }
 
 #[test]

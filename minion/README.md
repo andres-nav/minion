@@ -106,9 +106,9 @@ letters, digits, `.`, `_` and `-`.
   group is killed (`leftovers` in run.json, and a warning). A run whose settings changed during it
   or differ from its profile is flagged `drift`, and the next run applies its profile again. A
   failing workload is recorded and the queue goes on.
-- **End.** At the end, or on SIGTERM, SIGINT or SIGHUP (which also stop the running workload), the
-  queue restores the settings, then releases the lock. It exits 0 when every run succeeded and
-  the restore worked, 128 + the signal when stopped, and 1 otherwise.
+- **End.** At the end, or on SIGTERM, SIGINT or SIGHUP (which also stop the running workload or the
+  settle), the queue restores the settings, then releases the lock. It exits 0 when every run
+  succeeded and the restore worked, 128 + the signal when stopped, and 1 otherwise.
 
 `apply --held` and `restore --held` (from a queue) and `restore` (from the hook below) need a
 sudoers rule that lets the user run them without a password; sudo finds `minion` on its
