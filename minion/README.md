@@ -86,6 +86,13 @@ Runs a whole queue as the user, in the foreground, and puts the settings back at
 settings, objects, values and meters are refused before anything runs. Names take up to 64
 letters, digits, `.`, `_` and `-`.
 
+A `cmd` meter, `{"cmd": [...]}` in `meters` (with `timeout_s`, default 10), is a command that
+prints `name number` lines, for numbers minion can't read itself. It runs at each edge outside the
+other meters, like a workload (in its own process group, killed if the runner dies, marked for
+reap), and its group is killed when it exits, or after `timeout_s`. run.json gets `meters.cmd`
+with the `start` and `end` numbers and their `delta`. A bad line, a failure or a timeout fails
+the run; at the start edge, before the workload starts.
+
 - **Plan.** `reps` rounds; each round runs every (profile, workload) pair once, in an order
   shuffled by Fisher-Yates with splitmix64 from the seed. The whole plan goes to plan.json first.
 - **Profiles.** A profile lists only what it changes. Each one is resolved over the settings at
