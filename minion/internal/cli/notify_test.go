@@ -54,7 +54,7 @@ func TestAgentNotifyRunsHooks(t *testing.T) {
 	cfg := filepath.Join(dir, "notify.json")
 	n := config.Notify{
 		On:  "failure",
-		Run: []string{`printf '%s|%s' "$MINION_SUBJECT" "$TOKEN" > ` + out},
+		Run: []string{`printf '%s|%s|%s' "$MINION_SUBJECT" "$MINION_BODY" "$TOKEN" > ` + out},
 		Env: map[string]string{"TOKEN": "t0k"},
 	}
 	b, _ := json.Marshal(n)
@@ -68,6 +68,13 @@ func TestAgentNotifyRunsHooks(t *testing.T) {
 	}
 	if _, err := os.Stat(out); err == nil {
 		t.Fatal("on: failure fired for exit 0")
+	}
+	// A task's own message skips the gate and replaces the job summary.
+	if code := agentNotify([]string{"--config", cfg, "--subject", "run_failed", "--body", "run 3"}); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	if got, _ := os.ReadFile(out); string(got) != "run_failed|run 3|t0k" {
+		t.Errorf("hook saw %q", got)
 	}
 	t.Setenv("MINION_EXIT", "1")
 	if code := agentNotify([]string{"--config", cfg}); code != 0 {
