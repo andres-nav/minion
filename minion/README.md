@@ -93,7 +93,7 @@ letters, digits, `.`, `_` and `-`.
   reboot), held to the end. A second queue logs the holder's id and sleeps in the kernel until
   the lock is free, then runs. Where `/run/lock` is root's and 0755 (Fedora, RHEL, Amazon Linux),
   root creates the file at boot, e.g. with the tmpfiles.d line
-  `f /run/lock/minion.lock 0666 root root -`.
+  `f /run/lock/minion.lock 0666 root root -`; until then a queue stops with that hint.
 - **Start.** In this order: take the lock; choose the queue id (`<name>-<UTC time>`, or with `-2`,
   `-3`, ... if a queue of that name started in the same second) and write it into the lock; reap
   the leftover workloads of a queue that died; restore a leftover journal (`sudo -n minion
@@ -186,11 +186,12 @@ reaps and restores before its first run, and the hooks leave it alone.
 
 `journal.jsonl` in the state dir, one fsynced JSON line per step: `open`, `saved` (the full
 original state, written once), `apply` (the intent), `applied` (the read-back), `restored`,
-`close`. Each line has `time` (epoch seconds) and `time_utc`. On close it moves to
-`done/<YYYYMMDDTHHMMSS.nnnnnnnnnZ>.jsonl`. `restore` puts back every saved value except
-objects that differ from both the saved and the last applied value: someone else changed those, so
-they are kept and reported. After a crash between `apply` and `applied`, every object is restored.
-Restoring twice is harmless.
+`close`. In `applied`, an object the profile doesn't set that someone else changed since the last
+apply keeps its earlier value, so restore keeps theirs. Each line has `time` (epoch seconds) and
+`time_utc`. On close it moves to `done/<YYYYMMDDTHHMMSS.nnnnnnnnnZ>.jsonl`. `restore` puts back
+every saved value except objects that differ from both the saved and the last applied value:
+someone else changed those, so they are kept and reported. After a crash between `apply` and
+`applied`, every object is restored. Restoring twice is harmless.
 
 ## Test
 
