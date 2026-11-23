@@ -18,7 +18,7 @@ pub const MARK: &str = "MINION_WORKLOAD";
 /// Takes the queue lock, sleeping in the kernel while another queue holds it.
 /// Returns the lock and, if it waited, for whom.
 pub fn take(path: &Path) -> Result<(File, Option<String>), String> {
-    let err = |e: io::Error| format!("lock {}: {e}", path.display());
+    let err = |e| err(path, e);
     let f = open(path, true).map_err(err)?;
     match f.try_lock() {
         Ok(()) => Ok((f, None)),
@@ -47,7 +47,7 @@ pub fn name(f: &File, id: &str) -> Result<(), String> {
 /// The queue that holds the lock, or None if it is free. Root calls this, so it
 /// never writes the file.
 pub fn held_by(path: &Path) -> Result<Option<String>, String> {
-    let err = |e: io::Error| format!("lock {}: {e}", path.display());
+    let err = |e| err(path, e);
     let f = open(path, false).map_err(err)?;
     match f.try_lock() {
         Ok(()) => Ok(None),
@@ -90,6 +90,17 @@ pub fn reap(path: &Path) -> Result<usize, String> {
 /// What MARK says for a workload of queue id under this lock.
 pub fn mark(path: &Path, id: &str) -> String {
     format!("{} {id}", path.to_string_lossy())
+}
+
+/// Where /run/lock is root's 0755 (Fedora, RHEL, Amazon Linux), says how to fix it.
+fn err(path: &Path, e: io::Error) -> String {
+    let p = path.display();
+    match e.kind() {
+        ErrorKind::PermissionDenied => format!(
+            "lock {p}: {e}; root must create it writable by all, e.g. at boot with the tmpfiles.d line `f {p} 0666 root root -`"
+        ),
+        _ => format!("lock {p}: {e}"),
+    }
 }
 
 /// At most the first 256 bytes, the holder's queue id.
