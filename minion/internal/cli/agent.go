@@ -1,13 +1,17 @@
 package cli
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/andres-nav/minion/minion/internal/config"
 	"github.com/andres-nav/minion/minion/internal/notify"
 	"github.com/andres-nav/minion/minion/internal/sync"
 )
@@ -61,28 +65,35 @@ func cmdAgent(args []string) int {
 		return 0
 	case "notify":
 		return agentNotify(args[1:])
-	case "summary":
-		return agentSummary(args[1:])
+	case "now":
+		fmt.Println(time.Now().UnixNano())
+		return 0
 	default:
 		fmt.Fprintf(os.Stderr, "minion _agent: unknown subcommand %q\n", args[0])
 		return 2
 	}
 }
 
-// agentNotify sends a job-finished notification. Transport config comes from
-// flags (non-secret) and MINION_SMTP_PASS in the environment (secret); the job
-// outcome comes from the MINION_* env the run wrapper exported.
+// agentNotify announces a finished job as the notify block in --config says (a
+// resolved block as JSON, in a file or - for stdin). The outcome comes from the
+// MINION_* env the run wrapper exported. Run hooks also see $MINION_SUBJECT,
+// $MINION_BODY and the block's env.
 func agentNotify(args []string) int {
 	fs := flag.NewFlagSet("notify", flag.ContinueOnError)
-	smtpAddr := fs.String("smtp", "", "SMTP server as host:port")
-	from := fs.String("from", "", "sender address")
-	to := fs.String("to", "", "recipient address(es), comma-separated")
-	user := fs.String("user", "", "SMTP login (defaults to --from)")
+	path := fs.String("config", "", "notify block as JSON: a file, or - for stdin")
 	logPath := fs.String("log", "", "job log file, tailed into the message body")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-
+	if *path == "" {
+		fmt.Fprintln(os.Stderr, "minion _agent notify: missing --config")
+		return 2
+	}
+	n, err := readNotify(*path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "minion _agent notify: %v\n", err)
+		return 1
+	}
 	res := notify.Result{
 		JobID:    os.Getenv("MINION_JOB_ID"),
 		Task:     os.Getenv("MINION_TASK"),
@@ -91,46 +102,47 @@ func agentNotify(args []string) int {
 		Duration: atoiOr(os.Getenv("MINION_DURATION"), 0),
 		LogTail:  tailFile(*logPath, 30),
 	}
-
-	sink := notify.Email{
-		Addr: *smtpAddr,
-		From: *from,
-		To:   splitList(*to),
-		User: *user,
-		Pass: os.Getenv("MINION_SMTP_PASS"),
+	if !n.Fires(res.Exit) {
+		return 0
 	}
-	if err := sink.Send(res.Subject(), res.Body()); err != nil {
-		fmt.Fprintf(os.Stderr, "minion _agent notify: %v\n", err)
-		return 1
+	code := 0
+	if e := n.Email; e != nil {
+		sink := notify.Email{Addr: e.SMTP, From: e.From, To: splitList(e.To), User: e.User, Pass: e.Pass}
+		if err := sink.Send(res.Subject(), res.Body()); err != nil {
+			fmt.Fprintf(os.Stderr, "[minion] notify: email failed: %v\n", err)
+			code = 1
+		}
 	}
-	return 0
+	for _, c := range n.Run {
+		cmd := exec.Command("sh", "-c", c)
+		cmd.Env = append(os.Environ(), "MINION_SUBJECT="+res.Subject(), "MINION_BODY="+res.Body())
+		for _, k := range sortedKeys(n.Env) {
+			cmd.Env = append(cmd.Env, k+"="+n.Env[k])
+		}
+		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "[minion] notify: run hook failed: %v\n", err)
+			code = 1
+		}
+	}
+	return code
 }
 
-// agentSummary prints the job summary composed from the MINION_* env — the same
-// text the email transport uses — so run hooks (e.g. a curl webhook) can send a
-// consistent message via $MINION_SUBJECT / $MINION_BODY. Default prints the
-// one-line subject; --body prints the full body (with --log tailed into it).
-func agentSummary(args []string) int {
-	fs := flag.NewFlagSet("summary", flag.ContinueOnError)
-	body := fs.Bool("body", false, "print the full body instead of the one-line subject")
-	logPath := fs.String("log", "", "job log file, tailed into the body")
-	if err := fs.Parse(args); err != nil {
-		return 2
+func readNotify(path string) (*config.Notify, error) {
+	r := io.Reader(os.Stdin)
+	if path != "-" {
+		f, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		r = f
 	}
-	res := notify.Result{
-		JobID:    os.Getenv("MINION_JOB_ID"),
-		Task:     os.Getenv("MINION_TASK"),
-		Host:     os.Getenv("MINION_HOST"),
-		Exit:     atoiOr(os.Getenv("MINION_EXIT"), -1),
-		Duration: atoiOr(os.Getenv("MINION_DURATION"), 0),
+	n := &config.Notify{}
+	if err := json.NewDecoder(r).Decode(n); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if *body {
-		res.LogTail = tailFile(*logPath, 30)
-		fmt.Print(res.Body())
-	} else {
-		fmt.Println(res.Subject())
-	}
-	return 0
+	return n, nil
 }
 
 func atoiOr(s string, def int) int {

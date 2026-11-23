@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -113,11 +114,12 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.
 
 	ts := time.Now().Format(tsLayout)
 	job.Dir = rt.dir
+	job.Agent = notifyInvoke(rt)
+	if notif != nil {
+		job.Notify = resolvedNotify(notif)
+	}
 	sha, dirty := gitProvenance(r.Root)
 	id, err := launch(rt.exec, rt.state, ts, func(id, jobDir string) string {
-		if notif != nil {
-			job.Notify = buildNotify(notifyInvoke(rt), jobDir+"/log", notif)
-		}
 		meta := remote.Meta{ID: id, Task: taskName, Host: rt.alias, Git: sha, Dirty: dirty}
 		return remote.Script(rt.dir, jobDir, job, meta)
 	})
@@ -141,11 +143,12 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.
 	// regardless of exit code, since failed runs still leave useful output.
 	if !rt.local && len(r.Template.Fetch) > 0 {
 		dest := fetchDest(r.Root, r.Template.FetchInto, id, ts, filepath.Base(r.Root))
-		if n, ferr := pullResults(rt.exec, rt.invoke, rt.dir, r.Template.Fetch, dest); ferr != nil {
+		if n, ferr := pullResults(rt.exec, rt.invoke, remote.RemotePath(rt.dir), r.Template.Fetch, dest); ferr != nil {
 			fmt.Fprintf(os.Stderr, "minion: fetch failed: %v\n", ferr)
 		} else {
 			fmt.Fprintf(os.Stderr, "fetched %d file(s) to %s\n", n, dest)
 		}
+		pullJob(rt, jobDir, dest)
 	}
 	return code
 }
@@ -188,62 +191,28 @@ func gitOut(dir string, args ...string) string {
 }
 
 // --- job notify wiring -------------------------------------------------------
-// How a job announces itself when it finishes: buildNotify emits the sh snippet
-// appended to the job script; emailInvoke/gate/resolveSecret build the pieces.
-// Shared by the run path and `doctor --notify`.
+// A job announces itself through the agent on the target, which reads the
+// resolved notify block from a file in the job dir. Shared by the run path and
+// `doctor --notify`.
 
-// buildNotify assembles the shell run at the end of a job's script. It resolves
-// ${ENV} secrets on this machine (so credentials never touch the config file or
-// the repo), gates on the configured `on`, invokes the agent for the email sink,
-// and appends any `run` commands (e.g. a curl webhook). Run hooks additionally
-// see $MINION_SUBJECT / $MINION_BODY (the job summary) and any notify.env vars.
-// invoke is the minion binary to call on the target; logPath is the job's log
-// file (passed to the agent for a body tail).
-func buildNotify(invoke, logPath string, n *config.Notify) string {
-	if n.Email == nil && len(n.Run) == 0 {
-		return ""
-	}
-	var b strings.Builder
+// resolvedNotify returns n as one line of JSON with its ${ENV} secrets
+// resolved on this machine, so credentials never live in the config or repo.
+func resolvedNotify(n *config.Notify) string {
+	r := *n
 	if n.Email != nil {
-		if pass := resolveSecret(n.Email.Pass); pass != "" {
-			fmt.Fprintf(&b, "export MINION_SMTP_PASS=%s\n", remote.ShellQuote(pass))
-		}
+		e := *n.Email
+		e.Pass = resolveSecret(e.Pass)
+		r.Email = &e
 	}
-	// notify.env: resolve ${ENV} on this machine and export for the run hooks, so
-	// tokens/keys never land in the config or on the remote's disk.
-	for _, k := range sortedKeys(n.Env) {
-		fmt.Fprintf(&b, "export %s=%s\n", k, remote.ShellQuote(resolveSecret(n.Env[k])))
+	r.Env = map[string]string{}
+	for k, v := range n.Env {
+		r.Env[k] = resolveSecret(v)
 	}
-	fmt.Fprintf(&b, "if %s; then\n", gate(n.On))
-	if len(n.Run) > 0 {
-		// Compose the summary once (same text as email) for the run hooks to send.
-		fmt.Fprintf(&b, "  export MINION_SUBJECT=\"$(%s)\"\n", summaryInvoke(invoke, "", false))
-		fmt.Fprintf(&b, "  export MINION_BODY=\"$(%s)\"\n", summaryInvoke(invoke, logPath, true))
-	}
-	if n.Email != nil {
-		fmt.Fprintf(&b, "  %s || echo '[minion] notify: email failed' >&2\n", emailInvoke(invoke, logPath, n.Email))
-	}
-	for _, c := range n.Run {
-		fmt.Fprintf(&b, "  ( %s ) || echo '[minion] notify: run hook failed' >&2\n", c)
-	}
-	b.WriteString("fi")
-	return b.String()
+	b, _ := json.Marshal(r)
+	return string(b)
 }
 
-// summaryInvoke is the agent call that prints the job summary: the one-line
-// subject by default, or the full body (with a log tail) when body is set.
-func summaryInvoke(invoke, logPath string, body bool) string {
-	parts := []string{invoke, "_agent", "summary"}
-	if body {
-		parts = append(parts, "--body")
-		if logPath != "" {
-			parts = append(parts, "--log", logPath) // unquoted so the remote shell expands ~
-		}
-	}
-	return strings.Join(parts, " ")
-}
-
-// sortedKeys returns the map keys in a stable order (deterministic scripts).
+// sortedKeys returns the map keys in a stable order.
 func sortedKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -251,35 +220,6 @@ func sortedKeys(m map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
-}
-
-// emailInvoke is the agent call that sends the email. Non-secret fields are
-// flags; the password is read from MINION_SMTP_PASS in the environment.
-func emailInvoke(invoke, logPath string, e *config.EmailSink) string {
-	parts := []string{invoke, "_agent", "notify",
-		"--smtp", remote.ShellQuote(e.SMTP),
-		"--from", remote.ShellQuote(e.From),
-		"--to", remote.ShellQuote(e.To),
-	}
-	if e.User != "" {
-		parts = append(parts, "--user", remote.ShellQuote(e.User))
-	}
-	if logPath != "" {
-		parts = append(parts, "--log", logPath) // unquoted so the remote shell expands ~
-	}
-	return strings.Join(parts, " ")
-}
-
-// gate is the test expression deciding whether to notify, based on `on`.
-func gate(on string) string {
-	switch on {
-	case "failure":
-		return `[ "$MINION_EXIT" != 0 ]`
-	case "success":
-		return `[ "$MINION_EXIT" = 0 ]`
-	default: // "always" or unset
-		return "true"
-	}
 }
 
 // resolveSecret expands a ${VAR} or $VAR reference from this machine's
@@ -294,14 +234,14 @@ func resolveSecret(s string) string {
 	return s
 }
 
-// notifyInvoke returns the minion binary to call on the target: the uploaded
-// agent for a remote, or this executable for a local run.
+// notifyInvoke returns the minion binary to call on the target, as one shell
+// word: the uploaded agent for a remote, or this executable for a local run.
 func notifyInvoke(rt *remoteTarget) string {
 	if !rt.local && rt.invoke != "" {
 		return rt.invoke
 	}
 	if exe, err := os.Executable(); err == nil {
-		return exe
+		return remote.ShellQuote(exe)
 	}
 	return "minion"
 }
