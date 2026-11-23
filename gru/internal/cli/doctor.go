@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"maps"
@@ -12,7 +13,8 @@ import (
 	"github.com/andres-nav/minion/gru/internal/remote"
 )
 
-// cmdDoctor checks the config and each host: reachable, and its agent in place.
+// cmdDoctor checks the config and each host: reachable, and its agent and
+// minion in place.
 func cmdDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	host := hostFlag(fs)
@@ -40,7 +42,7 @@ func cmdDoctor(args []string) int {
 			continue
 		}
 		t.Close()
-		fmt.Printf("host %-14s OK    %s, agent %s\n", n, t.alias, t.agent)
+		fmt.Printf("host %-14s OK    %s, agent %s, minion %s\n", n, t.alias, t.agent, cmp.Or(t.minion, "none for this platform"))
 	}
 	if *notify && sendNotifyTest(r, *host) != 0 {
 		problems++
