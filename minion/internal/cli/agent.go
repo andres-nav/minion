@@ -22,6 +22,16 @@ func cmdAgent(args []string) int {
 	case "version":
 		fmt.Printf("minion %s\n", version)
 		return 0
+	case "follow":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "minion _agent follow: missing job dir")
+			return 2
+		}
+		code, err := follow(args[1], os.Stdout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "minion: %v\n", err)
+		}
+		return code
 	case "manifest":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "minion _agent manifest: missing dir")

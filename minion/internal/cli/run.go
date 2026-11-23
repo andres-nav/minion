@@ -132,7 +132,7 @@ func runRemote(rt *remoteTarget, taskName string, job remote.Job, notif *config.
 		return 0
 	}
 
-	code, err := rt.exec.Run(remote.AttachCommand(jobDir), nil, os.Stdout, os.Stderr)
+	code, err := rt.exec.Run(remote.AttachCommand(notifyInvoke(rt), jobDir), nil, os.Stdout, os.Stderr)
 	if err != nil {
 		return errf("detached (job %s still running): %v", id, err)
 	}

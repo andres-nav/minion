@@ -170,14 +170,10 @@ func LaunchCommand(stateDir, id string) string {
 }
 
 // AttachCommand streams the job log from the start and follows until the job
-// finishes, then exits with the job's recorded status.
-func AttachCommand(jobDir string) string {
-	return fmt.Sprintf(
-		"[ -e %[1]s/log ] || { echo 'minion: no such job' >&2; exit 1; }; "+
-			"tail -n +1 -f %[1]s/log & tp=$!; "+
-			"while [ ! -e %[1]s/status ]; do sleep 1; done; sleep 1; kill $tp 2>/dev/null; "+
-			"exit $(cat %[1]s/status 2>/dev/null || echo 0)",
-		jobDir)
+// finishes, then exits with the job's recorded status. agent is the minion
+// agent on the target, as one shell word.
+func AttachCommand(agent, jobDir string) string {
+	return fmt.Sprintf("[ -e %[2]s/log ] || { echo 'minion: no such job' >&2; exit 1; }; %[1]s _agent follow %[2]s", agent, jobDir)
 }
 
 // onThisHost is a shell test: the job in dir was launched on this host.
