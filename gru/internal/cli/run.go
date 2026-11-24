@@ -88,6 +88,10 @@ func cmdRun(args []string) int {
 	job := remote.Job{Task: task, Host: t.alias, Git: sha, Dirty: dirty, Env: tm.Env, Command: command, Args: *arg,
 		Before: tm.Before, OnSuccess: tm.OnSuccess, OnFailure: tm.OnFailure, Always: tm.Always, Notify: notify}
 	id, code := start(t, job, *detach)
+	if code == needsRoot && !*detach && terminal() &&
+		yes(fmt.Sprintf("gru: set up minion's root part on %s now (gru setup)? [y/N] ", t.alias)) && setup(t, false) == 0 {
+		id, code = start(t, job, false)
+	}
 	// Fetch results (remote only — local runs already wrote them in place),
 	// whatever the exit code: failed runs still leave useful output.
 	if id != "" && !t.Local && len(tm.Fetch) > 0 {

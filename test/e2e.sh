@@ -20,17 +20,13 @@ export GRU_TEST_DESTDIR=$T/root
 # test/ssh runs "remote" commands with this home, so ~ differs on both sides.
 export E2E_REMOTE_HOME=$T/rhome
 mkdir -p "$T/bin" "$HOME" "$E2E_REMOTE_HOME" "$T/proj/work"
-ln -s "$root/gru/bin/gru" "$root/test/ssh" "$root/test/sudo" "$T/bin/"
+ln -s "$root/gru/bin/gru" "$root/test/ssh" "$root/test/sudo" "$root/test/visudo" "$T/bin/"
 V=$(gru version | cut -d' ' -f2)
 lib=$GRU_TEST_DESTDIR/usr/local/lib/gru
-# setup does by hand what `gru setup` will: the root copy of this minion build,
-# named as gru names its upload, and the sudoers line that lets serve run.
+# setup [--remove] runs gru setup on the fake host in a terminal, as a user would.
 setup() {
-  mkdir -p "$lib" "$GRU_TEST_DESTDIR/etc/sudoers.d"
-  cp "$M" "$lib/minion-$V-linux-$arch-$(sha256sum < "$M" | cut -c1-12)"
-  echo "$(id -un) ALL=(root) NOPASSWD: $lib/minion-* serve" > "$GRU_TEST_DESTDIR/etc/sudoers.d/gru-minion-$(id -un)"
+  script -qec "gru setup --host fake $*" /dev/null > "$T/setup.out" 2>&1 || { cat "$T/setup.out"; fail "gru setup $*"; }
 }
-setup
 
 cleanup() {
   for p in "$T"/state*/jobs/*/pid; do
@@ -511,21 +507,59 @@ check_exit() {
 check_serve() {
   local u n
   queue perfq 1 "$PERF" "$OK"
-  rm "$GRU_TEST_DESTDIR"/etc/sudoers.d/*
+  gru setup --host fake 2> "$T/noterm.out" && fail "gru setup ran without a terminal"
+  grep -q "run it in a terminal" "$T/noterm.out" || fail "setup without a terminal: no clear message"
+  setup --remove
+  [ ! -e "$lib" ] && ! exists "$GRU_TEST_DESTDIR/etc/sudoers.d/*" || fail "setup --remove left files"
+  gru doctor --host fake | grep -q "root: run gru setup --host fake" || fail "doctor: setup missing not shown"
   want 77 noroot gru run energy --host fake --arg perfq.json
   grep -qF 'minion needs root on fake: run `gru setup --host fake` once in a terminal' "$T/noroot.out" ||
     fail "no setup: no clear message"
   ! exists "$T/remote/proj/results/energy/perfq-*" || fail "a queue without root left results"
   machine_clean
+  # In a terminal, gru run offers the setup and runs the task again.
+  printf 'y\n' | script -qec "gru run energy --host fake --arg perfq.json" /dev/null > "$T/offer.out" 2>&1 ||
+    { cat "$T/offer.out"; fail "gru run after the offer"; }
+  grep -q "set up minion's root part on fake" "$T/offer.out" || fail "no offer"
+  exists "$T/remote/proj/results/energy/perfq-*" || fail "the task didn't run again"
+  gru doctor --host fake | grep -q "root: set up" || fail "doctor: setup not shown"
+  machine_clean
+  [ "$(stat -c %a "$lib"/minion-"$V"-* "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-* | xargs)" = "755 440" ] ||
+    fail "the root copy is not 0755 or the sudoers line not 0440"
+  # The drop-in lets a detached queue, with no tty, start serve.
+  sed -i '/^Defaults!/d' "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-*
+  want 77 tty gru run energy --host fake --arg perfq.json
+  grep -q "must have a tty" "$T/tty.out" || fail "requiretty: not what stopped serve"
+  # sudo-rs has no requiretty, so its visudo refuses that line: setup leaves it out.
+  touch "$GRU_TEST_DESTDIR/sudo-rs"
+  setup
+  ! grep -q requiretty "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-* || fail "sudo-rs: the requiretty line was kept"
+  want 0 sudors gru run energy --host fake --arg perfq.json
+  rm "$GRU_TEST_DESTDIR/sudo-rs"
+  setup
+  grep -q '^Defaults!GRU_MINION_.* !requiretty$' "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-* ||
+    fail "classic sudo: no requiretty line"
+  # Root checks its own copy against the hash in its name.
+  u=$(echo "$T"/state/bin/minion-"$V"-linux-"$arch"-*)
+  command cp "$u" "$T/upload" && echo x >> "$u"
+  script -qec "gru setup --host fake" /dev/null > "$T/changed.out" 2>&1 && fail "setup installed a changed copy"
+  grep -q "changed on the way" "$T/changed.out" || fail "a changed copy: no clear message"
+  command cp "$T/upload" "$u"
+  # Another build of minion (a gru upgrade) needs the setup again.
+  mv "$lib"/minion-"$V"-* "$lib/minion-older"
+  want 77 upgrade gru run energy --host fake --arg perfq.json
+  setup
+  [ -e "$lib/minion-older" ] || fail "setup removed another version"
+
   # A queue that sets nothing needs no root, and calls no sudo.
+  setup --remove
   queue plain 1 "$BASE" "$OK"
   n=$(wc -l < "$GRU_TEST_DESTDIR/sudo.log")
   want 0 plain gru run energy --host fake --arg plain.json
   has "$(echo "$T"/remote/proj/results/energy/plain-*/queue.json)" '"serve":false'
   [ "$(wc -l < "$GRU_TEST_DESTDIR/sudo.log")" = "$n" ] || fail "a queue that sets nothing called sudo"
-
   # A serve killed with -9 leaves its journal open: a queue that sets nothing
-  # then stops without root, and with it restores first.
+  # then stops without root, and gru minion restore gives the machine back.
   u=$(echo "$T"/state/bin/minion-"$V"-linux-"$arch"-*)
   mkfifo "$T/in"
   "$u" serve --sysfs "$sys" --state-dir "$T/runner" < "$T/in" > "$T/serve.out" &
@@ -537,13 +571,15 @@ check_serve() {
   [ "$(stat -c %a "$T/runner") $(stat -c %a "$T/runner/journal.jsonl")" = "711 600" ] ||
     fail "the state dir is not 0711 with a 0600 journal"
   want 77 leftover gru run energy --host fake --arg plain.json
-  grep -q "a previous queue left settings applied on fake" "$T/leftover.out" || fail "leftover: no clear message"
+  grep -qF 'a previous queue left settings applied on fake: run `gru minion restore --host fake`' "$T/leftover.out" ||
+    fail "leftover: no clear message"
   grep -qx performance "$gov" || fail "the leftover was touched without root"
   setup
-  want 0 plain2 gru run energy --host fake --arg plain.json
-  grep -q "leftover journal: restored" "$T/plain2.out" || fail "the leftover was not restored first"
+  gru minion restore $R --host fake | grep -qx restored || fail "gru minion restore"
   machine_clean
-  "$u" restore $R | grep -qx "no journal open" || fail "restore by hand: no clear message"
+  gru minion restore $R --host fake | grep -qx "no journal open" || fail "gru minion restore: no clear message"
+  gru minion snapshot --sysfs "$sys" --host fake | tr -d ' \n' | grep -q '"policy0":"powersave"' ||
+    fail "gru minion snapshot"
   [ "$(stat -c %a "$T/runner/done") $(stat -c %a "$T"/runner/done/* | sort -u)" = "700 600" ] ||
     fail "done/ is not 0700 with 0600 journals"
 }
@@ -557,14 +593,17 @@ check_snapshot() {
   has "$T/run.json" '"time":{'
 }
 
+# Like r740-01: sudo needs a tty unless the drop-in says otherwise.
+mkdir -p "$GRU_TEST_DESTDIR/etc" && echo "Defaults requiretty" > "$GRU_TEST_DESTDIR/etc/sudoers"
+(cd "$T" && setup)
 failed=0
 for c in "remote:remote path (fake ssh)" "localhost:--host localhost" \
   "detach:detach, ps, attach, kill and a crashed runner" "two:two queues and a restore by hand" \
   "cli:every gru option" "utc:every time in UTC (TZ=$TZ)" \
-  "exit:exit codes and broken queue files" "serve:root through serve" \
+  "exit:exit codes and broken queue files" "serve:root through serve and gru setup" \
   "snapshot:snapshot and run on the real /sys"; do
   SECONDS=0
-  if (cd "$T/proj" && "check_${c%%:*}") > "$T/${c%%:*}.log" 2>&1; then
+  if (cd "$T/proj" && "check_${c%%:*}") < /dev/null > "$T/${c%%:*}.log" 2>&1; then
     echo "PASS ${c#*:} ($SECONDS s)"
   else
     echo "FAIL ${c#*:}"

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Stands in for visudo -cf FILE in the e2e test: checks gru's drop-in as
+# classic sudo would, or, if $GRU_TEST_DESTDIR/sudo-rs exists, as sudo-rs
+# would, which has no requiretty setting.
+[ "$1" = -cf ] || exit 2
+if [ -e "$GRU_TEST_DESTDIR/sudo-rs" ] && grep -q requiretty "$2"; then
+  echo "$2: syntax error: unknown setting: 'requiretty'" >&2
+  exit 1
+fi
+grep -q NOPASSWD "$2" || exit 1
+! sed -E 's/GRU_MINION_[A-Z0-9_]+/A/g; s|/[^ ]*/minion-\* serve$|C|; s/^[A-Za-z0-9._-]+ ALL/U ALL/' "$2" |
+  grep -qvx -e 'Cmnd_Alias A = C' -e 'Defaults!A !requiretty' -e 'U ALL=(root) NOPASSWD: A'

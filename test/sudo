@@ -1,9 +1,11 @@
 #!/bin/sh
 # Stands in for sudo in the e2e test: runs the command as this user and logs it
 # to $GRU_TEST_DESTDIR/sudo.log. With -n (no password to ask for) it runs only
-# what a line "<user> ALL=(root) NOPASSWD: <glob> <arg>" in
-# $GRU_TEST_DESTDIR/etc/sudoers.d allows, with any test options after <arg>.
-# With -l it only says so.
+# what gru's drop-in in $GRU_TEST_DESTDIR/etc/sudoers.d lets this user run: its
+# Cmnd_Alias "<glob> <arg>", with any test options after <arg>. -l only says
+# so. If $GRU_TEST_DESTDIR/etc/sudoers has "Defaults requiretty", it needs a
+# tty unless the drop-in's "Defaults!<alias> !requiretty" covers the command,
+# except as sudo-rs ($GRU_TEST_DESTDIR/sudo-rs), which has no requiretty.
 echo "sudo $*" >> "$GRU_TEST_DESTDIR/sudo.log"
 n= l=
 while :; do
@@ -14,13 +16,22 @@ while :; do
   esac
   shift
 done
-if [ -n "$n" ]; then
-  ok=
-  for f in "$GRU_TEST_DESTDIR"/etc/sudoers.d/*; do
-    [ -f "$f" ] && read -r user _ _ cmd arg < "$f" && [ "$user" = "$(id -un)" ] || continue
-    case $1 in $cmd) [ "$2" = "$arg" ] && ok=1 ;; esac
-  done
-  [ -n "$ok" ] || { echo "sudo: a password is required" >&2; exit 1; }
+ok= notty=
+for f in "$GRU_TEST_DESTDIR"/etc/sudoers.d/*; do
+  [ -f "$f" ] || continue
+  while read -r w x y cmd arg; do
+    case $w in
+      Cmnd_Alias) case $1 in $cmd) [ "$2" = "$arg" ] && alias=$x ;; esac ;;
+      "Defaults!$alias") [ -n "$alias" ] && [ "$x" = '!requiretty' ] && notty=1 ;;
+      "$(id -un)") [ -n "$alias" ] && [ "$cmd" = "$alias" ] && ok=1 ;;
+    esac
+  done < "$f"
+done
+if [ ! -e "$GRU_TEST_DESTDIR/sudo-rs" ] && grep -qx 'Defaults requiretty' "$GRU_TEST_DESTDIR/etc/sudoers" 2> /dev/null &&
+  [ -z "$notty" ] && ! tty -s; then
+  echo "sudo: sorry, you must have a tty to run sudo" >&2
+  exit 1
 fi
+[ -z "$n" ] || [ -n "$ok" ] || { echo "sudo: a password is required" >&2; exit 1; }
 [ -z "$l" ] || { echo "$1"; exit 0; }
 exec "$@"
