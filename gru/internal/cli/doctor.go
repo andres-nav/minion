@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"cmp"
 	"flag"
 	"fmt"
 	"maps"
@@ -42,10 +43,7 @@ func cmdDoctor(args []string) int {
 		}
 		root := "no minion for this platform"
 		if t.minion != "" {
-			root = t.minion + ", root: run gru setup --host " + n
-			if _, err := t.Output("m=" + t.minion + `; sudo -n -l "${GRU_TEST_DESTDIR-}/usr/local/lib/gru/${m##*/}" serve`); err == nil {
-				root = t.minion + ", root: set up"
-			}
+			root = t.minion + ", root: " + cmp.Or(serveProbe(t), "set up")
 		}
 		t.Close()
 		fmt.Printf("host %-14s OK    %s, agent %s, minion %s\n", n, t.alias, t.agent, root)

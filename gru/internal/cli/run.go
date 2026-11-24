@@ -86,11 +86,11 @@ func cmdRun(args []string) int {
 	}
 
 	sha, dirty := gitProvenance(r.Root)
-	job := remote.Job{Task: task, Host: t.alias, Git: sha, Dirty: dirty, Env: tm.Env, Command: command, Args: *arg,
+	job := remote.Job{Task: task, Host: t.alias, Name: t.name, Git: sha, Dirty: dirty, Env: tm.Env, Command: command, Args: *arg,
 		Before: tm.Before, OnSuccess: tm.OnSuccess, OnFailure: tm.OnFailure, Always: tm.Always, Notify: notify}
 	id, code := start(t, job, *detach)
 	if code == needsRoot && !*detach && terminal() &&
-		yes(fmt.Sprintf("gru: set up minion's root part on %s now (gru setup)? [y/N] ", t.alias)) && setup(t, false) == 0 {
+		yes(fmt.Sprintf("gru: set up minion's root part on %s now (gru setup)? [y/N] ", t.name)) && setup(t, false) == 0 {
 		id, code = start(t, job, false)
 	}
 	// Fetch results (remote only — local runs already wrote them in place),

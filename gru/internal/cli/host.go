@@ -59,6 +59,7 @@ type target struct {
 	*ssh.Client
 	r      *config.Resolved
 	host   config.Host
+	name   string // what the user passes to --host, for hints
 	alias  string
 	dir    string
 	state  string
@@ -75,7 +76,7 @@ func aim(r *config.Resolved, override string) (*target, error) {
 		return nil, errNoHost
 	}
 	h := r.Config.Hosts[name]
-	t := &target{r: r, host: h, alias: cmp.Or(h.SSH, name), state: cmp.Or(h.StateDir, "~/.gru")}
+	t := &target{r: r, host: h, name: name, alias: cmp.Or(h.SSH, name), state: cmp.Or(h.StateDir, "~/.gru")}
 	if t.alias == "localhost" || t.alias == "local" {
 		exe, err := os.Executable()
 		t.Client, t.dir, t.agent = ssh.Local(), r.Root, remote.ShellQuote(exe)

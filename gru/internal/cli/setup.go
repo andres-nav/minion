@@ -2,8 +2,11 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
+	"cmp"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"slices"
@@ -84,7 +87,31 @@ func setup(t *target, remove bool) int {
 		return errf("gru has no minion for %s", t.alias)
 	}
 	mode := map[bool]string{false: "install", true: "remove"}[remove]
-	return exit(t.Interactive("sh -c " + remote.ShellQuote(setupScript) + " sh " + t.minion + " " + mode))
+	code, err := t.Interactive("sh -c " + remote.ShellQuote(setupScript) + " sh " + t.minion + " " + mode)
+	if code != 0 || err != nil || remove {
+		return exit(code, err)
+	}
+	if why := serveProbe(t); why != "" {
+		return errf("set up, but a queue still can't start serve on %s: %s; a later sudoers rule wins: check `sudo -l` there, gru's drop-in must be the last match", t.name, why)
+	}
+	return 0
+}
+
+// serveProbe makes the call a queue makes, `sudo -n <root copy> serve` with no
+// tty and no input (serve then only says it runs), and returns why it fails:
+// "" if it doesn't.
+func serveProbe(t *target) string {
+	var errb bytes.Buffer
+	probe := "m=" + t.minion + `; c="${GRU_TEST_DESTDIR-}/usr/local/lib/gru/${m##*/}"; [ -x "$c" ] || exit 3; sudo -n "$c" serve`
+	switch code, err := t.Run(probe, nil, io.Discard, &errb); {
+	case err != nil:
+		return err.Error()
+	case code == 3:
+		return "run gru setup --host " + t.name
+	case code != 0:
+		return cmp.Or(strings.TrimSpace(errb.String()), fmt.Sprintf("exit %d", code))
+	}
+	return ""
 }
 
 // cmdMinion runs minion on the host with args, in the project's dir there.
@@ -102,7 +129,8 @@ func cmdMinion(args []string) int {
 	if t.minion == "" {
 		return errf("gru has no minion for %s", t.alias)
 	}
-	cmd := fmt.Sprintf("cd %s 2>/dev/null; GRU_HOST=%s %s", remote.RemotePath(t.dir), remote.ShellQuote(t.alias), t.minion)
+	cmd := fmt.Sprintf("cd %s 2>/dev/null; GRU_HOST=%s GRU_HOST_NAME=%s %s", remote.RemotePath(t.dir),
+		remote.ShellQuote(t.alias), remote.ShellQuote(t.name), t.minion)
 	for _, a := range args {
 		cmd += " " + remote.ShellQuote(a)
 	}

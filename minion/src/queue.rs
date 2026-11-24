@@ -81,7 +81,7 @@ pub fn run(o: &Opts, file: &Path) -> Result<u8, String> {
     let left = !sets && o.state_dir.join("journal.jsonl").exists();
     let root = if left { Root::start(o) } else { root };
     if left && root.is_none() {
-        let h = std::env::var("GRU_HOST").unwrap_or("<host>".into());
+        let h = std::env::var("GRU_HOST_NAME").unwrap_or("<host>".into());
         log(format!(
             "a previous queue left settings applied on {h}: run `gru minion restore --host {h}`"
         ));
