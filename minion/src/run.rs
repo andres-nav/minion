@@ -3,15 +3,16 @@ use std::iter;
 use std::os::unix::fs::FileExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+use std::time::Duration;
 
 use serde_json::{Map, Value, json};
 
 use crate::ffi::{
     CLOCK_MONOTONIC, CLOCK_REALTIME, SIGKILL, SIGTERM, Timespec, clock_gettime, kill,
 };
-use crate::{settings, utc};
+use crate::{queue, settings, utc};
 
 /// Something read at the edges of a run, never in between. Meters nest: the
 /// start reads them last to first, the end first to last, so `time`, first, is
@@ -207,21 +208,87 @@ fn max_power_uw(dir: &Path) -> Option<u64> {
         .max()
 }
 
+/// A command run just outside each edge that prints `name value` lines.
+struct Cmd {
+    cmd: Vec<String>,
+    mark: String,
+    timeout: Duration,
+}
+
+impl Cmd {
+    fn new(v: &Value, mark: &str) -> Result<Cmd, String> {
+        Ok(Cmd {
+            cmd: queue::command(v, "cmd meter", &["cmd", "timeout_s"])?,
+            mark: mark.into(),
+            timeout: queue::seconds(&v["timeout_s"], CMD_TIMEOUT, "cmd meter timeout_s")?,
+        })
+    }
+}
+
+impl Meter for Cmd {
+    fn name(&self) -> &'static str {
+        "cmd"
+    }
+    fn read(&self) -> Result<Value, String> {
+        let (prog, args) = self.cmd.split_first().unwrap();
+        let err = |e: String| format!("cmd meter {prog}: {e}");
+        let mut c = queue::workload(prog, args, &self.mark);
+        c.stdout(Stdio::piped());
+        let out = queue::run_with_timeout(c, self.timeout)
+            .map_err(|e| err(e.to_string()))?
+            .ok_or_else(|| err(format!("killed after {:?}", self.timeout)))?;
+        if !out.status.success() {
+            return Err(err(out.status.to_string()));
+        }
+        let mut values = Map::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let mut f = line.split_whitespace();
+            match (f.next(), f.next().map(str::parse::<f64>), f.next()) {
+                (None, ..) => {}
+                (Some(name), Some(Ok(v)), None) => {
+                    values.insert(name.into(), json!(v));
+                }
+                _ => return Err(err(format!("{line:?} is not `name number`"))),
+            }
+        }
+        Ok(values.into())
+    }
+    fn report(&self, start: &Value, end: &Value, _: f64) -> (Value, Vec<String>) {
+        let delta: Map<_, _> = start
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, a)| Some((k.clone(), json!(end.get(k)?.as_f64()? - a.as_f64()?))))
+            .collect();
+        (json!({"start": start, "end": end, "delta": delta}), vec![])
+    }
+    fn slow(&self) -> bool {
+        true
+    }
+}
+
+const CMD_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// The pid of the command being measured, or 0.
 pub static WORKLOAD: AtomicI32 = AtomicI32::new(0);
 /// The signal that stops the queue, or 0.
 pub static STOP: AtomicI32 = AtomicI32::new(0);
 
-/// The named meters, opened once, `time` first.
-pub fn meters(sys: &Path, names: &[String]) -> Result<Vec<Box<dyn Meter>>, String> {
+/// The meters, opened once, `time` first. A cmd meter runs marked with mark.
+pub fn meters(sys: &Path, specs: &[Value], mark: &str) -> Result<Vec<Box<dyn Meter>>, String> {
     let mut meters: Vec<Box<dyn Meter>> = vec![Box::new(Clock)];
-    for n in names {
-        match n.as_str() {
+    for n in specs {
+        if n.get("cmd").is_some() {
+            meters.push(Box::new(Cmd::new(n, mark)?));
+            continue;
+        }
+        match n.as_str().unwrap_or_default() {
             "time" => {}
             "rapl" => meters.push(Box::new(Rapl::open(sys))),
-            _ => return Err(format!("unknown meter {n:?}")),
+            _ => return Err(format!("unknown meter {n}")),
         }
     }
+    meters.push(Box::new(crate::noise::Noise::open(sys)));
     meters.sort_by_key(|m| m.slow());
     Ok(meters)
 }
@@ -233,7 +300,7 @@ pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, Stri
     }
     let (prog, args) = cmd.split_first().ok_or("run needs a command after --")?;
     let file = File::create_new(out).map_err(|e| format!("create {}: {e}", out.display()))?;
-    let meters = meters(sys, &["rapl".into()])?;
+    let meters = meters(sys, &["rapl".into()], "")?;
     let mut command = Command::new(prog);
     command.args(args);
     let measured = measure(sys, &meters, command);

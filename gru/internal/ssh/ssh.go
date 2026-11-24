@@ -187,8 +187,7 @@ func ExitCode(err error) (int, error) {
 }
 
 // AgentBinary returns the local gru binary for platform ("goos/goarch"): this
-// executable for its own platform, else a sibling gru-<goos>-<goarch> (from
-// `make cross`) next to it or in ../libexec/gru.
+// executable for its own platform, else the bundled gru-<goos>-<goarch>.
 func AgentBinary(platform string) (string, error) {
 	self, err := os.Executable()
 	if err != nil {
@@ -201,51 +200,84 @@ func agentBinary(self, platform string) (string, error) {
 	if platform == runtime.GOOS+"/"+runtime.GOARCH {
 		return self, nil
 	}
-	name := "gru-" + strings.ReplaceAll(platform, "/", "-")
+	return bundled(self, "gru-"+dashed(platform))
+}
+
+// MinionBinary returns the bundled minion-<goos>-<goarch>, minion's build for platform.
+func MinionBinary(platform string) (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return bundled(self, "minion-"+dashed(platform))
+}
+
+// bundled finds name next to self or in its ../libexec/gru, where `make build`
+// and `make install` put the agents and minion.
+func bundled(self, name string) (string, error) {
 	for _, p := range []string{filepath.Join(filepath.Dir(self), name), filepath.Join(filepath.Dir(self), "..", "libexec", "gru", name)} {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("no gru binary for %s (looked for %s); build it with `make cross`", platform, name)
+	return "", fmt.Errorf("no %s next to %s or in its ../libexec/gru; build it with `make build`", name, self)
 }
 
-// EnsureAgent makes sure the agent for the remote's platform (from binaryFor) is
-// in the remote's stateDir and returns its invocation, as one shell word. Each
-// build has its own file, named by version, platform and a hash of the binary,
-// so an upload never changes the agent a running job calls.
-func (c *Client) EnsureAgent(stateDir, version string, binaryFor func(platform string) (string, error)) (string, error) {
+// Platform returns the host's GOOS/GOARCH, from `uname -sm`.
+func (c *Client) Platform() (string, error) {
 	unm, err := c.Output("uname -sm")
-	if err != nil {
-		return "", err
-	}
-	platform := unameToGo(unm)
-	bin, err := binaryFor(platform)
-	if err != nil {
-		return "", err
-	}
-	b, err := os.ReadFile(bin)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(b)
-	dir := remote.RemotePath(stateDir) + "/bin"
-	invoke := dir + "/" + remote.ShellQuote(fmt.Sprintf("gru-%s-%s-%s", version, strings.ReplaceAll(platform, "/", "-"), hex.EncodeToString(sum[:6])))
-	if _, err := c.Output("test -x " + invoke); err == nil {
-		return invoke, nil
-	}
-	// Upload to a temp file and rename, so nobody runs a half-written agent.
-	upload := fmt.Sprintf("(umask 077 && mkdir -p %[1]s) && t=%[1]s/.upload.$$ && "+
-		"cat > \"$t\" && chmod 755 \"$t\" && mv -f \"$t\" %[2]s || { rm -f \"$t\"; exit 1; }", dir, invoke)
-	var errb bytes.Buffer
-	if code, err := c.Run(upload, bytes.NewReader(b), io.Discard, &errb); code != 0 {
-		return "", fmt.Errorf("upload to %s: exit %d %v: %s", c.Host, code, err, strings.TrimSpace(errb.String()))
+	return unameToGo(unm), err
+}
+
+// EnsureAgent puts bin, the agent for platform, in the host's stateDir and
+// returns its invocation, as one shell word. A new upload must answer with
+// version.
+func (c *Client) EnsureAgent(stateDir, version, platform, bin string) (string, error) {
+	invoke, uploaded, err := c.ensure(stateDir, "gru-"+version+"-"+dashed(platform), bin)
+	if err != nil || !uploaded {
+		return invoke, err
 	}
 	if v, err := c.Output(invoke + " _agent version"); err != nil || v != "gru "+version {
 		return "", fmt.Errorf("agent %s reports %q (%v), want %q", invoke, v, err, "gru "+version)
 	}
 	return invoke, nil
 }
+
+// EnsureMinion puts bin, minion's build for platform, in the host's stateDir
+// and returns its path, as one shell word.
+func (c *Client) EnsureMinion(stateDir, version, platform, bin string) (string, error) {
+	path, _, err := c.ensure(stateDir, "minion-"+version+"-"+dashed(platform), bin)
+	return path, err
+}
+
+// ensure puts the file bin in stateDir/bin as <name>-<hash of bin>, unless it
+// is there, and returns that path, as one shell word, and whether it uploaded.
+// Each build has its own file, so an upload never changes a binary a running
+// job calls. The upload goes to a temp file, which must have bin's sha256 on
+// the host before it is renamed.
+func (c *Client) ensure(stateDir, name, bin string) (string, bool, error) {
+	b, err := os.ReadFile(bin)
+	if err != nil {
+		return "", false, err
+	}
+	sum := sha256.Sum256(b)
+	dir := remote.RemotePath(stateDir) + "/bin"
+	path := dir + "/" + remote.ShellQuote(name+"-"+hex.EncodeToString(sum[:6]))
+	if _, err := c.Output("test -x " + path); err == nil {
+		return path, false, nil
+	}
+	upload := fmt.Sprintf("(umask 077 && mkdir -p %[1]s) && t=%[1]s/.upload.$$ && cat > \"$t\" && "+
+		"{ [ \"$(sha256sum < \"$t\")\" = '%[3]x  -' ] || { echo 'the upload arrived changed (sha256)' >&2; false; }; } && "+
+		"chmod 755 \"$t\" && mv -f \"$t\" %[2]s || { rm -f \"$t\"; exit 1; }", dir, path, sum)
+	var errb bytes.Buffer
+	if code, err := c.Run(upload, bytes.NewReader(b), io.Discard, &errb); code != 0 {
+		return "", false, fmt.Errorf("upload %s to %s: exit %d %v: %s", name, c.Host, code, err, strings.TrimSpace(errb.String()))
+	}
+	return path, true, nil
+}
+
+// dashed turns goos/goarch into goos-goarch, as in file names.
+func dashed(platform string) string { return strings.ReplaceAll(platform, "/", "-") }
 
 // unameToGo maps `uname -sm` output to a GOOS/GOARCH string.
 func unameToGo(unm string) string {

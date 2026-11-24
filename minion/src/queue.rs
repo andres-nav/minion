@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::mpsc;
 use std::time::Duration;
@@ -18,7 +18,7 @@ use crate::lock;
 use crate::run::{self, Meter, STOP, WORKLOAD};
 use crate::settings::{self, State};
 use crate::utc::{self, log, now_ns};
-use crate::{NAME, Opts};
+use crate::{NAME, Opts, VERSION};
 
 #[rustfmt::skip]
 const KEYS: [&str; 9] = ["name", "profiles", "workloads", "reps", "seed", "settle_s", "meters", "out", "notify"];
@@ -32,7 +32,7 @@ pub struct Queue {
     pub reps: u64,
     pub seed: u64,
     pub settle: Duration,
-    pub meters: Vec<String>,
+    pub meters: Vec<Value>,
     pub out: PathBuf,
     pub notify: Vec<String>,
     pub notify_timeout: Duration,
@@ -60,7 +60,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     for (name, p) in &q.profiles {
         settings::validate(&o.sysfs, p).map_err(|e| format!("profile {name}: {e}"))?;
     }
-    let meters = run::meters(&o.sysfs, &q.meters)?;
+    run::meters(&o.sysfs, &q.meters, "")?; // refuses bad meters before anything runs
     let plan = plan(&q);
 
     let (lock, waited) = lock::take(&o.lock)?;
@@ -68,6 +68,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     let started = run::clocks()?;
     let (id, dir) = new_dir(&q.out, &q.name)?;
     lock::name(&lock, &id)?;
+    let meters = run::meters(&o.sysfs, &q.meters, &lock::mark(&o.lock, &id))?;
     let runs: Vec<_> = plan.iter().map(Run::json).collect();
     run::write_new(
         &dir.join("plan.json"),
@@ -138,7 +139,7 @@ impl Running<'_> {
             return Err("the leftover journal could not be restored".into());
         }
         let start = settings::snapshot(&self.o.sysfs)?;
-        let targets = resolve(&self.q.profiles, &start);
+        let targets = resolve(&self.o.sysfs, &self.q.profiles, &start);
         let gru: Map<_, _> = std::env::vars()
             .filter(|(k, _)| k.starts_with("GRU_"))
             .filter(|(k, _)| !["PASS", "SECRET", "TOKEN"].iter().any(|w| k.contains(w)))
@@ -154,7 +155,7 @@ impl Running<'_> {
             "start": start,
             "time": run::edges(&[("start", started)]),
             "runner": {
-                "version": env!("CARGO_PKG_VERSION"), "lock": self.o.lock,
+                "version": VERSION, "lock": self.o.lock,
                 "privileged": if self.o.test { "in-process" } else { "sudo" },
             },
             "gru": gru,
@@ -295,8 +296,8 @@ impl Running<'_> {
         cmd.envs(env);
         let timeout = self.q.notify_timeout;
         match run_with_timeout(cmd, timeout) {
-            Ok(Some(s)) if s.success() => {}
-            Ok(Some(s)) => log(format!("notify {event}: {s}")),
+            Ok(Some(o)) if o.status.success() => {}
+            Ok(Some(o)) => log(format!("notify {event}: {}", o.status)),
             Ok(None) => log(format!("notify {event}: killed after {timeout:?}")),
             Err(e) => log(format!("notify {event}: {prog}: {e}")),
         }
@@ -311,20 +312,20 @@ impl Run {
 }
 
 /// Runs cmd, then kills its process group when cmd exits or, if it still runs,
-/// after timeout. Returns the exit status, or None if it was killed.
-fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Option<ExitStatus>> {
-    let mut child = cmd.spawn()?;
+/// after timeout. Returns its exit status and piped output, or None if it was killed.
+pub fn run_with_timeout(mut cmd: Command, timeout: Duration) -> std::io::Result<Option<Output>> {
+    let child = cmd.spawn()?;
     let pid = child.id() as i32;
     let (exited, wait) = mpsc::channel();
     let waiter = std::thread::spawn(move || {
-        let status = child.wait();
+        let out = child.wait_with_output();
         let _ = exited.send(());
-        status
+        out
     });
     let killed = wait.recv_timeout(timeout).is_err();
     kill(-pid, SIGKILL);
-    let status = waiter.join().unwrap()?;
-    Ok((!killed).then_some(status))
+    let out = waiter.join().unwrap()?;
+    Ok((!killed).then_some(out))
 }
 
 /// A workload or notify: stdin from /dev/null, in its own process group, with
@@ -471,7 +472,7 @@ pub fn object<'a>(
 }
 
 /// The command of a {"cmd": [...]} object with only the given keys.
-fn command(v: &Value, what: &str, keys: &[&str]) -> Result<Vec<String>, String> {
+pub fn command(v: &Value, what: &str, keys: &[&str]) -> Result<Vec<String>, String> {
     let cmd = object(v, what, keys)?.get("cmd").cloned();
     let cmd: Vec<String> =
         serde_json::from_value(cmd.unwrap_or_default()).map_err(|e| format!("{what} cmd: {e}"))?;
@@ -482,7 +483,7 @@ fn command(v: &Value, what: &str, keys: &[&str]) -> Result<Vec<String>, String> 
 }
 
 /// v in seconds, or default if v is missing.
-fn seconds(v: &Value, default: Duration, what: &str) -> Result<Duration, String> {
+pub fn seconds(v: &Value, default: Duration, what: &str) -> Result<Duration, String> {
     match v {
         Value::Null => Ok(default),
         s => s
@@ -533,9 +534,13 @@ pub fn plan(q: &Queue) -> Vec<Run> {
 }
 
 /// Each profile over the start state: every object any profile sets, at this
-/// profile's value or else at its start value. So a run's state never depends
-/// on the run before it.
-fn resolve(profiles: &BTreeMap<String, State>, start: &State) -> BTreeMap<String, State> {
+/// profile's value, or else at its start value unless the kernel forces another
+/// one then. So a run's state never depends on the run before it.
+fn resolve(
+    sys: &Path,
+    profiles: &BTreeMap<String, State>,
+    start: &State,
+) -> BTreeMap<String, State> {
     let mut base = State::new();
     for (id, values) in profiles.values().flatten() {
         for obj in values.keys() {
@@ -550,6 +555,17 @@ fn resolve(profiles: &BTreeMap<String, State>, start: &State) -> BTreeMap<String
         let mut t = base.clone();
         for (id, values) in p {
             t.entry(id.clone()).or_default().extend(values.clone());
+        }
+        let mut state = start.clone();
+        for (id, values) in &t {
+            state.entry(id.clone()).or_default().extend(values.clone());
+        }
+        for s in settings::SETTINGS {
+            for (obj, f) in s.forced(sys, &state).unwrap_or_default() {
+                if let Some(v) = t.get_mut(s.id()).and_then(|v| v.get_mut(&obj)) {
+                    *v = f;
+                }
+            }
         }
         t
     };

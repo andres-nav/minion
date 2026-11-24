@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::engine::{self, status};
 use crate::journal::Journal;
 use crate::queue::{SplitMix64, parse, plan};
-use crate::settings::{State, snapshot};
+use crate::settings::{State, Values, snapshot};
 use crate::utc;
 
 unsafe extern "C" {
@@ -37,6 +37,21 @@ impl Fake {
             put(
                 &p.join("scaling_available_governors"),
                 "performance powersave",
+            );
+            put(&p.join("scaling_driver"), "intel_pstate");
+            for (f, v) in [("scaling_min", "800000"), ("scaling_max", "3000000")] {
+                put(&p.join(format!("{f}_freq")), v);
+            }
+            for (f, v) in [("cpuinfo_min", "800000"), ("cpuinfo_max", "3500000")] {
+                put(&p.join(format!("{f}_freq")), v);
+            }
+            put(
+                &p.join("energy_performance_preference"),
+                "balance_performance",
+            );
+            put(
+                &p.join("energy_performance_available_preferences"),
+                "default performance balance_performance balance_power power",
             );
             for s in 0..3 {
                 put(&cpu.join(format!("cpu{n}/cpuidle/state{s}/disable")), "0");
@@ -434,7 +449,7 @@ fn invalid_profiles_are_refused_before_any_write() {
             json!({"cpu.idle.disable": {"cpu0/state1": "1\n0"}}),
             "is not allowed",
         ),
-        (json!({"cpu.freq": {"policy0": "1000"}}), "unknown setting"),
+        (json!({"cpu.bogus": {"policy0": "1000"}}), "unknown setting"),
         (
             json!({"cpu.turbo": {"no_turbo": "1"}, "cpu.governor": {"policy0": "fast"}}),
             "fast",
@@ -444,6 +459,97 @@ fn invalid_profiles_are_refused_before_any_write() {
     }
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(!f.journal().exists());
+}
+
+#[test]
+fn freq_and_epp_follow_the_kernel_rules() {
+    let f = Fake::new("freq-epp");
+    let before = snapshot(&f.sys).unwrap();
+    assert_eq!(before["cpu.freq"]["policy1/max"], "3000000");
+    assert_eq!(before["cpu.epp"]["policy0"], "balance_performance");
+    for (p, why) in [
+        (
+            json!({"cpu.freq": {"policy0/max": "4000000"}}),
+            "is not allowed",
+        ), // above cpuinfo_max_freq
+        (
+            json!({"cpu.freq": {"policy0/max": "03000000"}}),
+            "is not allowed",
+        ),
+        (
+            json!({"cpu.freq": {"policy0/min": "3200000"}}),
+            "policy0/min 3200000 is above max 3000000",
+        ),
+        (json!({"cpu.epp": {"policy0": "default"}}), "is not allowed"),
+        (
+            json!({"cpu.epp": {"policy0": "power"}, "cpu.governor": {"policy0": "performance"}}),
+            r#"cpu.epp policy0: the kernel forces "performance" here"#,
+        ),
+    ] {
+        refused(apply(&f.sys, &f.state, &profile(p)), why);
+    }
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+
+    // Under a performance governor set by hand too, but not in passive mode.
+    put(&f.file("cpufreq/policy1/scaling_governor"), "performance");
+    let power = profile(json!({"cpu.epp": {"policy1": "power"}}));
+    refused(apply(&f.sys, &f.state, &power), "forces");
+    put(&f.file("cpufreq/policy1/scaling_driver"), "intel_cpufreq");
+    let before = snapshot(&f.sys).unwrap();
+    apply(&f.sys, &f.state, &power).unwrap();
+    let up = json!({"cpu.freq": {"policy0/min": "3200000", "policy0/max": "3400000"}});
+    apply(&f.sys, &f.state, &profile(up)).unwrap();
+    assert_eq!(
+        snapshot(&f.sys).unwrap()["cpu.freq"]["policy0/min"],
+        "3200000"
+    );
+    restore(&f.sys, &f.state).unwrap();
+    assert_eq!(snapshot(&f.sys).unwrap(), before);
+
+    // min and max move so that min <= max at every step.
+    let v = |pairs: &[(&str, &str)]| -> Values {
+        pairs
+            .iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
+    };
+    let now = v(&[("policy0/min", "800000"), ("policy0/max", "3000000")]);
+    let order = |want: &[(&str, &str)]| -> Vec<String> {
+        let want = v(want);
+        let order = crate::settings::freq_order(&want, &now);
+        order.iter().map(|(o, _)| o.to_string()).collect()
+    };
+    let down = [("policy0/min", "2000000"), ("policy0/max", "2500000")];
+    assert_eq!(order(&down), ["policy0/min", "policy0/max"]);
+    let up = [("policy0/min", "3200000"), ("policy0/max", "3400000")];
+    assert_eq!(order(&up), ["policy0/max", "policy0/min"]);
+}
+
+#[test]
+fn a_queue_holds_epp_at_what_the_performance_governor_forces() {
+    let _serial = serial();
+    let f = Fake::new("queue-epp");
+    let (code, dir) = f.queue(json!({
+        "name": "epp", "reps": 1, "workloads": {"w": {"cmd": ["true"]}},
+        "profiles": {"perf": {"cpu.governor": {"policy0": "performance"}}, "eco": {"cpu.epp": {"policy0": "power"}}},
+    }));
+    assert_eq!(code, 0);
+    let q = read_json(&dir.join("queue.json"));
+    let t = &q["resolved"]["profiles"];
+    assert_eq!(
+        (
+            &t["perf"]["cpu.epp"]["policy0"],
+            &t["perf"]["cpu.governor"]["policy0"]
+        ),
+        (&json!("performance"), &json!("performance"))
+    );
+    assert_eq!(
+        (
+            &t["eco"]["cpu.epp"]["policy0"],
+            &t["eco"]["cpu.governor"]["policy0"]
+        ),
+        (&json!("power"), &json!("powersave"))
+    );
 }
 
 #[test]
@@ -491,7 +597,13 @@ fn snapshot_of_the_real_sysfs() {
     let s = snapshot(Path::new("/sys")).unwrap();
     assert_eq!(
         s.keys().collect::<Vec<_>>(),
-        ["cpu.governor", "cpu.idle.disable", "cpu.turbo"]
+        [
+            "cpu.epp",
+            "cpu.freq",
+            "cpu.governor",
+            "cpu.idle.disable",
+            "cpu.turbo"
+        ]
     );
 }
 
@@ -561,13 +673,49 @@ impl crate::run::Meter for Stamp {
 #[test]
 fn a_later_meter_is_read_around_the_earlier_ones() {
     let f = Fake::new("nest");
-    let mut meters = crate::run::meters(&f.sys, &[]).unwrap();
+    let mut meters = crate::run::meters(&f.sys, &[], "").unwrap();
     meters.push(Box::new(Stamp));
     let cmd = std::process::Command::new("true");
     let (run, _) = crate::run::measure(&f.sys, &meters, cmd).unwrap();
     let (m, t) = (&run["meters"]["stamp"], &run["meters"]["time"]);
     assert!(m[0].as_u64() < t["start_ns"].as_u64());
     assert!(m[1].as_u64() > t["end_ns"].as_u64());
+}
+
+#[test]
+fn the_noise_record_reads_proc_and_other_cgroups_around_a_run() {
+    let table = "      CPU0   CPU1\n  0:   14   0   IO-APIC   2-edge   timer\nNMI:  1  2  Non-maskable\nERR:  3\n";
+    assert_eq!(
+        Value::from(crate::noise::per_cpu(table)),
+        json!({"0": [14, 0], "NMI": [1, 2], "ERR": [3]})
+    );
+
+    let f = Fake::new("noise");
+    let a = f.sys.join("fs/cgroup/a.slice/cpu.stat");
+    put(&a, "usage_usec 100\nuser_usec 60\n");
+    put(&f.sys.join("fs/cgroup/b.slice/cpu.stat"), "usage_usec 7\n");
+    let me = fs::read_to_string("/proc/self/cgroup").unwrap();
+    let ours = me
+        .lines()
+        .find_map(|l| l.strip_prefix("0::/")?.split('/').next());
+    let ours = ours.filter(|o| !o.is_empty()).unwrap_or("our.slice"); // left out of the record
+    put(
+        &f.sys.join("fs/cgroup").join(ours).join("cpu.stat"),
+        "usage_usec 1\n",
+    );
+    let (_, run) = f.run(&format!("printf 'usage_usec 250\\n' > {}", a.display()));
+    let n = &run["meters"]["noise"];
+    assert_eq!(n["cgroups_usec"], json!({"a.slice": 150, "b.slice": 0}));
+    assert!(
+        n["ctxt"].as_u64().is_some() && n["interrupts"].is_object() && n["softirqs"].is_object()
+    );
+    assert_eq!(n["load"]["start"].as_array().unwrap().len(), 3);
+    assert!(n["users"]["end"].is_array() || n["users"]["end"].is_null());
+    let at = |irq0: u64| json!({"interrupts": {"0": [irq0, 2], "NMI": [5, 5]}, "ctxt": 10});
+    let (r, _) = crate::run::Meter::report(&crate::noise::Noise::open(&f.sys), &at(1), &at(3), 1.0);
+    assert_eq!(r["interrupts"], json!({"0": [2, 0]})); // only rows that changed
+    let time = &run["meters"]["time"];
+    assert!(time["start_ns"].as_u64() < time["end_ns"].as_u64());
 }
 
 #[test]
@@ -935,7 +1083,7 @@ fn a_stop_during_the_settle_ends_the_queue_at_once() {
 fn a_stop_just_before_the_workload_starts_reaches_it() {
     let _serial = serial();
     let f = Fake::new("stop-early");
-    let meters = crate::run::meters(&f.sys, &[]).unwrap();
+    let meters = crate::run::meters(&f.sys, &[], "").unwrap();
     let cmd = crate::queue::workload("sleep", &strings(&["5"]), "none");
     crate::run::STOP.store(15, SeqCst);
     let measured = crate::run::measure(&f.sys, &meters, cmd);
@@ -970,6 +1118,58 @@ fn a_failing_notify_does_not_fail_the_queue() {
     }
 }
 
+/// The run.json of a queue's only run.
+fn only_run(dir: &Path) -> Value {
+    let runs: Vec<_> = fs::read_dir(dir.join("runs")).unwrap().flatten().collect();
+    assert_eq!(runs.len(), 1);
+    read_json(&runs[0].path().join("run.json"))
+}
+
+#[test]
+fn a_cmd_meter_reads_numbers_outside_each_run() {
+    let _serial = serial();
+    let f = Fake::new("cmd-meter");
+    let n = f.root.join("n");
+    put(&n, "5");
+    let q = |meter: &str, timeout: f64| {
+        json!({"name": "cmdm", "profiles": {"p": {}}, "reps": 1,
+            "workloads": {"w": {"cmd": ["sh", "-c", format!("echo $(( $(cat {0}) + 2 )) > {0}", n.display())]}},
+            "meters": [{"cmd": ["sh", "-c", meter], "timeout_s": timeout}, "time"]})
+    };
+    let meter = format!("echo joules $(cat {}); echo; echo runs 1", n.display());
+    let (code, dir) = f.queue(q(&meter, 10.0));
+    assert_eq!(code, 0);
+    assert_eq!(
+        only_run(&dir)["meters"]["cmd"],
+        json!({"start": {"joules": 5.0, "runs": 1.0}, "end": {"joules": 7.0, "runs": 1.0},
+               "delta": {"joules": 2.0, "runs": 0.0}})
+    );
+    let names: Vec<_> = crate::run::meters(&f.sys, &[json!({"cmd": ["true"]}), json!("rapl")], "")
+        .unwrap()
+        .iter()
+        .map(|m| m.name())
+        .collect();
+    assert!(names.starts_with(&["time", "rapl", "cmd"])); // outer to the fast ones
+
+    // A bad line, a failure or a timeout at the start edge: the run fails before its workload.
+    let t = Instant::now();
+    for (meter, why) in [
+        ("echo joules lots", r#""joules lots" is not `name number`"#),
+        ("exit 3", "exit status: 3"),
+        ("sleep 5", "killed after 200ms"),
+    ] {
+        fs::remove_dir_all(f.root.join("results")).unwrap();
+        let (code, dir) = f.queue(q(meter, 0.2));
+        assert_eq!(code, 1);
+        assert!(
+            events(&dir)[1]["detail"].as_str().unwrap().contains(why),
+            "{why}"
+        );
+    }
+    assert!(t.elapsed() < Duration::from_secs(4));
+    assert_eq!(fs::read_to_string(&n).unwrap().trim(), "7");
+}
+
 #[test]
 fn bad_queues_are_refused_before_anything_runs() {
     let f = Fake::new("queue-refused");
@@ -986,7 +1186,7 @@ fn bad_queues_are_refused_before_anything_runs() {
     for (q, why) in [
         (with("colour", json!("red")), r#"unknown key "colour""#),
         (
-            with("profiles", json!({"p": {"cpu.freq": {"policy0": "1"}}})),
+            with("profiles", json!({"p": {"cpu.bogus": {"policy0": "1"}}})),
             "unknown setting",
         ),
         (
@@ -1032,6 +1232,18 @@ fn bad_queues_are_refused_before_anything_runs() {
         (
             with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
             "timeout_s: needs seconds",
+        ),
+        (
+            with("meters", json!([{"cmd": ["true"], "every": 2}])),
+            r#"cmd meter: unknown key "every""#,
+        ),
+        (
+            with("meters", json!([{"cmd": []}])),
+            "cmd meter cmd: needs a command",
+        ),
+        (
+            with("meters", json!([{"cmd": ["true"], "timeout_s": -1}])),
+            "cmd meter timeout_s: needs seconds",
         ),
     ] {
         fs::write(&file, q.to_string()).unwrap();

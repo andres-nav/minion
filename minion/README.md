@@ -6,13 +6,24 @@ All times are UTC: names use `20261123T142501Z`, every wall-clock epoch has an I
 twin (`2026-11-23T14:25:01Z`; monotonic times have none), and log lines start with the UTC time.
 Local time is never used.
 
-This first slice handles three settings, written in this order:
+This slice handles five settings, written in this order:
 
 | setting | files | values |
 |---|---|---|
 | `cpu.governor` | `cpufreq/policy*/scaling_governor` | from `scaling_available_governors` |
+| `cpu.epp` | `cpufreq/policy*/energy_performance_preference` | from `energy_performance_available_preferences`, but not `default` (never read back) |
 | `cpu.turbo` | `intel_pstate/no_turbo` (skipped if absent) | `0`, `1` |
+| `cpu.freq` | `cpufreq/policy*/scaling_{min,max}_freq`, as objects `policy0/min` and `policy0/max` | kHz within `cpuinfo_{min,max}_freq` |
 | `cpu.idle.disable` | `cpu*/cpuidle/state*/disable` | `0`, `1` |
+
+Per policy, `cpu.freq` keeps min ≤ max: a profile that would leave min above max is refused,
+and min and max are written in the order that keeps min ≤ max at every step, also on restore
+(cpufreq clamps a max below min but keeps the min request). With intel_pstate or amd-pstate in
+active mode, the `performance` governor holds EPP at `performance` and refuses other values
+(`EBUSY`): a profile that asks for another one there is refused, and a queue holds EPP at
+`performance` for such a profile when another profile sets it. Turning turbo off clamps the max
+frequency (intel_pstate), so a profile with `no_turbo` 1 fails its read-back check if another
+profile sets a higher `cpu.freq` max: set `cpu.freq` in it too.
 
 ## Usage
 
@@ -32,9 +43,10 @@ A profile has the same shape as a snapshot and lists only the objects to change:
 {"cpu.governor": {"policy0": "performance"}, "cpu.idle.disable": {"cpu0/state2": "1"}}
 ```
 
-Every value is checked before anything is written: unknown settings, objects or values are
-refused. `apply` and `restore` read only stdin and `/sys`, and write only `/sys` and the journal in
-`/var/lib/minion`, which only root can read, so `status` needs root too.
+Every value is checked before anything is written: unknown settings, objects or values are refused,
+and so is what the kernel would refuse or override (above). `apply` and `restore` read only stdin
+and `/sys`, and write only `/sys` and the journal in `/var/lib/minion`, which only root can read,
+so `status` needs root too.
 
 ## Run
 
@@ -55,6 +67,12 @@ overwritten. Zones whose `energy_uj` can't be read (root-only by default) are li
 its counter twice at the zone's highest power limit, or when the zone has no power limit. The
 command stays in the runner's process group, so Ctrl-C reaches it, and what it leaves running is
 left alone (a queue kills it).
+
+`meters.noise`, always there, records what else ran: it is read just outside each edge, outside
+the other meters. Per CPU, the change of each `/proc/interrupts` and `/proc/softirqs` row that
+changed; the change of `ctxt` in `/proc/stat`; the CPU time (`cpu.stat` `usage_usec`) of each
+other top-level cgroup (`cgroups_usec`); and at both edges the users with a logind session and
+the load average.
 
 ## Queue
 
@@ -85,6 +103,13 @@ Runs a whole queue as the user, in the foreground, and puts the settings back at
 `time` is always read) and `notify` (with `timeout_s`, default 30) are optional. Unknown keys,
 settings, objects, values and meters are refused before anything runs. Names take up to 64
 letters, digits, `.`, `_` and `-`.
+
+A `cmd` meter, `{"cmd": [...]}` in `meters` (with `timeout_s`, default 10), is a command that
+prints `name number` lines, for numbers minion can't read itself. It runs at each edge outside the
+other meters, like a workload (in its own process group, killed if the runner dies, marked for
+reap), and its group is killed when it exits, or after `timeout_s`. run.json gets `meters.cmd`
+with the `start` and `end` numbers and their `delta`. A bad line, a failure or a timeout fails
+the run; at the start edge, before the workload starts.
 
 - **Plan.** `reps` rounds; each round runs every (profile, workload) pair once, in an order
   shuffled by Fisher-Yates with splitmix64 from the seed. The whole plan goes to plan.json first.

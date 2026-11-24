@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 
 	"github.com/andres-nav/minion/gru/internal/config"
 	"github.com/andres-nav/minion/gru/internal/remote"
@@ -52,20 +53,22 @@ func connect(override string, agent bool) (*target, error) {
 
 // target is a host to run on: a client (ssh, or this machine for localhost),
 // the project's dir there, the state dir that holds its jobs and agents, and
-// the gru agent there as one shell word.
+// the gru agent and minion there as shell words (minion "" if gru has none
+// for the host's platform).
 type target struct {
 	*ssh.Client
-	r     *config.Resolved
-	host  config.Host
-	alias string
-	dir   string
-	state string
-	agent string
+	r      *config.Resolved
+	host   config.Host
+	alias  string
+	dir    string
+	state  string
+	agent  string
+	minion string
 }
 
 // aim resolves the host (override, else the template's; a name not in hosts
 // is an ssh alias) without connecting. A local target runs in the project
-// itself, with this executable as its agent.
+// itself, with this executable as its agent and the bundled minion.
 func aim(r *config.Resolved, override string) (*target, error) {
 	name := cmp.Or(override, r.Template.Host)
 	if name == "" {
@@ -76,14 +79,17 @@ func aim(r *config.Resolved, override string) (*target, error) {
 	if t.alias == "localhost" || t.alias == "local" {
 		exe, err := os.Executable()
 		t.Client, t.dir, t.agent = ssh.Local(), r.Root, remote.ShellQuote(exe)
+		if bin, err := ssh.MinionBinary(runtime.GOOS + "/" + runtime.GOARCH); err == nil {
+			t.minion = remote.ShellQuote(bin)
+		}
 		return t, err
 	}
 	t.dir = remoteDirFor(r.Template.RemoteDir, h.RemoteDir, r.Root)
 	return t, nil
 }
 
-// dial connects to the target aim resolves; a remote one gets its agent
-// bootstrapped when agent is set.
+// dial connects to the target aim resolves; a remote one gets its agent and
+// minion bootstrapped when agent is set.
 func dial(r *config.Resolved, override string, agent bool) (*target, error) {
 	t, err := aim(r, override)
 	if err != nil || t.Client != nil { // local
@@ -92,11 +98,31 @@ func dial(r *config.Resolved, override string, agent bool) (*target, error) {
 	t.Client = ssh.New(t.alias)
 	if agent {
 		t.Open() // one multiplexed connection for the whole command
-		var err error
-		if t.agent, err = t.EnsureAgent(t.state, version, ssh.AgentBinary); err != nil {
+		if err := t.bootstrap(); err != nil {
 			t.Close()
 			return nil, err
 		}
 	}
 	return t, nil
+}
+
+// bootstrap puts the gru agent on the host and, if gru carries a minion for
+// the host's platform, minion.
+func (t *target) bootstrap() error {
+	platform, err := t.Platform()
+	if err != nil {
+		return err
+	}
+	bin, err := ssh.AgentBinary(platform)
+	if err != nil {
+		return err
+	}
+	if t.agent, err = t.EnsureAgent(t.state, version, platform, bin); err != nil {
+		return err
+	}
+	if bin, err = ssh.MinionBinary(platform); err != nil {
+		return nil // tasks there get an empty GRU_MINION
+	}
+	t.minion, err = t.EnsureMinion(t.state, version, platform, bin)
+	return err
 }

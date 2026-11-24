@@ -23,11 +23,13 @@ attributing energy to tenants or processes, a benchmark framework, dashboards, a
 
 ## What is built
 
-- Settings: `cpu.governor`, `cpu.turbo` and `cpu.idle.disable`.
+- Settings: `cpu.governor`, `cpu.epp`, `cpu.turbo`, `cpu.freq` (min and max) and
+  `cpu.idle.disable`.
 - Verbs: `snapshot`, `apply`, `restore`, `status`, `run`, `queue` and `reap`.
-- Meters: `time` and `rapl`.
+- Meters: `time`, `rapl` and `cmd`.
 - Queue: randomized interleaved rounds under the queue lock, with reap, events and notify.
-- Around each run: the settings snapshot.
+- Around each run: the settings snapshot and a basic noise record (interrupts, softirqs, context
+  switches, other cgroups' CPU time, logins and load).
 - Restore: from the fsynced journal, keeping what someone else changed.
 - Between runs: the settle.
 
@@ -135,10 +137,10 @@ Phase 5.
 
 ### More settings
 
-Phase 5. Driver mode, SMT, EPP and EPB, perf limits, min and max frequency, uncore frequency, RAPL
-limits and group read of `energy_uj`, kernel knobs (NMI watchdog, KSM, THP, `vm/stat_interval`,
-NUMA balancing), `AllowedCPUs` of top-level units, IRQ affinity, movable kernel threads, the
-workqueue mask, and guards (irqbalance, tuned, thermald, listed timers).
+Phase 5. Driver mode, SMT, EPB, perf limits, uncore frequency, RAPL limits and group read of
+`energy_uj`, kernel knobs (NMI watchdog, KSM, THP, `vm/stat_interval`, NUMA balancing),
+`AllowedCPUs` of top-level units, IRQ affinity, movable kernel threads, the workqueue mask, and
+guards (irqbalance, tuned, thermald, listed timers).
 - **Order.** Guards are stopped first and released last; only those that were active start again.
   Everything else goes dependencies first, both ways: driver mode first, the governor before EPP,
   turbo before frequency and perf limits, SMT before IRQs and kernel threads. After a dependency is
@@ -193,13 +195,10 @@ window.
 - `wall`: a sampler on another machine asks the BMC once a second for the whole queue; edges are
   matched afterwards. BMC power is coarse, so it suits long runs only.
 - `perf`: hardware counters, counted and never sampled, one group read per edge.
-- `cmd`: a user command printing `name value` lines, run before the start read and after the end
-  read.
 - Time series, off by default; RQ2 measures their cost.
-- The noise record, read before the start read and after the end read: other cgroups' CPU time,
-  foreign processes, logins and load; interrupt and softirq counts; per CPU the SMI count,
-  APERF/MPERF, throttle counters and temperatures, through an `msr` verb that reads only those
-  MSRs and `HWP_REQUEST`; new kernel log lines; the end-of-run verify.
+- More of the noise record, read before the start read and after the end read: foreign processes;
+  per CPU the SMI count, APERF/MPERF, throttle counters and temperatures, through an `msr` verb
+  that reads only those MSRs and `HWP_REQUEST`; new kernel log lines; the end-of-run verify.
 - `host.json` per queue: CPU model and topology, kernel, cmdline, microcode, BIOS, energy zones
   and backend (MSR, TPMI, modeled), NVML and driver versions.
 

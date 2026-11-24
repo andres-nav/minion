@@ -26,6 +26,7 @@ type Job struct {
 	OnFailure []string
 	Always    []string
 	Agent     string // the gru agent on the target, as one shell word
+	Minion    string // minion on the target, as one shell word, or ""
 	Notify    string // the resolved notify block as one line of JSON; the agent sends it at job end
 }
 
@@ -100,8 +101,8 @@ func Script(workDir, jobDir string, j Job) string {
 		}
 	}
 	fmt.Fprintf(&b, "J=%s\n", jobDir)
-	fmt.Fprintf(&b, "export GRU_ARGS=%s GRU_AGENT=%s GRU_JOB_ID=%s GRU_TASK=%s GRU_HOST=%s GRU_GIT=%s GRU_DIRTY=%t\n",
-		ShellQuote(j.Args), j.Agent, ShellQuote(j.ID), ShellQuote(j.Task), ShellQuote(j.Host), ShellQuote(j.Git), j.Dirty)
+	fmt.Fprintf(&b, "export GRU_ARGS=%s GRU_AGENT=%s GRU_MINION=%s GRU_JOB_ID=%s GRU_TASK=%s GRU_HOST=%s GRU_GIT=%s GRU_DIRTY=%t\n",
+		ShellQuote(j.Args), j.Agent, j.Minion, ShellQuote(j.ID), ShellQuote(j.Task), ShellQuote(j.Host), ShellQuote(j.Git), j.Dirty)
 	fmt.Fprintf(&b, "printf %%s %s > \"$J/task\"; printf %%s %s > \"$J/repo\"\n", ShellQuote(j.Task), ShellQuote(j.Repo))
 	b.WriteString("ec=1 start=$(date +%s) start_ns=$(\"$GRU_AGENT\" _agent now)\n")
 	if j.Notify != "" {

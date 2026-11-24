@@ -2,6 +2,7 @@ mod engine;
 mod ffi;
 mod journal;
 mod lock;
+mod noise;
 mod queue;
 mod run;
 mod settings;
@@ -19,6 +20,11 @@ use crate::ffi::{SIG_IGN, SIGHUP, SIGINT, SIGTERM, geteuid, signal};
 use crate::journal::Journal;
 
 const NAME: &str = env!("CARGO_PKG_NAME");
+/// gru's version, which its build passes in: minion ships with gru.
+const VERSION: &str = match option_env!("MINION_VERSION") {
+    Some(v) => v,
+    None => "dev",
+};
 const USAGE: &str = concat!(
     "usage: ",
     env!("CARGO_PKG_NAME"),

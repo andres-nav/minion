@@ -16,7 +16,7 @@ func TestAgentBinary(t *testing.T) {
 	if got, err := agentBinary(self, runtime.GOOS+"/"+runtime.GOARCH); err != nil || got != self {
 		t.Fatalf("own platform: got %q err %v", got, err)
 	}
-	if _, err := agentBinary(self, "plan9/mips"); err == nil || !strings.Contains(err.Error(), "make cross") {
+	if _, err := agentBinary(self, "plan9/mips"); err == nil || !strings.Contains(err.Error(), "make build") {
 		t.Fatalf("missing cross binary: err %v", err)
 	}
 	// next to the binary (the build tree), else in ../libexec/gru (installed).
@@ -72,11 +72,10 @@ func fakeAgent(t *testing.T, version, extra string) string {
 func TestEnsureAgent(t *testing.T) {
 	home := t.TempDir()
 	c := localClient(home)
-	unm, _ := c.Output("uname -sm")
-	platform := strings.ReplaceAll(unameToGo(unm), "/", "-")
+	platform, _ := c.Platform()
 	ensure := func(bin string) string {
 		t.Helper()
-		invoke, err := c.EnsureAgent("~/state", "dev", func(string) (string, error) { return bin, nil })
+		invoke, err := c.EnsureAgent("~/state", "dev", platform, bin)
 		if err != nil {
 			t.Fatalf("EnsureAgent: %v", err)
 		}
@@ -85,7 +84,7 @@ func TestEnsureAgent(t *testing.T) {
 
 	first := fakeAgent(t, "dev", "first")
 	invoke := ensure(first)
-	if !strings.HasPrefix(invoke, `"$HOME"/'state'/bin/'gru-dev-`+platform+`-`) {
+	if !strings.HasPrefix(invoke, `"$HOME"/'state'/bin/'gru-dev-`+dashed(platform)+`-`) {
 		t.Fatalf("invoke = %q", invoke)
 	}
 	if fi, err := os.Stat(filepath.Join(home, "state")); err != nil || fi.Mode().Perm() != 0o700 {
@@ -116,8 +115,49 @@ func TestEnsureAgent(t *testing.T) {
 	}
 
 	// An agent that doesn't answer with the version is refused.
-	if _, err := c.EnsureAgent("~/state", "v1", func(string) (string, error) { return fakeAgent(t, "v2", ""), nil }); err == nil {
+	if _, err := c.EnsureAgent("~/state", "v1", platform, fakeAgent(t, "v2", "")); err == nil {
 		t.Fatal("a wrong agent version was accepted")
+	}
+}
+
+func TestEnsureMinion(t *testing.T) {
+	home := t.TempDir()
+	c := localClient(home)
+	bin := filepath.Join(t.TempDir(), "minion-linux-amd64")
+	os.WriteFile(bin, []byte("build one"), 0o755)
+	path, err := c.EnsureMinion("~/state", "v1", "linux/amd64", bin)
+	// the first 12 hex digits of sha256("build one")
+	if err != nil || path != `"$HOME"/'state'/bin/'minion-v1-linux-amd64-5fddb9545db6'` {
+		t.Fatalf("EnsureMinion = %q, %v", path, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(home, "state/bin/minion-v1-linux-amd64-5fddb9545db6")); string(b) != "build one" {
+		t.Fatalf("uploaded %q", b)
+	}
+	// Another build of the same version gets its own file, and nothing is rewritten.
+	os.WriteFile(bin, []byte("build two"), 0o755)
+	if other, err := c.EnsureMinion("~/state", "v1", "linux/amd64", bin); err != nil || other == path {
+		t.Fatalf("another build: %q, %v", other, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(home, "state/bin/minion-v1-linux-amd64-5fddb9545db6")); string(b) != "build one" {
+		t.Fatalf("the first build was rewritten: %q", b)
+	}
+}
+
+func TestUploadIsCheckedOnTheHost(t *testing.T) {
+	home := t.TempDir()
+	// A host whose cat changes what it writes: the upload never gets its name.
+	c := &Client{Host: "fake", cmd: func(command string) *exec.Cmd {
+		cmd := exec.Command("sh", "-c", strings.Replace(command, "cat > ", "{ cat; echo x; } > ", 1))
+		cmd.Env = append(os.Environ(), "HOME="+home)
+		return cmd
+	}}
+	bin := filepath.Join(t.TempDir(), "minion")
+	os.WriteFile(bin, []byte("build"), 0o755)
+	if _, err := c.EnsureMinion("~/state", "v1", "linux/amd64", bin); err == nil || !strings.Contains(err.Error(), "sha256") {
+		t.Fatalf("a changed upload: err %v", err)
+	}
+	if left, _ := filepath.Glob(filepath.Join(home, "state/bin/*")); len(left) != 0 {
+		t.Fatalf("left %v", left)
 	}
 }
 
