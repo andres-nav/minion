@@ -31,7 +31,7 @@ attributing energy to tenants or processes, a benchmark framework, dashboards, a
 - Around each run: the settings snapshot and a basic noise record (interrupts, softirqs, context
   switches, other cgroups' CPU time, logins and load).
 - Restore: from the fsynced journal, keeping what someone else changed.
-- Between runs: the settle.
+- Between runs: the settle and a basic thermal wait (one baseline for the queue).
 
 `make e2e` runs queues through gru on a fake sysfs; real sysfs writes, RAPL, sudo and ssh are not
 tested yet.
@@ -205,16 +205,16 @@ window.
 ### Queue features
 
 Phase 5.
-- A thermal gate per profile (our own rule): the first run of a profile waits until package
-  temperatures change less than 0.5 °C/min and records them as its baseline; later runs wait until
-  every package is within `band_c` of it, up to a timeout, then run flagged.
+- A thermal gate per profile (our own rule), replacing the queue's one baseline: the first run of a
+  profile waits until package temperatures change less than 0.5 °C/min and records them as its
+  baseline; later runs wait until every package is within `band_c` of it, up to a timeout.
 - A canary workload every N rounds that pauses the queue when its energy drifts, as the Green
   Metrics Tool does.
 - A drift policy: `stop` (default) or `reapply` (what the queue does now).
 - `minion queue --resume <dir>` reruns the aborted run as a new attempt and continues.
 - Adaptive stopping on the confidence interval of each pair's median, between a minimum and a
   maximum of reps; a `blocked` order, only to measure order effects.
-- More events (`run_aborted`, `others_detected`, `thermal_timeout`, `canary_drift`, `rebooted`,
+- More events (`run_aborted`, `others_detected`, `canary_drift`, `rebooted`,
   the machine-lock events) and a heartbeat ping, so a service such as Healthchecks.io alerts when
   a machine goes quiet.
 - `abandon`, for an admin to close a journal that can't be restored.
