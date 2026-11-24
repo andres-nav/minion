@@ -88,7 +88,7 @@ pub fn run(o: &Opts, file: &Path) -> Result<u8, String> {
         return Ok(NEEDS_ROOT);
     }
     stop_on_signals();
-    let started = run::clocks();
+    let started = run::clocks()?;
     let (id, dir) = new_dir(&q.out, &q.name)?;
     lock::name(&lock, &id)?;
     let meters = run::meters(&o.sysfs, &q.meters, &lock::mark(&o.lock, &id))?;
