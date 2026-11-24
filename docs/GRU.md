@@ -1,86 +1,174 @@
 # gru — design
 
-**Status:** v1 implemented and validated end-to-end against a real host (`dgx-spark-08.ethz.ch`, linux/arm64), before the rename from minion to gru. How gru works with minion, the host runner: [DESIGN.md](DESIGN.md).
+How gru works with minion, the host runner: [DESIGN.md](DESIGN.md).
 
 ## What gru is
 
-A single static Go binary that **dispatches** a repo's build/test/experiment commands — locally or on a remote SSH host — reusing each repo's existing tooling. It is **not a build system**: it owns *where* to run, *what command* to invoke (delegating to `make`/`brazil-build`/`latexmk`/`pytest`/…), and *what happens around it* (sync, lifecycle hooks, fetch, notify).
-
-One verb works in every repo (`gru run <task>`, any task of the project's template), and `gru list --json` makes capabilities machine-discoverable for AI agents and a future Emacs frontend.
-
-**Zero external dependencies** — the module has no third-party `require`s (stdlib only). The remote needs only a POSIX shell + coreutils (no tmux, no rsync, no Python).
+One static Go binary (stdlib only) that runs a repo's own commands (`make`, `latexmk`, `pytest`,
+`cargo`, …) here or on an ssh host. It owns *where* a task runs, *which* command it is, and *what
+happens around it*: sync, hooks, fetch, notify. It is not a build system. One verb works in every
+repo (`gru run <task>`), and `gru list --json` lets AI agents and editors discover the tasks. A
+host needs only a POSIX shell and coreutils (no tmux, rsync or Python).
 
 ## Configuration
 
-JSON. Global `~/.config/gru/config.json` (honors `GRU_CONFIG`, `XDG_CONFIG_HOME`), optionally overridden by a per-project `.gru.json`. Unknown keys and bad `notify` blocks are refused, so a typo fails loudly.
+JSON: `~/.config/gru/config.json` (or `$GRU_CONFIG`, or under `$XDG_CONFIG_HOME`), with three maps:
+`hosts`, `templates` and a default `notify`. Unknown keys are refused, so a typo fails loudly.
 
-- **`hosts`**: name → `{ ssh, remote_dir, state_dir }`. `ssh` is the alias passed to the system `ssh` (so `~/.ssh/config` — ProxyJump, ControlMaster, etc. — is inherited). If a master from the user's own `ControlPath` is already running (`ssh -O check <alias>`), gru multiplexes over it instead of opening its own, so hosts that need interactive 2FA work after one manual `ssh <alias>`. `remote_dir` (default `gru/{repo}` in the remote home) supports `{repo}`, a leading `~`, and `$VAR` / `${VAR}` expanded by the **remote** shell (e.g. `/scratch/$USER/{repo}`); an unset or empty variable fails the command instead of resolving to another directory. `state_dir` (default `~/.gru`, same expansion) holds the jobs and the agent; point it at local disk when the home is on NFS, so logs and job scripts stay off the network and other machines.
-- **`templates`**: name → a repo-type:
-  - `detect`: filename markers; a template matches if **any** is present.
-  - `tasks`: name → shell command; `gru run <name>` runs it.
-  - `host`: default host (a `hosts` key or raw ssh alias). **No global default** — if a remote op needs a host and none is set, gru fails loudly.
-  - `remote_dir`: overrides the host's (e.g. a workspace slot).
-  - `exclude`: extra sync-ignore globs (on top of `.gitignore`).
-  - `env`: `["KEY=VALUE"]`, exported before the command and hooks; values expand on the host. A `KEY` that is not a shell variable name is refused.
-  - `before` / `on_success` / `on_failure` / `always`: lifecycle hooks (shell commands).
-  - `needs`: sibling dirs synced before the project (e.g. Brazil packages), each to its own `{repo}` dir; `push`: local dirs (e.g. `~/.midway`) copied to the same path on the host. Only `run` does these two.
-  - `fetch`: result globs to pull back; `fetch_into`: where (`{id}`, `{ts}` in UTC, `{repo}`; default the project dir, so each fetch replaces the files of the last).
-  - `notify`: announce a finished job. `on` (`always`|`failure`|`success`, default `always`); `email` (`{ smtp: "host:port", from, to, user, pass }`, sent by the agent via `net/smtp` — no `curl` needed); `run` (shell commands run at job end, e.g. a `curl` webhook to Slack/Matrix — the target must have whatever the command uses); `env` (`{ KEY: value }` extra vars exported for the `run` hooks). A top-level `notify` is the default; a template's `notify` overrides it. `run` hooks additionally see `$GRU_SUBJECT` (the one-line summary email uses) and `$GRU_BODY` (the full summary with a log tail), composed on the target by the agent. `pass` and each `env` value accept `${ENV}` (or bare `$ENV`), resolved on the **local** machine at launch so credentials/tokens never live in the config or repo (put a webhook bearer token in `env`, not inline in the `run` string); an unset variable fails the launch. Any value beginning with `$` is treated as an env reference, so a literal secret that starts with `$` must be supplied through the referenced variable rather than inline. A template's `notify` overrides the default only if it has `email` or `run`. Notify runs last, after the status is recorded, and is killed after 30 s.
+**Hosts** (name → keys):
 
-**Resolution** (`internal/config`): walk up from cwd; the first dir with a `.gru.json` or matching `detect` markers is the **project root** (handles monorepos like `paperwork/<app>/main.tex`). The walk stops at the git root; if several templates match, the first by name wins. A per-project `.gru.json` selects a template via `use` (or by detection) and overrides any field: lists and values replace, `tasks` merge by name, `env` adds, `notify` replaces. It may also define its own `templates` and `hosts` maps, merged over the global config before resolution (local wins on name collision) — so a project can `use` a template defined right in its `.gru.json`, with no global config entry.
+| Key | Meaning |
+|---|---|
+| `ssh` | the alias passed to the system `ssh`, so `~/.ssh/config` (ProxyJump, ControlMaster, …) applies. If the user's own master runs (`ssh -O check`), gru multiplexes over it, so a host with interactive 2FA works after one manual `ssh <alias>`. |
+| `remote_dir` | the project's dir there, default `gru/{repo}` in the remote home. Takes `{repo}`, a leading `~`, and `$VAR`/`${VAR}` expanded by the **remote** shell (`/scratch/$USER/{repo}`); an unset or empty variable fails the command. |
+| `state_dir` | jobs and uploaded binaries, default `~/.gru` (same expansion). Put it on local disk when the home is on NFS. |
+
+**Templates** (a repo type; name → keys):
+
+| Key | Meaning |
+|---|---|
+| `detect` | file names; the template matches if **any** is present |
+| `tasks` | name → shell command, run by `gru run <name>` |
+| `host` | default host: a `hosts` key or an ssh alias. There is no global default: a remote command with no host fails. |
+| `remote_dir` | overrides the host's |
+| `exclude` | sync-ignore globs on top of `.gitignore` |
+| `env` | `["KEY=VALUE"]`, exported before the command and hooks; values expand on the host. An entry without `=`, or whose `KEY` isn't a shell variable name, is refused. |
+| `before`, `on_success`, `on_failure`, `always` | hook commands |
+| `needs` | sibling dirs synced first, each to its own `{repo}` dir (e.g. a library the project builds against); `run` only |
+| `push` | local dirs copied to the same path on the host first (e.g. a tool's token dir); `run` only |
+| `fetch`, `fetch_into` | result globs to pull back, and where to (`{id}`, `{ts}` in UTC, `{repo}`). Without `fetch_into` they land in the project dir, replacing the last fetch's. |
+| `notify` | as below; replaces the default only if it has `run` |
+
+**Notify** (a block run by the agent on the host when a job ends, last, after the status is
+recorded; killed after 30 s):
+
+| Key | Meaning |
+|---|---|
+| `on` | `always` (default), `failure` or `success` |
+| `run` | shell commands, e.g. a `curl` to a webhook; the host must have what they use. They see `$GRU_SUBJECT` and `$GRU_BODY` (below). |
+| `env` | `{KEY: value}` for the `run` commands. A value starting with `$` (`${TOKEN}`) is read from the **local** environment at launch, so secrets stay out of the config and repo; an unset variable fails the launch. |
+
+**Resolution** (`internal/config`): walk up from the current dir; the first dir with a `.gru.json`
+or a matching `detect` is the project root (so `paperwork/<app>/main.tex` works in a monorepo). The
+walk stops at the git root; if several templates match, the first by name wins. A `.gru.json`
+picks a template with `use` (or by detection) and overrides any of its keys: values and lists
+replace, `tasks` merge by name, `env` adds, `notify` replaces. It may define its own `templates`
+and `hosts`, merged over the global ones (local wins), so a project needs no global entry.
 
 ## Interface
 
-- Run: `run <task> [--host H] [--detach] [--arg TEXT] [--no-sync]` — the sole task entry point. `--arg` reaches the task as `$GRU_ARGS`; `--no-sync` runs the code already on the host. `list [--json]` shows the template and tasks.
-- Remote: `sync [--delete]`, `fetch [<id>] [--into DIR]`, `attach [<id>]`, `kill <id>`, `ps [--all]`, `ssh`, `doctor [--notify]`, `setup [--remove]`, `minion <args>`; each takes `--host`. Without an id, `attach` and `fetch` take this project's latest job.
-- Root: `setup --host X`, in a terminal (it asks for the sudo password once, over `ssh -t`), lets minion do root's part there: as the user it copies the uploaded minion to `/tmp` (the home may be NFS, which root never reads), then as root copies that into a root-owned temp file, checks it against the hash in its name and renames it to `/usr/local/lib/gru/<that name>` (0755); it writes `/etc/sudoers.d/gru-minion-<user>` (`Cmnd_Alias GRU_MINION_<USER> = /usr/local/lib/gru/minion-* serve`, `Defaults!GRU_MINION_<USER> !requiretty`, `<user> ALL=(root) NOPASSWD: GRU_MINION_<USER>`; without the `Defaults` line where visudo doesn't know `requiretty`, as with sudo-rs, which never needs a tty) only once `visudo -cf` accepts it, and warns if logind has `KillUserProcesses=yes`. Old builds stay; `--remove` takes the user's drop-in away, and the copies with the last user's. When a task exits 77 (minion needs root) and `run` is attached in a terminal, it offers the setup and runs the task again; otherwise it only exits 77. `doctor` shows whether each host is set up for this build. `minion <args>` runs minion with args on the host, in the project's dir (`gru minion restore --host X`).
-- Meta: `version`, `help`. Hidden: `_agent` (the counterpart on the target: `version`, `now`, `follow`, `manifest`, `recv`, `send`, and `notify --config FILE|- [--log F] [--subject S --body B]`; a given subject or body skips the `on` gate, for a task's own messages).
-- The agent and minion are bootstrapped in `run`/`sync`/`fetch`/`attach`/`doctor`/`setup`/`minion`. `ssh` opens an interactive shell on the host in the project's remote dir. `doctor` checks the config and every host (reachable + agent bootstraps); `doctor --notify` also sends a test notification (email and/or `run` hooks, whatever `on` says) through the resolved block from the target host.
+- `run <task> [--host H] [--detach] [--arg TEXT] [--no-sync]`: the only way to run a task.
+  `--arg` reaches it as `$GRU_ARGS`; `--no-sync` runs the code already on the host.
+- `list [--json]`, `sync [--delete]`, `fetch [<id>] [--into DIR]`, `attach [<id>]`, `kill <id>`,
+  `ps [--all]`, `ssh`, `doctor [--notify]`, `setup [--remove]`, `minion <args>`, each with
+  `--host`. Without an id, `attach` and `fetch` take this project's latest job. Flags may follow
+  the positional; a second positional is a usage error.
+- `version`, `help`. Hidden: `_agent`, the counterpart on the host (`now`, `follow`, `manifest`,
+  `recv`, `send`, `notify --config FILE|- [--log F] [--subject S --body B]`; a given subject or
+  body skips the `on` gate, for a task's own messages).
+- `doctor` checks the config and each host (reachable, agent and minion uploaded, set up for this
+  build); `--notify` sends a test notification. `ssh` opens a shell in the project's remote dir.
+  `minion <args>` runs minion there (`gru minion restore --host X`). `setup`: see [Root](#root).
 
 ## Execution
 
-Every run is a job (`internal/remote`) — local and remote differ only by the executor (`internal/ssh` remote, or a local `sh -c`). It's **tmux-free**: gru generates an sh wrapper (the command and each hook run in their own `sh -c`, so a task's syntax error or `exit` can't break it; order `before → command → on_success|on_failure → always`; whatever ends the job — the command, a failing `before`, a kill, a missing dir — an EXIT trap runs `on_success` or `on_failure`, then `always`, and records the status, `run.json` and the notification), launches it detached via `setsid` (fallback `nohup`) with output to `<state_dir>/jobs/<id>/log` and the exit code to `.../status`. The job dir is created with a plain `mkdir` under `umask 077` (private, since the script may export secrets); an id is a random name plus the start time (`brave_otter-20261123T142501Z`, UTC), and a taken id draws another name, so a job never reuses an old job's files. Each job dir records the target's `uname -n` in `hostname`. Detached ⇒ **survives disconnect**; if the connection drops, `run` says the job may still run, and `attach` picks it up again. The task and hooks see `$GRU_JOB_ID`/`TASK`/`HOST`/`ARGS`/`GIT`/`DIRTY`/`AGENT`/`MINION` and, with a notify block, `$GRU_NOTIFY` (the resolved block in a 0600 file, for a task's own notifications); `on_*`, `always` and notify also see `$GRU_EXIT`/`STATUS` (`ok`/`fail`)/`DURATION`.
+Every run is a job (`internal/remote`); local and remote jobs differ only in how the shell is
+reached (`internal/ssh`, or a local `sh -c`). No tmux:
 
-- **Remote host:** `run` = sync → launch → attach (stream log until done, exit with the job's code) → **auto-fetch results (regardless of exit code)**. `--detach` skips attach/fetch and prints the id.
-- **`--host localhost`** (or `local`): the job runs **on this machine** with no ssh or sync, in the project dir, with this executable as its agent and a copy of the bundled minion in the local state dir; `ps`/`attach`/`kill` read the local `<state_dir>/jobs`. `ssh` refuses it.
-- **No host resolved ⇒ error** (pass `--host`; `--host localhost` to run here).
-- `attach [<id>]` replays the log and follows to the job's end; `ps` lists this project's jobs, newest first (name/task/started in UTC, e.g. `2026-11-23 14:25Z`/age/status: `running`, `exit N`, or `lost` when the wrapper died without a status); `kill <id>` sends SIGTERM to the job's process group and the wrapper records 143 once its hooks ran; `kill` refuses a finished job. `ps`, the latest-job lookup and `kill` see only jobs launched on this host, so machines sharing a state dir don't touch each other's jobs. Ids are checked (`[A-Za-z0-9_-]`). Each run writes `run.json` provenance (id, task, host, hostname, kernel, git SHA, dirty, start_ns/end_ns, exit).
-- `fetch [<id>]` copies the files matching `fetch` from the remote project dir as they are now; the id fills `{id}`/`{ts}` and adds that job's `run.json` and log under `_gru/`.
+- **Wrapper.** gru writes an sh script that runs `before`, the command, `on_success` or
+  `on_failure`, then `always`, each in its own `sh -c`, so a syntax error or `exit` in one can't
+  break it. Whatever ends the job (the command, a failing `before`, a kill, a missing dir), an EXIT
+  trap runs the end hooks, then records the status, `run.json` and the notification. It starts
+  detached with `setsid` (else `nohup`), with the log in `<state_dir>/jobs/<id>/log` and the exit
+  code in `.../status`.
+- **Job dir.** Created with `mkdir` under `umask 077`, since the script may export secrets. The id
+  is a random name plus the UTC start (`brave_otter-20261123T142501Z`); a taken id draws another
+  name, so no job reuses old files. The dir records the host's `uname -n`. `run.json` holds the
+  provenance: id, task, host, hostname, kernel, git commit, dirty, start and end ns, exit.
+- **Remote host.** `run` = sync → launch → attach (stream the log, exit with the job's code) →
+  fetch the results, whatever the exit code. `--detach` prints the id and skips attach and fetch.
+  If the connection drops, `run` says the job may still run; `attach` picks it up again.
+- **`--host localhost`** (or `local`): the job runs here in the project dir, with no ssh or sync,
+  this binary as its agent and a copy of the bundled minion in the local state dir. `ssh` refuses
+  it.
+- **No host** is an error.
+- **`attach`** replays the log and follows it to the job's end. **`ps`** lists this project's jobs,
+  newest first: name, task, start in UTC (`2026-11-23 14:25Z`) and status (`running`, `exit N`,
+  or `lost` when the wrapper died without a status). **`kill`** sends SIGTERM to the job's process
+  group; the wrapper records 143 once its hooks ran; a finished job is refused. These and the
+  latest-job lookup see only jobs launched on this host, so machines that share a state dir don't
+  touch each other's jobs. Ids must match `[A-Za-z0-9_-]`.
+- **`fetch`** copies the files matching `fetch` from the remote project dir as they are now (a
+  matched dir brings its files, symlinks to files included); with an id it fills `{id}`/`{ts}`
+  and adds that job's `run.json` and log under `_gru/`.
+
+The task and every hook see these variables:
+
+| Variable | Seen by | Value |
+|---|---|---|
+| `GRU_JOB_ID`, `GRU_TASK`, `GRU_HOST`, `GRU_ARGS` | all | the job id, task, host, `--arg` text |
+| `GRU_GIT`, `GRU_DIRTY` | all | the commit, and whether the tree had changes |
+| `GRU_AGENT`, `GRU_MINION` | all | the uploaded agent and minion; `GRU_MINION` is empty where no minion build exists for the platform |
+| `GRU_NOTIFY` | all, with a notify block | the resolved block in a 0600 file, for a task's own notifications |
+| `GRU_EXIT`, `GRU_STATUS`, `GRU_DURATION` | `on_*`, `always`, notify | exit code, `ok` or `fail`, seconds |
+| `GRU_SUBJECT`, `GRU_BODY` | notify `run` | a one-line summary, and the full one with a log tail |
 
 ## Sync (`internal/sync`)
 
-Pure-Go, file-level, over the system `ssh` transport:
+Pure Go, file by file, over the system `ssh`:
 
-- **Git-aware**: `git ls-files --cached --others --exclude-standard` respects `.gitignore`, global excludes, and `.git/info/exclude` (falls back to a filesystem walk outside git). Template `exclude` globs apply on top. Symlinks to regular files are followed and synced as files.
-- Local vs remote manifests are diffed by **size + mtime + mode**, so a `chmod` alone is synced too; only changed files transfer. mtime is preserved on write, so re-syncs are no-ops.
-- Wire protocol: newline-JSON header + raw bytes per file, atomic temp+rename, mode/mtime preserved; `..` paths rejected.
-- `--delete` removes remote files absent locally, except those matched by `exclude` or ignored by git here (results, build output).
-- Agent verbs: `_agent manifest <dir>` (list), `_agent recv <dir>` (write stream), `_agent send <dir> <globs>` (stream matches back for `fetch`).
+- **Git-aware.** `git ls-files --cached --others --exclude-standard`, so `.gitignore`, global
+  excludes and `.git/info/exclude` apply (a plain walk outside git); `exclude` applies on top.
+  Symlinks to regular files are synced as files.
+- **Diff** of the local and remote manifests by size, mtime and mode, so a `chmod` alone is synced
+  too. mtime is kept on write, so a second sync sends nothing.
+- **Wire:** one JSON header line plus the raw bytes per file, written to a temp file and renamed,
+  mode and mtime kept; `..` paths are refused.
+- `--delete` removes remote files missing here, except those matched by `exclude` or ignored by
+  git here (results, build output).
 
 ## Bootstrap (`internal/ssh`)
 
-`EnsureAgent` picks the local binary for the **remote's** platform (`uname -sm` → GOOS/GOARCH): the running executable for its own platform, else the bundled `gru-<goos>-<goarch>` (next to it, or in `../libexec/gru`). `EnsureMinion` uploads the bundled `minion-<goos>-<goarch>` the same way (a host whose platform has none gets an empty `GRU_MINION`). Each file on the host is `<state_dir>/bin/<gru|minion>-<version>-<goos>-<goarch>-<sha12>`, named by a hash of the binary, so every build has its own file and an upload never changes a binary a running job calls; it is uploaded only when missing, to a temp file whose sha256 must match before the rename (the agent must then also answer `_agent version`). Old builds are never removed. Uploaded binaries are static (no libc dependency).
+gru uploads its agent and minion for the **host's** platform (`uname -sm`): for the agent, the
+running binary when the platforms match, else the bundled `gru-<os>-<arch>` (next to it or in
+`../libexec/gru`); for minion, the bundled `minion-<os>-<arch>`. On the host each file is
+`<state_dir>/bin/<gru|minion>-<version>-<os>-<arch>-<sha12>`, named by its hash, so each build has
+its own file and an upload never changes a binary a running job uses. A file is uploaded only when
+missing, to a temp file whose sha256 must match before the rename; the agent must then report this
+build's version. Old builds stay. The binaries are static.
 
-## Code layout (`gru/`)
+## Root
 
-```
-main.go                  tiny entrypoint → cli.Run
-internal/cli/            command dispatch + subcommands (run/list/sync/fetch/attach/kill/ps/ssh/doctor/setup/minion/_agent)
-internal/config/         load + check + detect/resolve
-internal/ssh/            system-ssh (or local sh) transport + cross-arch bootstrap
-internal/notify/         job-end message and SMTP
-internal/sync/           git-aware walk, diff, wire protocol
-internal/remote/         detached-run script + command builders
-```
+`setup --host X`, in a terminal, asks for the sudo password once (over `ssh -t`) and lets minion
+do root's part there:
 
-Build, from the repo root: `make build` (gru, its linux amd64/arm64 agents and minion's static builds, into `gru/bin`), `make install` (gru → `~/.local/bin`, agents and minion → `~/.local/libexec/gru`), `make dist` (the release archives). Dev shell via `flake.nix` (Go, and Rust with the musl targets).
+1. As the user, it copies the uploaded minion to `/tmp` (the home may be NFS, which root can't
+   read).
+2. As root, it copies that into a root-owned temp file, checks it against the hash in its name,
+   and renames it to `/usr/local/lib/gru/<that name>` (0755).
+3. It writes `/etc/sudoers.d/gru-minion-<user>` only once `visudo -cf` accepts it:
+   `Cmnd_Alias GRU_MINION_<USER> = /usr/local/lib/gru/minion-* serve`,
+   `Defaults!GRU_MINION_<USER> !requiretty` (left out where visudo doesn't know `requiretty`, as
+   with sudo-rs, which never needs a tty) and `<user> ALL=(root) NOPASSWD: GRU_MINION_<USER>`.
+4. It warns if logind has `KillUserProcesses=yes` (see below).
+
+Old builds stay. `--remove` takes the user's drop-in away, and the root copies with the last
+user's. When a task exits 77 (minion needs root) and `run` is attached in a terminal, it offers the
+setup and runs the task again; otherwise it just exits 77. What minion does as root:
+[minion/README.md](../minion/README.md#root).
 
 ## Known limitations
 
-- Change detection is by size, mtime and mode, with mtime at 1-second resolution; a same-size in-place edit within the same second as the recorded mtime may be missed.
-- `kill` relies on `setsid` for clean process-group termination (present on Linux). On hosts without it (bare macOS) the wrapper's children may survive.
-- `run.json` `dirty`/`git` reflect the whole repo, not just the synced subtree.
+- Changes are found by size, mtime and mode, with mtime in whole seconds: a same-size edit in the
+  same second as the recorded mtime may be missed.
+- `kill` needs `setsid` (Linux has it); on a host without it (bare macOS) the wrapper's children
+  may survive.
+- `run.json`'s `git` and `dirty` describe the whole repo, not just the synced subtree.
+- Where logind has `KillUserProcesses=yes`, a detached job dies when gru's ssh connection closes,
+  unless the user is in `KillExcludeUsers=`
+  ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
 
 ## Deferred
 
-`watch` (sync-on-save loop), batch/sweep scheduler, `pack`/`unpack` compression, richer `run.json`, and the Emacs elisp frontend (the binary already emits `--json` + clean exit codes for it).
+`watch` (sync on save), a batch or sweep scheduler, `pack`/`unpack` compression, a richer
+`run.json`, and an Emacs frontend (the `--json` output and exit codes are ready for it).
