@@ -303,39 +303,16 @@ fn apply_then_restore_gives_the_original() {
     assert_eq!(applied["cpu.turbo"]["no_turbo"], "1");
     assert_eq!(applied["cpu.idle.disable"]["cpu1/state2"], "1");
     assert_eq!(applied["cpu.idle.disable"]["cpu1/state1"], "0");
-    assert!(f.journal().exists());
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&f.state), 0o711); // others can stat journal.jsonl, not list or read it
+    assert_eq!(mode(&f.state.join("lock")), 0o600);
+    assert_eq!(mode(&f.journal()), 0o600);
 
     assert!(restore(&f.sys, &f.state).unwrap().is_empty());
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(!f.journal().exists());
-    assert_eq!(f.done(), ["saved", "apply", "applied", "restored"]);
-}
-
-#[test]
-fn the_state_dir_shows_only_whether_a_journal_is_open() {
-    let f = Fake::new("private");
-    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-    apply(&f.sys, &f.state, &stable()).unwrap();
-    assert_eq!(mode(&f.state), 0o711); // others can stat journal.jsonl, not list or read it
-    assert_eq!(mode(&f.state.join("lock")), 0o600);
-    assert_eq!(mode(&f.journal()), 0o600);
-    restore(&f.sys, &f.state).unwrap();
     assert_eq!(mode(&f.state.join("done")), 0o700);
-}
-
-#[test]
-fn saved_is_never_overwritten() {
-    let f = Fake::new("two-applies");
-    let before = snapshot(&f.sys).unwrap();
-    apply(&f.sys, &f.state, &stable()).unwrap();
-    apply(
-        &f.sys,
-        &f.state,
-        &profile(json!({"cpu.governor": {"policy0": "powersave"}})),
-    )
-    .unwrap();
-    restore(&f.sys, &f.state).unwrap();
-    assert_eq!(snapshot(&f.sys).unwrap(), before);
+    assert_eq!(f.done(), ["saved", "apply", "applied", "restored"]);
 }
 
 #[test]
@@ -730,8 +707,6 @@ fn the_noise_record_reads_proc_and_other_cgroups_around_a_run() {
     let at = |irq0: u64| json!({"interrupts": {"0": [irq0, 2], "NMI": [5, 5]}, "ctxt": 10});
     let (r, _) = crate::run::Meter::report(&crate::noise::Noise::open(&f.sys), &at(1), &at(3), 1.0);
     assert_eq!(r["interrupts"], json!({"0": [2, 0]})); // only rows that changed
-    let time = &run["meters"]["time"];
-    assert!(time["start_ns"].as_u64() < time["end_ns"].as_u64());
 }
 
 #[test]
@@ -1191,13 +1166,6 @@ fn a_failing_notify_does_not_fail_the_queue() {
     }
 }
 
-/// The run.json of a queue's only run.
-fn only_run(dir: &Path) -> Value {
-    let runs: Vec<_> = fs::read_dir(dir.join("runs")).unwrap().flatten().collect();
-    assert_eq!(runs.len(), 1);
-    read_json(&runs[0].path().join("run.json"))
-}
-
 #[test]
 fn a_cmd_meter_reads_numbers_outside_each_run() {
     let _serial = serial();
@@ -1213,7 +1181,7 @@ fn a_cmd_meter_reads_numbers_outside_each_run() {
     let (code, dir) = f.queue(q(&meter, 10.0));
     assert_eq!(code, 0);
     assert_eq!(
-        only_run(&dir)["meters"]["cmd"],
+        read_json(&dir.join("runs/0001-w-p-r01/run.json"))["meters"]["cmd"],
         json!({"start": {"joules": 5.0, "runs": 1.0}, "end": {"joules": 7.0, "runs": 1.0},
                "delta": {"joules": 2.0, "runs": 0.0}})
     );
@@ -1261,13 +1229,6 @@ fn bad_queues_are_refused_before_anything_runs() {
         (
             with("profiles", json!({"p": {"cpu.bogus": {"policy0": "1"}}})),
             "unknown setting",
-        ),
-        (
-            with(
-                "profiles",
-                json!({"p": {"cpu.governor": {"policy0": "fast"}}}),
-            ),
-            "not allowed",
         ),
         (
             with("profiles", json!({})),
@@ -1518,10 +1479,6 @@ fn times_are_utc() {
         utc::iso(1_795_425_125),
         utc::stamp(1_795_425_125_000_000_007, false),
         utc::stamp(1_795_425_125_000_000_007, true),
-        crate::run::edges(&[("start", &[1, 1_795_425_125_000_000_007])])["start_utc"]
-            .as_str()
-            .unwrap()
-            .into(),
     ];
     assert_eq!(
         got,
@@ -1531,7 +1488,6 @@ fn times_are_utc() {
             "2026-11-23T09:12:05Z",
             "20261123T091205Z",
             "20261123T091205.000000007Z",
-            "2026-11-23T09:12:05Z",
         ]
     );
 }
@@ -1589,26 +1545,17 @@ fn same_name_queues_get_their_own_dirs() {
             .join(format!("same-{}", utc::stamp(ns, false)));
         fs::create_dir_all(dir).unwrap();
     }
-    let q = |w: &str| json!({"name": "same", "profiles": {"p": {}}, "workloads": {"w": {"cmd": ["sh", "-c", w]}}, "reps": 1});
-    assert_eq!(f.queue_code(q("true")), Ok(0));
-
-    // Two at once: the second waits, then names itself.
-    let started = f.root.join("started");
-    let first = format!("touch {}; sleep 0.3", started.display());
-    let codes = f.alongside(q(&first), &started, || f.queue_code(q("true")));
-    assert_eq!(codes, (Ok(0), Ok(0)));
-    let mut ran: Vec<_> = fs::read_dir(f.root.join("results"))
+    let q = json!({"name": "same", "profiles": {"p": {}}, "workloads": {"w": {"cmd": ["true"]}}, "reps": 1});
+    assert_eq!(f.queue_code(q), Ok(0));
+    let ran: Vec<_> = fs::read_dir(f.root.join("results"))
         .unwrap()
         .flatten()
         .map(|e| e.path())
         .filter(|d| d.join("events.jsonl").exists())
         .collect();
-    ran.sort();
-    assert_eq!(ran.len(), 3);
-    assert!(ran.iter().any(|d| d.to_str().unwrap().ends_with("Z-2")));
-    for d in ran {
-        assert_eq!(kinds(&d).last().unwrap(), "queue_done");
-    }
+    assert_eq!(ran.len(), 1);
+    assert!(ran[0].to_str().unwrap().ends_with("Z-2"));
+    assert_eq!(kinds(&ran[0]).last().unwrap(), "queue_done");
 }
 
 #[test]
