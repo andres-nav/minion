@@ -297,130 +297,121 @@ Phases 2 to 4 are tested on a fake sysfs only; checking them on a real machine c
 
 ## Improvements, ranked
 
-What the tools and the survey of measurement errors in [RESEARCH.md](RESEARCH.md) ask of minion
-(numbers and sources there), ranked by strength of evidence and benefit to the research questions
-per unit of cost. Cost is a rough count of Rust lines in minion (analysis in Python); *here* means
-testable with the fake sysfs, *machine* needs a real host.
+What the tools and the measurement survey in [RESEARCH.md](RESEARCH.md) ask of minion (numbers and
+sources there), ranked by strength of evidence and benefit to the research questions per unit of
+cost. Cost is in Rust lines in minion (analysis in Python); *here* means testable on the fake
+sysfs, *machine* needs a real host.
 
-Already built from the survey: the journaled save-before-write with restore when the client dies,
-and compare and restore (GEOPM Service, Slurm and tuned each have part of it); randomized
-interleaved rounds with seed, round and position saved, since order bias is large and common on
-bare metal (Abedi 2017, Duplyakin 2023); and events named after Slurm's mail types, with any push
-sink (such as Pushover) through `notify.cmd` or gru's `run` hooks.
+Already built from the survey: the journal with restore when the client dies, and compare and
+restore (GEOPM Service, Slurm and tuned each have part of it); randomized interleaved rounds with
+seed, round and position saved, since order bias is large and common on bare metal (Abedi 2017,
+Duplyakin 2023); events named after Slurm's mail types, with any push sink (such as Pushover)
+through `notify.cmd` or gru's `run` hooks.
 
-1. **Check every energy reading.** *Why:* tools still lose wraps, count zones twice and use wrong
-   units, and the kernel scaled Sapphire Rapids DRAM about 4× wrong until 2022
-   ([3.1](RESEARCH.md#31-meters), [3.4](RESEARCH.md#34-tools)). *Change:* in `rapl`, flag a zone
-   whose counter didn't move in a run of 10 ms or more (stuck, or a 1 J unit), whose mean power is
-   above its highest power limit, or whose delta equals another package's (one counter read
-   twice). Each zone's raw counters and range are already stored. *Cost:* about 40 lines, low
-   risk. *Test:* here.
-2. **A/A and injected-regression modes, and a false-positive rate per host.** *Why:* they give
-   the false-positive rate and the detection rate against the number of runs, which is RQ3, and
-   nobody reports them for energy (Laaber 2019, Bulej 2020, Fleming 2023; the gap is stated by
-   EnergyTrackr); where null changes were planted, 49 of 60 were flagged without an effect-size
-   floor ([3.3](RESEARCH.md#33-methodology)). *Change:* none in minion for A/A: the same command
-   under two workload names makes an A/A pair. The analysis applies the test used for real
-   comparisons (a ratio CI bootstrapped over rounds, an effect-size floor, Benjamini-Hochberg
-   across comparisons) and reports the false-positive rate. A/A queues with `settle_s` 0 and 60
-   also pick each host's settle, since a 60 s rest did not help on the one server measured.
-   *Cost:* about 100 lines of analysis. *Test:* the analysis here, the rate on a machine.
-   *Phase 10; this brings its A/A half forward.*
-3. **Order-independence check.** *Why:* it shows whether a machine carries state between runs
-   (Duplyakin 2023, Maricq 2018). *Change:* run some rounds in a fixed order, then test fixed
-   against random (Kruskal-Wallis) and run order against shuffled (Mann-Whitney). *Cost:* analysis
-   on top of `plan.json`. *Test:* here. *New.*
-4. **Record what sets a meter's accuracy in `host.json`.** *Why:* RAPL energy filtering adds
-   5-15% noise at 100 ms and stays on until reboot once SGX or TDX is enabled; kernels changed
-   units and listed different AMD zones in powercap and perf until 6.6; mitigations changed run
-   time by 2-11%; AMD's energy is modeled (Schöne 2021) ([3.1](RESEARCH.md#31-meters), [3.2](RESEARCH.md#32-sources-of-variation)). *Change:*
-   add the filtering bit (MSR 0xBC bit 0, read by the planned `msr` verb, as the Green Metrics
-   Tool does), the zones listed by powercap and by perf, the zone backend (MSR, TPMI) and whether
-   energy is modeled, `cpu/vulnerabilities/*`, and the wall meter's model and accuracy to the
-   planned CPU, kernel, microcode and BIOS fields; with filtering on or unknown, flag runs shorter
-   than 1 s. *Cost:* about 40 lines, low risk; the MSR needs root. *Test:* here, except the MSR.
-   *In design ([meters](#meters-and-noise-record)); new fields.*
-5. **A warm-up round, a thermal gate and a trend check.** *Why:* power drifts for about 7 min at
-   constant load, labs pre-heat for 15 min, many benchmarks never reach a steady state, and fixed
-   warm-up counts are wrong in most cases ([3.2](RESEARCH.md#32-sources-of-variation),
+1. **Check every energy reading.** Tools still lose wraps, count zones twice and use wrong units,
+   and the kernel scaled Sapphire Rapids DRAM about 4× wrong until 2022
+   ([3.1](RESEARCH.md#31-meters), [3.4](RESEARCH.md#34-tools)). In `rapl`, flag a zone whose
+   counter didn't move in a run of 10 ms or more (stuck, or a 1 J unit), whose mean power is above
+   its highest power limit, or whose delta equals another package's (one counter read twice); the
+   raw counters and range are already stored. About 40 lines, low risk; here.
+2. **A/A and injected-regression modes, and a false-positive rate per host.** They give the
+   false-positive and detection rates against the number of runs (RQ3), which nobody reports for
+   energy (Laaber 2019, Bulej 2020, Fleming 2023; the gap is stated by EnergyTrackr); without an
+   effect-size floor, 49 of 60 planted null changes were flagged ([3.3](RESEARCH.md#33-methodology)).
+   Nothing to build for A/A: the same command under two workload names is an A/A pair. The
+   analysis applies the test used for real comparisons (a ratio CI bootstrapped over rounds, an
+   effect-size floor, Benjamini-Hochberg across comparisons) and reports the false-positive rate;
+   A/A queues with `settle_s` 0 and 60 also pick each host's settle, since a 60 s rest did not help
+   on the one server measured. About 100 lines of analysis; the rate needs a machine. Phase 10;
+   this brings its A/A half forward.
+3. **Order-independence check.** Whether a machine carries state between runs (Duplyakin 2023,
+   Maricq 2018): run some rounds in a fixed order, then test fixed against random (Kruskal-Wallis)
+   and run order against shuffled (Mann-Whitney). Analysis on top of `plan.json`; here. New.
+4. **Record what sets a meter's accuracy in `host.json`.** RAPL energy filtering adds 5-15% noise
+   at 100 ms and stays on until reboot once SGX or TDX is enabled; kernels changed units and listed
+   different AMD zones in powercap and perf until 6.6; mitigations changed run time by 2-11%;
+   AMD's energy is modeled (Schöne 2021) ([3.1](RESEARCH.md#31-meters),
+   [3.2](RESEARCH.md#32-sources-of-variation)). Add the filtering bit (MSR 0xBC bit 0, through the
+   planned `msr` verb, as the Green Metrics Tool does), the zones listed by powercap and by perf,
+   the zone backend (MSR, TPMI) and whether energy is modeled, `cpu/vulnerabilities/*`, and the
+   wall meter's model and accuracy; with filtering on or unknown, flag runs shorter than 1 s. About
+   40 lines, low risk (the MSR needs root); here, except the MSR. In design
+   ([meters](#meters-and-noise-record)), new fields.
+5. **A warm-up round, a thermal gate and a trend check.** Power drifts for about 7 min at constant
+   load, labs pre-heat for 15 min, many benchmarks never reach a steady state, and fixed warm-up
+   counts are wrong in most cases ([3.2](RESEARCH.md#32-sources-of-variation),
    [3.3](RESEARCH.md#33-methodology)); Krun and the Green Metrics Tool gate on temperature.
-   *Change:* `warmup_rounds` (default 1): shuffled rounds before the first one, marked `warmup` in
-   run.json and left out of the analysis; the [per-profile thermal gate](#queue-features), and,
-   like the Green Metrics Tool, a warm-up for a cold machine. The analysis runs a change-point test
-   (binary segmentation or PELT) on each pair's runs in run order and flags a shift. *Cost:*
-   about 30 lines, low risk, plus 50 of analysis. *Test:* here. *The basic thermal wait is built.*
-6. **Validate RAPL against the BMC and a wall meter on each host.** *Why:* wall against RAPL has a
-   slope of about 1.17, what RAPL misses grows with load (8.7% CPU only, 19-26% with GPUs), AMD's
-   RAPL is a model, and a BMC reported 14 W steps over 60 s windows
-   ([3.1](RESEARCH.md#31-meters)); BMC power is coarse and best kept off the host, matched by
-   time window (Kwollect). *Change:* a calibration queue in the repo (idle, one core, one socket,
+   `warmup_rounds` (default 1): shuffled rounds before the first, marked `warmup` in run.json and
+   left out of the analysis; the [per-profile thermal gate](#queue-features), and, like the Green
+   Metrics Tool, a warm-up for a cold machine. The analysis runs a change-point test (binary
+   segmentation or PELT) on each pair's runs in run order and flags a shift. About 30 lines plus 50
+   of analysis, low risk; here. The basic thermal wait is built.
+6. **Validate RAPL against the BMC and a wall meter on each host.** Wall against RAPL has a slope
+   of about 1.17, what RAPL misses grows with load, AMD's RAPL is a model, and a BMC reported 14 W
+   steps over 60 s windows ([3.1](RESEARCH.md#31-meters)); BMC data is best kept off the host and
+   matched by time window (Kwollect). A calibration queue in the repo (idle, one core, one socket,
    all cores, a memory-bound and an AVX workload, 5 min each, well above the BMC window) with the
    planned `wall` sampler; the analysis fits wall against RAPL per host, trims each edge by the
-   meters' lag and stores slope, offset and residual in the host profile. *Cost:* a queue file and
-   about 80 lines of analysis once `wall` exists. *Test:* machine with a reachable BMC ([open
-   question 1](#open-questions)).
-7. **Idle as a workload in every round, never one subtraction.** *Why:* idle energy varies more
-   than a light job's (up to +140%), and the first active core adds 22-81 W, so energy minus idle
-   × time is not the run's own energy ([3.3](RESEARCH.md#33-methodology)). *Change:* none in
-   minion (`"idle": {"cmd": ["sleep", "60"]}` works today). The analysis reports raw energy and,
-   separately, energy minus the same round's idle, with its CI. *Cost:* about 30 lines of
-   analysis. *Test:* here.
-8. **Adaptive repetitions that stop on each pair's own precision.** *Why:* the runs needed differ
-   more than 10× between setups (Hoefler 2015, Maricq 2018, Phoronix Test Suite); stopping when a
+   meters' lag and stores slope, offset and residual in the host profile. A queue file and about 80
+   lines of analysis once `wall` exists; a machine with a reachable BMC ([open question
+   1](#open-questions)).
+7. **Idle as a workload in every round, never one subtraction.** Idle energy varies more than a
+   light job's, and the first active core adds 22-81 W, so energy minus idle × time is not the
+   run's own energy ([3.3](RESEARCH.md#33-methodology)). Nothing to build (`"idle": {"cmd":
+   ["sleep", "60"]}` works today): the analysis reports raw energy and, separately, energy minus
+   the same round's idle, with its CI. About 30 lines of analysis; here.
+8. **Adaptive repetitions that stop on each pair's own precision.** The runs needed differ more
+   than 10× between setups (Hoefler 2015, Maricq 2018, Phoronix Test Suite); stopping when a
    comparison looks significant raises false positives about 5×; a relative CI-width rule matched
-   full runs best ([3.3](RESEARCH.md#33-methodology)). *Change:* `reps` may be
+   full runs best ([3.3](RESEARCH.md#33-methodology)). `reps` may be
    `{"min": 6, "max": 60, "ci_rel": 0.01}`: after each round, stop once every pair's median CI
-   half-width is below `ci_rel` of its median, or at `max`. The rule never looks at differences
-   between pairs; plan.json grows by a round at a time. *Cost:* about 100 lines, medium risk (plan
-   and resume format). *Test:* here, with fake workloads of known spread. *In design ([queue
-   features](#queue-features)); adds the precision-only rule.*
-9. **A canary workload that pauses the queue on drift.** *Why:* it catches slow machine drift
-   that statistics can't fix (Green Metrics Tool, Daly 2020). *In design ([queue
-   features](#queue-features)).*
-10. **Checks and quality flags kept with the run, never silent drops.** *Why:* the Green Metrics
-    Tool and tuned check the machine around runs; hyperfine warns about a first-run outlier; Krun
-    checks `dmesg`. *Change:* a `verify` command and start/end checks from the Green Metrics
-    Tool's list (timers, cron, NTP, swap, RAPL limits, suspend and steal time; a cheap suspend
-    check is a jump of `CLOCK_BOOTTIME` against `CLOCK_MONOTONIC`), a median/MAD outlier flag, a
-    first-run warning and new `dmesg` lines. *In design (flags, verify); adds the two rules.*
-11. **Temperatures and fans per run, from the host and the BMC.** *Why:* server power rose 16%
-    with CPU temperature and 5.6% with warmer rack neighbours, fan control alone moved energy 8.3%,
-    and SPECpower requires the inlet temperature ([3.2](RESEARCH.md#32-sources-of-variation),
-    [3.3](RESEARCH.md#33-methodology)). *Change:* the thermal wait already records hwmon
-    temperatures at each start; add the BMC's inlet temperature and fan speeds to the `wall`
-    series, matched to each run, as covariates for item 13. *Cost:* about 30 lines in the sampler,
-    low risk. *Test:* machine with a BMC.
-12. **Placement in the profile, checked after apply.** *Why:* one socket instead of two cut the
-    spread 30× at half load; on Zen 1, NUMA placement moved energy 8-13%; on Rome, offline SMT
-    siblings kept the package out of deep idle (+81 W) ([3.2](RESEARCH.md#32-sources-of-variation));
-    BenchExec measured +22% CPU time from contention and +6.8% from remote memory, on old
-    hardware ([RESEARCH.md](RESEARCH.md#1-tools)). *Change:* the workload's CPU list becomes part of the
-    profile and of run.json, with host profiles that pick whole physical cores on one socket with
-    local memory; after an apply that changes SMT or idle states, a 10 s idle RAPL read is
-    compared with one taken before and a jump is flagged. *Cost:* about 40 lines on top of
-    [isolation](#isolation), medium risk. *Test:* the check here, its numbers on an AMD and an
-    Intel machine.
-13. **Covariates named before the RQ3 runs.** *Why:* no benchmarking work was found that adjusts
-    energy with noise covariates; CUPED cuts variance with a covariate measured before the
-    experiment (Deng 2013), and regression adjustment with treatment × covariate terms cannot lose
-    asymptotic precision ([3.3](RESEARCH.md#33-methodology)). *Change:* fix the covariates in
-    advance and use only values the change can't affect: the start temperatures (thermal wait),
-    logins and load at the start (noise record), and other cgroups' CPU time and interrupts over a
-    window before the start read (new: the noise record has only their in-run changes). Report
-    adjusted and unadjusted results, judged by item 2 and the injected mode. *Cost:* analysis, plus
-    the pre-run window. *Test:* here on synthetic data, the effect on a machine. *In design
-    ([RQ3](#research-questions)).*
-14. **Measure and publish the runner's own overhead.** With a calibrate script, as the Green
-    Metrics Tool did. *In design ([RQ2](#research-questions)).*
-15. **GPU energy from counters, with a minimum run length.** *Why:* NVML power covers 25 ms of
-    every 100 ms on A100 and H100 and integrating it errs by up to 70%; the energy counter reads
-    0 J for windows shorter than its update; old sensors lag by 0.84 s
-    ([3.1](RESEARCH.md#31-meters), [3.4](RESEARCH.md#34-tools)). *Change:* the planned `nvml`
-    meter reads only the energy counter, records the driver version, flags runs shorter than 5 s
-    (the paper's minimum for power readings, until the counter's own update is measured) and
-    settles between GPU runs. *Cost:* about 10 lines on top of phase 8. *Test:* GPU machine.
+   half-width is below `ci_rel` of its median, or at `max`; the rule never looks at differences
+   between pairs, and plan.json grows a round at a time. About 100 lines, medium risk (plan and
+   resume format); here, with fake workloads of known spread. In design ([queue
+   features](#queue-features)); adds the precision-only rule.
+9. **A canary workload that pauses the queue on drift**, for slow machine drift that statistics
+   can't fix (Green Metrics Tool, Daly 2020). In design ([queue features](#queue-features)).
+10. **Checks and quality flags kept with the run, never silent drops.** A `verify` command and
+    start/end checks from the Green Metrics Tool's list (timers, cron, NTP, swap, RAPL limits,
+    suspend and steal time; tuned verifies too), where a jump of `CLOCK_BOOTTIME` against
+    `CLOCK_MONOTONIC` is a cheap suspend check; a median/MAD outlier flag, a first-run warning
+    (hyperfine) and new `dmesg` lines (Krun). In design (flags, verify); adds the two rules.
+11. **Temperatures and fans per run, from the host and the BMC.** Server power rose 16% with CPU
+    temperature and 5.6% with warmer rack neighbours, fan control alone moved energy 8.3%, and
+    SPECpower requires the inlet temperature ([3.2](RESEARCH.md#32-sources-of-variation),
+    [3.3](RESEARCH.md#33-methodology)). The thermal wait already records hwmon temperatures at
+    each start; add the BMC's inlet temperature and fan speeds to the `wall` series, matched to
+    each run, as covariates for item 13. About 30 lines in the sampler, low risk; a machine with a
+    BMC.
+12. **Placement in the profile, checked after apply.** One socket instead of two cut the spread
+    30× at half load, NUMA placement moved energy 8-13% on Zen 1, and offline SMT siblings kept a
+    Rome package out of deep idle (+81 W) ([3.2](RESEARCH.md#32-sources-of-variation)); BenchExec
+    measured +22% CPU time from contention and +6.8% from remote memory, on old hardware
+    ([1](RESEARCH.md#1-tools)). The workload's CPU list becomes part of the profile and of
+    run.json, with host profiles that pick whole physical cores on one socket with local memory;
+    after an apply that changes SMT or idle states, a 10 s idle RAPL read is compared with one
+    taken before, and a jump is flagged. About 40 lines on top of [isolation](#isolation), medium
+    risk; the check here, its numbers on an AMD and an Intel machine.
+13. **Covariates named before the RQ3 runs.** No benchmarking work was found that adjusts energy
+    with noise covariates; CUPED cuts variance with a covariate measured before the experiment
+    (Deng 2013), and regression adjustment with treatment × covariate terms cannot lose asymptotic
+    precision ([3.3](RESEARCH.md#33-methodology)). Fix the covariates in advance and use only
+    values the change can't affect: the start temperatures (thermal wait), logins and load at the
+    start (noise record), and other cgroups' CPU time and interrupts over a window before the
+    start read (new: the noise record has only their in-run changes). Report adjusted and
+    unadjusted results, judged by item 2 and the injected mode. Analysis, plus the pre-run window;
+    here on synthetic data, the effect on a machine. In design ([RQ3](#research-questions)).
+14. **Measure and publish the runner's own overhead**, with a calibrate script, as the Green
+    Metrics Tool did. In design ([RQ2](#research-questions)).
+15. **GPU energy from counters, with a minimum run length.** NVML power covers 25 ms of every
+    100 ms on A100 and H100 and integrating it errs by up to 70%; the energy counter reads 0 J for
+    windows shorter than its update; old sensors lag by 0.84 s ([3.1](RESEARCH.md#31-meters),
+    [3.4](RESEARCH.md#34-tools)). The planned `nvml` meter reads only the energy counter, records
+    the driver version, flags runs shorter than 5 s (the paper's minimum for power readings, until
+    the counter's own update is measured) and settles between GPU runs. About 10 lines on top of
+    phase 8; a GPU machine.
 16. **Offline change-point detection across commits**, deterministic and with a minimum history
-    (Daly 2020, Fleming 2023). *Later, for continuous use.*
+    (Daly 2020, Fleming 2023). Later, for continuous use.
 
 Avoid: resetting to fixed defaults (pyperf, LIKWID, EnergyTrackr); one-way machine preparation
 (the Green Metrics Tool's NOP Linux); periodic samplers that visit every CPU during runs
