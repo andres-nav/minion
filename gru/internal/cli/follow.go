@@ -9,13 +9,13 @@ import (
 )
 
 // jobStatus reads a job's recorded exit code; ok is false while it runs.
-func jobStatus(dir string) (code int, ok bool) {
-	b, err := os.ReadFile(filepath.Join(dir, "status"))
-	if err != nil {
-		return 0, false
-	}
-	code, err = strconv.Atoi(strings.TrimSpace(string(b)))
-	return code, err == nil
+func jobStatus(dir string) (int, bool) { return readInt(filepath.Join(dir, "status")) }
+
+// readInt reads the number in a job file.
+func readInt(path string) (int, bool) {
+	b, err := os.ReadFile(path)
+	n, nerr := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n, err == nil && nerr == nil
 }
 
 // onThisHost reports whether the job in dir was launched on this machine, so

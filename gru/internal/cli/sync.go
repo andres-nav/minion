@@ -15,7 +15,7 @@ func cmdSync(args []string) int {
 	fs := flag.NewFlagSet("sync", flag.ContinueOnError)
 	host := hostFlag(fs)
 	del := fs.Bool("delete", false, "delete remote files that are not here (except excluded and git-ignored ones)")
-	if err := fs.Parse(args); err != nil {
+	if _, err := parseArgs(fs, args, false); err != nil {
 		return 2
 	}
 	t, err := connect(*host, true)
@@ -27,7 +27,7 @@ func cmdSync(args []string) int {
 		fmt.Println("nothing to sync: local host runs in place")
 		return 0
 	}
-	sent, removed, err := pushChanges(t, t.r.Root, t.r.Template.Exclude, t.dir, *del, true)
+	sent, removed, err := pushChanges(t, t.r.Root, t.r.Template.Exclude, t.dir, *del, sync.WalkGit)
 	if err != nil {
 		return errf("%v", err)
 	}
@@ -35,11 +35,10 @@ func cmdSync(args []string) int {
 	return 0
 }
 
-// pushChanges sends the files of root that differ from remoteDir's, through
-// the agent: with git, the files git lists (respecting .gitignore), else every
-// file. With del, remote files absent here are removed, except excluded and
+// pushChanges sends the files of root that walk lists (sync.WalkGit respects
+// .gitignore) that differ from remoteDir's, through the agent. With del, remote files absent here are removed, except excluded and
 // git-ignored ones. Returns the counts of files sent and removed.
-func pushChanges(t *target, root string, exclude []string, remoteDir string, del, git bool) (int, int, error) {
+func pushChanges(t *target, root string, exclude []string, remoteDir string, del bool, walk func(string, []string) (sync.Manifest, error)) (int, int, error) {
 	// The excludes filter the remote manifest too, so --delete never removes
 	// excluded remote files (build output, etc.).
 	cmd := t.agent + " _agent manifest " + remote.RemotePath(remoteDir)
@@ -53,10 +52,6 @@ func pushChanges(t *target, root string, exclude []string, remoteDir string, del
 	var theirs sync.Manifest
 	if err := json.Unmarshal([]byte(out), &theirs); err != nil {
 		return 0, 0, fmt.Errorf("bad remote manifest: %w", err)
-	}
-	walk := sync.Walk
-	if git {
-		walk = sync.WalkGit
 	}
 	ours, err := walk(root, exclude)
 	if err != nil {

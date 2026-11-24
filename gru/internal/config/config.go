@@ -25,24 +25,13 @@ type Config struct {
 // ${ENV} references, resolved locally at launch so credentials never live in
 // the config or the repo.
 type Notify struct {
-	On    string            `json:"on"`
-	Email *EmailSink        `json:"email,omitempty"`
-	Run   []string          `json:"run,omitempty"` // shell run at job end with $GRU_* in the environment (e.g. a curl webhook)
-	Env   map[string]string `json:"env,omitempty"` // extra vars exported for the run hooks; values accept ${ENV}
-}
-
-// EmailSink is an SMTP recipient. SMTP is host:port (e.g. smtp.gmail.com:587).
-// User defaults to From; Pass is an SMTP/app password.
-type EmailSink struct {
-	SMTP string `json:"smtp"`
-	From string `json:"from"`
-	To   string `json:"to"`
-	User string `json:"user"`
-	Pass string `json:"pass"`
+	On  string            `json:"on"`
+	Run []string          `json:"run,omitempty"` // shell run at job end with $GRU_* in the environment (e.g. a curl webhook)
+	Env map[string]string `json:"env,omitempty"` // extra vars exported for the run hooks; values accept ${ENV}
 }
 
 func (n *Notify) empty() bool {
-	return n == nil || (n.Email == nil && len(n.Run) == 0)
+	return n == nil || len(n.Run) == 0
 }
 
 // Validate reports a configuration error in the notify block, if any.
@@ -52,9 +41,6 @@ func (n *Notify) Validate() error {
 	}
 	if !slices.Contains([]string{"", "always", "failure", "success"}, n.On) {
 		return fmt.Errorf("notify.on %q must be always, failure or success", n.On)
-	}
-	if e := n.Email; e != nil && (e.SMTP == "" || e.From == "" || e.To == "") {
-		return errors.New("notify.email needs smtp, from and to")
 	}
 	return nil
 }
@@ -95,8 +81,8 @@ type Template struct {
 	Detect    []string          `json:"detect"`
 	Host      string            `json:"host"`
 	RemoteDir string            `json:"remote_dir"` // overrides the host's remote_dir (e.g. a workspace slot)
-	Needs     []string          `json:"needs"`      // sibling packages to sync first (e.g. Brazil deps)
-	Push      []string          `json:"push"`       // local dirs copied to the same remote path first (e.g. ~/.midway)
+	Needs     []string          `json:"needs"`      // sibling repos the project needs, synced first
+	Push      []string          `json:"push"`       // local dirs copied to the same remote path first (e.g. ~/.aws)
 	Exclude   []string          `json:"exclude"`
 	Env       []string          `json:"env"` // KEY=VALUE, exported before the command/hooks
 	Before    []string          `json:"before"`
@@ -114,8 +100,8 @@ var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 // validate refuses a bad notify block, and an env name the job's export would fail on.
 func (t Template) validate() error {
 	for _, e := range t.Env {
-		if k, _, _ := strings.Cut(e, "="); !envName.MatchString(k) {
-			return fmt.Errorf("env %q: not a variable name", e)
+		if k, _, ok := strings.Cut(e, "="); !ok || !envName.MatchString(k) {
+			return fmt.Errorf("env %q: not KEY=VALUE", e)
 		}
 	}
 	return t.Notify.Validate()

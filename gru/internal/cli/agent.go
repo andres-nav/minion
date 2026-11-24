@@ -26,9 +26,6 @@ func cmdAgent(args []string) int {
 	}
 	verb, args := args[0], args[1:]
 	switch verb {
-	case "version":
-		fmt.Printf("gru %s\n", version)
-		return 0
 	case "now":
 		fmt.Println(time.Now().UnixNano())
 		return 0
@@ -71,7 +68,7 @@ func cmdAgent(args []string) int {
 	return 0
 }
 
-// notifyTimeout bounds a job-end notification: email and run hooks together.
+// notifyTimeout bounds a job-end notification's run hooks together.
 var notifyTimeout = 30 * time.Second
 
 // agentNotify announces a finished job as the notify block in --config says (a
@@ -115,21 +112,6 @@ func agentNotify(args []string) int {
 	ctx, cancel := context.WithTimeout(context.Background(), notifyTimeout)
 	defer cancel()
 	code := 0
-	if e := n.Email; e != nil {
-		sent := make(chan error, 1)
-		go func() {
-			sent <- notify.Email{Addr: e.SMTP, From: e.From, To: splitList(e.To), User: e.User, Pass: e.Pass}.Send(subj, text)
-		}()
-		select {
-		case err = <-sent:
-		case <-ctx.Done():
-			err = ctx.Err()
-		}
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[gru] notify: email failed: %v\n", err)
-			code = 1
-		}
-	}
 	for _, c := range n.Run {
 		cmd := exec.CommandContext(ctx, "sh", "-c", c)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -169,16 +151,6 @@ func atoiOr(s string, def int) int {
 		return n
 	}
 	return def
-}
-
-func splitList(s string) []string {
-	var out []string
-	for _, p := range strings.Split(s, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
 }
 
 // tailFile returns the last n lines of path, read from its last 64 KiB, or "".

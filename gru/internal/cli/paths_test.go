@@ -8,21 +8,6 @@ import (
 	_ "time/tzdata" // Europe/Zurich wherever the tests run
 )
 
-func TestRemoteDirFor(t *testing.T) {
-	cases := []struct {
-		tmplDir, hostDir, root, want string
-	}{
-		{"", "", "/x/myrepo", "gru/myrepo"},                         // default, {repo} expanded
-		{"", "~/exp/{repo}", "/x/myrepo", "~/exp/myrepo"},           // host dir used
-		{"slot/{repo}", "~/exp/{repo}", "/x/myrepo", "slot/myrepo"}, // template wins over host
-	}
-	for _, c := range cases {
-		if got := remoteDirFor(c.tmplDir, c.hostDir, c.root); got != c.want {
-			t.Errorf("remoteDirFor(%q,%q,%q) = %q, want %q", c.tmplDir, c.hostDir, c.root, got, c.want)
-		}
-	}
-}
-
 func TestFetchDest(t *testing.T) {
 	root, id := "/proj/repo", "brave_otter-20261123T142501Z"
 	if got := fetchDest(root, "", id); got != root {

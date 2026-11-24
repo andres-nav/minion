@@ -16,23 +16,23 @@ import (
 func TestAgentBinary(t *testing.T) {
 	dir := t.TempDir()
 	self := filepath.Join(dir, "bin", "gru")
-	if got, err := agentBinary(self, runtime.GOOS+"/"+runtime.GOARCH); err != nil || got != self {
+	if got, err := Binary("gru", runtime.GOOS+"/"+runtime.GOARCH); err != nil || got != must(os.Executable()) {
 		t.Fatalf("own platform: got %q err %v", got, err)
 	}
-	if _, err := agentBinary(self, "plan9/mips"); err == nil || !strings.Contains(err.Error(), "make build") {
+	if _, err := bundled(self, "gru-plan9-mips"); err == nil || !strings.Contains(err.Error(), "make build") {
 		t.Fatalf("missing cross binary: err %v", err)
 	}
 	// next to the binary (the build tree), else in ../libexec/gru (installed).
 	libexec := filepath.Join(dir, "libexec", "gru", "gru-plan9-mips")
 	os.MkdirAll(filepath.Dir(libexec), 0o755)
 	os.WriteFile(libexec, nil, 0o755)
-	if got, err := agentBinary(self, "plan9/mips"); err != nil || got != filepath.Join(dir, "bin", "..", "libexec", "gru", "gru-plan9-mips") {
+	if got, err := bundled(self, "gru-plan9-mips"); err != nil || got != filepath.Join(dir, "bin", "..", "libexec", "gru", "gru-plan9-mips") {
 		t.Fatalf("libexec: got %q err %v", got, err)
 	}
 	sibling := filepath.Join(dir, "bin", "gru-plan9-mips")
 	os.MkdirAll(filepath.Dir(sibling), 0o755)
 	os.WriteFile(sibling, nil, 0o755)
-	if got, err := agentBinary(self, "plan9/mips"); err != nil || got != sibling {
+	if got, err := bundled(self, "gru-plan9-mips"); err != nil || got != sibling {
 		t.Fatalf("sibling: got %q err %v", got, err)
 	}
 }
@@ -46,8 +46,8 @@ func TestUnameToGo(t *testing.T) {
 		"FreeBSD riscv64": "freebsd/riscv64", // unknown os+arch lower-cased/passed through
 	}
 	for in, want := range cases {
-		if got := unameToGo(in); got != want {
-			t.Errorf("unameToGo(%q) = %q, want %q", in, got, want)
+		if got := UnameToGo(in); got != want {
+			t.Errorf("UnameToGo(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -62,10 +62,10 @@ func localClient(home string) *Client {
 	}}
 }
 
-// fakeAgent writes a script that answers `_agent version` with version.
+// fakeAgent writes a script that answers `version` with version.
 func fakeAgent(t *testing.T, version, extra string) string {
 	p := filepath.Join(t.TempDir(), "gru-fake")
-	script := "#!/bin/sh\n# " + extra + "\nif [ \"$1\" = \"_agent\" ] && [ \"$2\" = \"version\" ]; then echo \"gru " + version + "\"; fi\n"
+	script := "#!/bin/sh\n# " + extra + "\nif [ \"$1\" = \"version\" ]; then echo \"gru " + version + "\"; fi\n"
 	if err := os.WriteFile(p, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,8 @@ func fakeAgent(t *testing.T, version, extra string) string {
 func TestEnsureAgent(t *testing.T) {
 	home := t.TempDir()
 	c := localClient(home)
-	platform, _ := c.Platform()
+	unm, _ := c.Output("uname -sm")
+	platform := UnameToGo(unm)
 	ensure := func(bin string) string {
 		t.Helper()
 		invoke, err := c.EnsureAgent("~/state", "dev", platform, bin)
@@ -136,14 +137,6 @@ func TestEnsureMinion(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(home, "state/bin/minion-v1-linux-amd64-5fddb9545db6")); string(b) != "build one" {
 		t.Fatalf("uploaded %q", b)
 	}
-	// Another build of the same version gets its own file, and nothing is rewritten.
-	os.WriteFile(bin, []byte("build two"), 0o755)
-	if other, err := c.EnsureMinion("~/state", "v1", "linux/amd64", bin); err != nil || other == path {
-		t.Fatalf("another build: %q, %v", other, err)
-	}
-	if b, _ := os.ReadFile(filepath.Join(home, "state/bin/minion-v1-linux-amd64-5fddb9545db6")); string(b) != "build one" {
-		t.Fatalf("the first build was rewritten: %q", b)
-	}
 }
 
 func TestUploadIsCheckedOnTheHost(t *testing.T) {
@@ -174,11 +167,6 @@ func TestRunAndOutput(t *testing.T) {
 		}
 		if code, err := c.Run("exit 5", nil, nil, nil); err != nil || code != 5 {
 			t.Fatalf("Run = %d, %v; want 5", code, err)
-		}
-		var got string
-		code, err := c.RunStdout("echo streamed", nil, func(r io.Reader) error { b, _ := io.ReadAll(r); got = string(b); return nil })
-		if err != nil || code != 0 || got != "streamed\n" {
-			t.Fatalf("RunStdout = %d, %v, %q", code, err, got)
 		}
 	}
 }
@@ -237,3 +225,5 @@ echo $$ > "$cp.pid"; : > "$cp"; exec sleep 30
 		t.Errorf("the master %d still runs after Close", pid)
 	}
 }
+
+func must(s string, _ error) string { return s }

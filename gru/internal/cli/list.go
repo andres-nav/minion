@@ -10,7 +10,7 @@ import (
 func cmdList(args []string) int {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	if err := fs.Parse(args); err != nil {
+	if _, err := parseArgs(fs, args, false); err != nil {
 		return 2
 	}
 	r, err := project()

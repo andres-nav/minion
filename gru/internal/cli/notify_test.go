@@ -12,8 +12,8 @@ import (
 )
 
 func TestResolveSecret(t *testing.T) {
-	t.Setenv("SMTP_PW", "s3cret")
-	for in, want := range map[string]string{"${SMTP_PW}": "s3cret", "$SMTP_PW": "s3cret", "literal": "literal", "": ""} {
+	t.Setenv("TOKEN", "s3cret")
+	for in, want := range map[string]string{"${TOKEN}": "s3cret", "$TOKEN": "s3cret", "literal": "literal", "": ""} {
 		if got, err := resolveSecret(in); err != nil || got != want {
 			t.Errorf("resolveSecret(%q) = %q, %v; want %q", in, got, err, want)
 		}
@@ -26,20 +26,18 @@ func TestResolveSecret(t *testing.T) {
 }
 
 func TestResolvedNotify(t *testing.T) {
-	t.Setenv("PW", "app-password")
 	t.Setenv("TOKEN", "s3cret-token")
 	n := &config.Notify{
-		Email: &config.EmailSink{SMTP: "smtp.x:587", From: "me@x", To: "me@x", Pass: "${PW}"},
-		Run:   []string{"echo done"},
-		Env:   map[string]string{"TOKEN": "${TOKEN}"},
+		Run: []string{"echo done"},
+		Env: map[string]string{"TOKEN": "${TOKEN}"},
 	}
 	s, err := resolvedNotify(n)
-	for _, want := range []string{`"pass":"app-password"`, `"TOKEN":"s3cret-token"`, `"run":["echo done"]`} {
+	for _, want := range []string{`"TOKEN":"s3cret-token"`, `"run":["echo done"]`} {
 		if err != nil || !strings.Contains(s, want) {
 			t.Errorf("resolved block missing %s: %s %v", want, s, err)
 		}
 	}
-	if strings.Contains(s, "${") || strings.Contains(s, "\n") || n.Email.Pass != "${PW}" {
+	if strings.Contains(s, "${") || strings.Contains(s, "\n") || n.Env["TOKEN"] != "${TOKEN}" {
 		t.Errorf("secret reference left, not one line, or config mutated: %s", s)
 	}
 	n.Env["X"] = "$UNSET_VAR"

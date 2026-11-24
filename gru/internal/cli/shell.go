@@ -12,7 +12,7 @@ import (
 func cmdSSH(args []string) int {
 	fs := flag.NewFlagSet("ssh", flag.ContinueOnError)
 	host := hostFlag(fs)
-	if err := fs.Parse(args); err != nil {
+	if _, err := parseArgs(fs, args, false); err != nil {
 		return 2
 	}
 	t, err := connect(*host, false)

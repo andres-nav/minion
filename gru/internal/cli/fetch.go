@@ -19,7 +19,7 @@ func cmdFetch(args []string) int {
 	fs := flag.NewFlagSet("fetch", flag.ContinueOnError)
 	host := hostFlag(fs)
 	into := fs.String("into", "", "local destination (overrides fetch_into)")
-	id, err := parsePositional(fs, args)
+	id, err := parseArgs(fs, args, true)
 	if err != nil {
 		return 2
 	}
@@ -66,13 +66,17 @@ func pullResults(t *target, dir string, patterns []string, dest string) (int, er
 	for _, p := range patterns {
 		cmd += " " + remote.ShellQuote(p)
 	}
-	count := 0
-	code, err := t.RunStdout(cmd, os.Stderr, func(rd io.Reader) (e error) {
-		count, e = sync.Receive(rd, dest)
-		return e
-	})
-	if err == nil && code != 0 {
-		err = fmt.Errorf("remote send failed (exit %d)", code)
-	}
-	return count, err
+	pr, pw := io.Pipe()
+	sent := make(chan error, 1)
+	go func() {
+		code, err := t.Run(cmd, nil, pw, os.Stderr)
+		if err == nil && code != 0 {
+			err = fmt.Errorf("remote send failed (exit %d)", code)
+		}
+		pw.CloseWithError(err)
+		sent <- err
+	}()
+	n, err := sync.Receive(pr, dest)
+	pr.Close()
+	return n, cmp.Or(err, <-sent)
 }
