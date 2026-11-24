@@ -20,6 +20,29 @@ pub const O_NOFOLLOW: i32 = 0o400000;
 #[cfg(target_arch = "aarch64")]
 pub const O_NOFOLLOW: i32 = 0o100000;
 
+#[cfg(target_arch = "x86_64")]
+pub const SYS_PERF_EVENT_OPEN: i64 = 298;
+#[cfg(target_arch = "aarch64")]
+pub const SYS_PERF_EVENT_OPEN: i64 = 241;
+pub const PERF_FLAG_FD_CLOEXEC: i64 = 8;
+
+/// perf_event_attr up to config1 (PERF_ATTR_SIZE_VER0). All zero but the type,
+/// size and config is a counting event, enabled at open.
+#[repr(C)]
+#[derive(Default)]
+pub struct PerfEventAttr {
+    pub kind: u32,
+    pub size: u32,
+    pub config: u64,
+    pub sample_period: u64,
+    pub sample_type: u64,
+    pub read_format: u64,
+    pub flags: u64,
+    pub wakeup_events: u32,
+    pub bp_type: u32,
+    pub config1: u64,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Timespec {
@@ -35,4 +58,5 @@ unsafe extern "C" {
     pub fn signal(sig: i32, handler: usize) -> usize;
     pub fn clock_gettime(clock: i32, ts: *mut Timespec) -> i32;
     pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
+    pub fn syscall(num: i64, ...) -> i64;
 }

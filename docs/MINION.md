@@ -40,7 +40,8 @@ its main process exits. Apart from starting the workload, the runner only waits 
 does not log, write, send or fork. Settings snapshots, the settle, `run.json`, events,
 `notify.cmd` and requests to serve all happen between runs. The `rapl` meter reads `energy_uj`
 through sysfs, one `pread` per zone on files opened once per queue, not through perf, which keeps
-a periodic timer ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
+a periodic timer ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)). Only where `energy_uj` is
+root-only does it count the power PMU's energy events through perf, read once at each edge.
 
 A queue's workload runs in its own process group with `PR_SET_PDEATHSIG(SIGKILL)`, so it dies
 with the runner; a stop signal only makes the runner send `SIGTERM` to that group. The window

@@ -540,6 +540,18 @@ check_serve() {
     fail "done/ is not 0700 with 0600 journals"
 }
 
+# With energy_uj unreadable, run counts RAPL through perf. A power PMU of no such type fails to
+# open, and the run goes on and says why.
+check_perf() {
+  cp -r "$sys" "$T/sys-perf" && chmod 000 "$T/sys-perf/class/powercap/intel-rapl:0/energy_uj"
+  p=$T/sys-perf/bus/event_source/devices/power
+  mkdir -p "$p/events" && echo 4294967295 > "$p/type" && echo 0 > "$p/cpumask"
+  echo event=0x02 > "$p/events/energy-pkg" && echo Joules > "$p/events/energy-pkg.unit"
+  echo 2.3283064365386962890625e-10 > "$p/events/energy-pkg.scale"
+  "$M" run --sysfs "$T/sys-perf" --out "$T/perf-run.json" -- true || fail "run with no perf"
+  grep -qF '"perf_error": "perf_event_open energy-pkg on cpu 0: ' "$T/perf-run.json" || fail "run: no perf error"
+}
+
 check_snapshot() {
   want 0 snapshot "$M" snapshot
   [ ! -d /sys/devices/system/cpu/cpu0/cpuidle/state0 ] || has "$T/snapshot.out" '"cpu0/state0":'
@@ -555,7 +567,7 @@ for c in "remote:remote path (fake ssh)" "localhost:--host localhost" \
   "detach:detach, ps, attach, kill and a crashed runner" "two:two queues" \
   "cli:every gru option" "utc:every time in UTC (TZ=$TZ)" \
   "exit:exit codes and broken queue files" "serve:root through serve and gru setup" \
-  "snapshot:snapshot and run on the real /sys"; do
+  "perf:RAPL through perf when energy_uj is unreadable" "snapshot:snapshot and run on the real /sys"; do
   SECONDS=0
   if (cd "$T/proj" && "check_${c%%:*}") < /dev/null > "$T/${c%%:*}.log" 2>&1; then
     echo "PASS ${c#*:} ($SECONDS s)"
