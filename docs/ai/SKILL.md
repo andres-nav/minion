@@ -53,8 +53,14 @@ This prints the resolved `template`, `host`, `remote_dir`, and available
   `--all` for every job on the host.
 - `gru kill <id>` — stop a running job (SIGTERM; its hooks still run).
 - `gru ssh` — interactive shell on the host, in the project's remote dir.
-- `gru doctor [--notify]` — check config + hosts (reachable + agent);
-  `--notify` also sends a test notification (email and/or run hooks).
+- `gru doctor [--notify]` — check config + hosts (reachable, agent, minion,
+  and whether minion has root there); `--notify` also sends a test
+  notification (email and/or run hooks).
+- `gru minion <args> --host <name>` — run a minion command on the host, e.g.
+  `gru minion snapshot` or `gru minion restore`.
+- `gru setup --host <name>` — give minion root on a host, once per gru
+  build. It asks for the user's sudo password, so it needs a terminal:
+  never run it yourself; ask the user to.
 
 Flags can follow the positional arg (`gru attach my_job --host gpu`).
 
@@ -97,3 +103,6 @@ Flags can follow the positional arg (`gru attach my_job --host gpu`).
   parse `gru list --json` for machine-readable task discovery.
 - If a remote op says "no host configured", pass `--host` (use `--host
   localhost` to run locally as a managed job).
+- If a task exits 77 with "minion needs root on <host>: run `gru setup --host
+  <host>` once in a terminal", stop and ask the user to run that command, then
+  run the task again. Don't retry before that, and don't call sudo yourself.
