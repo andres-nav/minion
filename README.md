@@ -52,7 +52,8 @@ gru uploads it, and `gru setup --host X` gives it root there once per build.
 
 `make e2e` runs real queues and every gru command and option through `gru run` with no ssh and no
 root: `test/ssh` stands in for ssh and runs the "remote" commands here, with their own home;
-`test/sudo` and `test/visudo` stand in for sudo (as this user, with requiretty) and visudo; and
+`test/sudo` and `test/visudo` stand in for sudo (as this user, with requiretty) and visudo
+(classic sudo's rules, or sudo-rs's); and
 the runner works on a fake sysfs and powercap tree. Everything lives in one temp dir (`E2E_KEEP=1`
 keeps it). CI runs `make test e2e` on every pull request. It can't cover real RAPL and cpufreq
 writes, real sudo, real ssh, email or several hosts: test those on a real machine.
