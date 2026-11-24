@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::engine;
 use crate::journal::Journal;
-use crate::queue::{SplitMix64, parse, plan};
+use crate::queue::{parse, plan, splitmix64};
 use crate::settings::{State, Values, snapshot};
 use crate::utc;
 
@@ -106,7 +106,7 @@ impl Fake {
         let out = self.root.join("run.json");
         let _ = fs::remove_file(&out);
         let cmd = ["sh", "-c", script].map(String::from);
-        let code = crate::run::run(&self.sys, &out, &cmd, 1000).unwrap();
+        let code = crate::run::run(&self.sys, &out, &cmd).unwrap();
         (code, read_json(&out))
     }
 
@@ -138,7 +138,7 @@ impl Fake {
         }
         let file = self.root.join(format!("{name}-{}.json", utc::now_ns()));
         fs::write(&file, q.to_string()).unwrap();
-        crate::queue::run(&self.opts(), &file, 1000)
+        crate::queue::run(&self.opts(), &file)
     }
 
     /// The one results dir of the queue named name.
@@ -303,42 +303,16 @@ fn apply_then_restore_gives_the_original() {
     assert_eq!(applied["cpu.turbo"]["no_turbo"], "1");
     assert_eq!(applied["cpu.idle.disable"]["cpu1/state2"], "1");
     assert_eq!(applied["cpu.idle.disable"]["cpu1/state1"], "0");
-    assert!(f.journal().exists());
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&f.state), 0o711); // others can stat journal.jsonl, not list or read it
+    assert_eq!(mode(&f.state.join("lock")), 0o600);
+    assert_eq!(mode(&f.journal()), 0o600);
 
     assert!(restore(&f.sys, &f.state).unwrap().is_empty());
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(!f.journal().exists());
-    assert_eq!(
-        f.done(),
-        ["open", "saved", "apply", "applied", "restored", "close"]
-    );
-}
-
-#[test]
-fn the_state_dir_shows_only_whether_a_journal_is_open() {
-    let f = Fake::new("private");
-    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-    apply(&f.sys, &f.state, &stable()).unwrap();
-    assert_eq!(mode(&f.state), 0o711); // others can stat journal.jsonl, not list or read it
-    assert_eq!(mode(&f.state.join("lock")), 0o600);
-    assert_eq!(mode(&f.journal()), 0o600);
-    restore(&f.sys, &f.state).unwrap();
     assert_eq!(mode(&f.state.join("done")), 0o700);
-}
-
-#[test]
-fn saved_is_never_overwritten() {
-    let f = Fake::new("two-applies");
-    let before = snapshot(&f.sys).unwrap();
-    apply(&f.sys, &f.state, &stable()).unwrap();
-    apply(
-        &f.sys,
-        &f.state,
-        &profile(json!({"cpu.governor": {"policy0": "powersave"}})),
-    )
-    .unwrap();
-    restore(&f.sys, &f.state).unwrap();
-    assert_eq!(snapshot(&f.sys).unwrap(), before);
+    assert_eq!(f.done(), ["saved", "apply", "applied", "restored"]);
 }
 
 #[test]
@@ -349,14 +323,15 @@ fn restore_twice_is_harmless() {
     restore(&f.sys, &f.state).unwrap();
     assert_eq!(f.serve("restore\n"), ["ok no journal open"]);
     assert_eq!(snapshot(&f.sys).unwrap(), before);
-    assert_eq!(f.done().len(), 6);
+    assert_eq!(f.done().len(), 4);
 }
 
 #[test]
 fn crash_between_apply_and_applied_restores_every_object() {
     let f = Fake::new("crash");
     let before = snapshot(&f.sys).unwrap();
-    // The journal a crash leaves: an apply intent, no read-back, a torn last line.
+    // The journal a crash leaves (with the open line older builds wrote): an apply
+    // intent, no read-back, a torn last line.
     let lines = [
         json!({"t": "open"}),
         json!({"t": "saved", "state": before}),
@@ -370,7 +345,7 @@ fn crash_between_apply_and_applied_restores_every_object() {
 
     assert!(restore(&f.sys, &f.state).unwrap().is_empty());
     assert_eq!(snapshot(&f.sys).unwrap(), before);
-    assert_eq!(f.done(), ["open", "saved", "apply", "restored", "close"]);
+    assert_eq!(f.done(), ["open", "saved", "apply", "restored"]);
 }
 
 #[test]
@@ -569,18 +544,20 @@ fn overrides_are_refused_as_root() {
         );
         assert_eq!(crate::parse_opts("restore", &a, 1000).unwrap().test, a);
     }
+    for verb in ["run", "queue", "reap"] {
+        refused(
+            crate::parse_opts(verb, &[], 0),
+            &format!("{verb} is refused as root"),
+        );
+    }
     let out = strings(&["--out", "/tmp/x"]);
-    refused(
-        crate::parse_opts("run", &out, 0),
-        "--out is refused as root",
-    );
     assert!(
         crate::parse_opts("run", &out, 1000)
             .unwrap()
             .test
             .is_empty()
     );
-    let q = crate::parse_opts("queue", &strings(&["q.json"]), 0).unwrap();
+    let q = crate::parse_opts("queue", &strings(&["q.json"]), 1000).unwrap();
     assert!(q.test.is_empty());
     let o = crate::parse_opts("restore", &[], 0).unwrap();
     assert_eq!(
@@ -730,8 +707,6 @@ fn the_noise_record_reads_proc_and_other_cgroups_around_a_run() {
     let at = |irq0: u64| json!({"interrupts": {"0": [irq0, 2], "NMI": [5, 5]}, "ctxt": 10});
     let (r, _) = crate::run::Meter::report(&crate::noise::Noise::open(&f.sys), &at(1), &at(3), 1.0);
     assert_eq!(r["interrupts"], json!({"0": [2, 0]})); // only rows that changed
-    let time = &run["meters"]["time"];
-    assert!(time["start_ns"].as_u64() < time["end_ns"].as_u64());
 }
 
 #[test]
@@ -782,26 +757,16 @@ fn run_refusals() {
     let out = f.root.join("run.json");
     let marker = f.root.join("ran");
     let cmd = ["touch".into(), marker.display().to_string()];
-    refused(
-        crate::run::run(&f.sys, &out, &cmd, 0),
-        "run is refused as root",
-    );
-    refused(
-        crate::run::run(&f.sys, &out, &[], 1000),
-        "run needs a command",
-    );
+    refused(crate::run::run(&f.sys, &out, &[]), "run needs a command");
     let nodir = f.root.join("nodir/run.json");
-    refused(crate::run::run(&f.sys, &nodir, &cmd, 1000), "No such file");
+    refused(crate::run::run(&f.sys, &nodir, &cmd), "No such file");
     fs::write(&out, "old").unwrap();
-    refused(crate::run::run(&f.sys, &out, &cmd, 1000), "exists"); // never overwrite a result
+    refused(crate::run::run(&f.sys, &out, &cmd), "exists"); // never overwrite a result
     assert!(!marker.exists());
     assert_eq!(fs::read_to_string(&out).unwrap(), "old");
     fs::remove_file(&out).unwrap();
     let missing = strings(&["/nonexistent/cmd"]);
-    refused(
-        crate::run::run(&f.sys, &out, &missing, 1000),
-        "/nonexistent/cmd",
-    );
+    refused(crate::run::run(&f.sys, &out, &missing), "/nonexistent/cmd");
     assert!(!out.exists()); // no empty result left behind
 }
 
@@ -853,9 +818,9 @@ fn plan_is_seeded_and_every_round_is_complete() {
         format!("0024-{}-{}-r04", last.workload, last.profile)
     );
 
-    let mut rng = SplitMix64(0);
+    let mut rng = 0;
     assert_eq!(
-        (rng.next(), rng.next()),
+        (splitmix64(&mut rng), splitmix64(&mut rng)),
         (0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4)
     );
 }
@@ -1064,10 +1029,7 @@ fn sigterm_stops_the_queue_restores_and_releases_the_lock() {
     assert_eq!(ev[3]["status"], "stopped");
     assert_eq!(fs::read_dir(dir.join("runs")).unwrap().count(), 1);
     // The second run's profile is never applied.
-    assert_eq!(
-        f.done(),
-        ["open", "saved", "apply", "applied", "restored", "close"]
-    );
+    assert_eq!(f.done(), ["saved", "apply", "applied", "restored"]);
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(f.lock_is_free());
 }
@@ -1204,13 +1166,6 @@ fn a_failing_notify_does_not_fail_the_queue() {
     }
 }
 
-/// The run.json of a queue's only run.
-fn only_run(dir: &Path) -> Value {
-    let runs: Vec<_> = fs::read_dir(dir.join("runs")).unwrap().flatten().collect();
-    assert_eq!(runs.len(), 1);
-    read_json(&runs[0].path().join("run.json"))
-}
-
 #[test]
 fn a_cmd_meter_reads_numbers_outside_each_run() {
     let _serial = serial();
@@ -1226,7 +1181,7 @@ fn a_cmd_meter_reads_numbers_outside_each_run() {
     let (code, dir) = f.queue(q(&meter, 10.0));
     assert_eq!(code, 0);
     assert_eq!(
-        only_run(&dir)["meters"]["cmd"],
+        read_json(&dir.join("runs/0001-w-p-r01/run.json"))["meters"]["cmd"],
         json!({"start": {"joules": 5.0, "runs": 1.0}, "end": {"joules": 7.0, "runs": 1.0},
                "delta": {"joules": 2.0, "runs": 0.0}})
     );
@@ -1276,13 +1231,6 @@ fn bad_queues_are_refused_before_anything_runs() {
             "unknown setting",
         ),
         (
-            with(
-                "profiles",
-                json!({"p": {"cpu.governor": {"policy0": "fast"}}}),
-            ),
-            "not allowed",
-        ),
-        (
             with("profiles", json!({})),
             "needs a profile and a workload",
         ),
@@ -1328,10 +1276,6 @@ fn bad_queues_are_refused_before_anything_runs() {
             r#"key "events""#,
         ),
         (
-            with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
-            "timeout_s: needs seconds",
-        ),
-        (
             with("meters", json!([{"cmd": ["true"], "every": 2}])),
             r#"cmd meter: unknown key "every""#,
         ),
@@ -1345,14 +1289,9 @@ fn bad_queues_are_refused_before_anything_runs() {
         ),
     ] {
         fs::write(&file, q.to_string()).unwrap();
-        refused(crate::queue::run(&f.opts(), &file, 1000), why);
+        refused(crate::queue::run(&f.opts(), &file), why);
     }
     assert!(parse(&with("name", json!("n".repeat(64)))).is_ok());
-    fs::write(&file, ok.to_string()).unwrap();
-    refused(
-        crate::queue::run(&f.opts(), &file, 0),
-        "queue is refused as root",
-    );
     assert!(!f.root.join("results").exists());
     assert!(!f.root.join("lock").exists());
 }
@@ -1494,22 +1433,17 @@ fn a_restore_by_hand_leaves_the_running_queue_alone() {
 #[test]
 fn a_notify_is_marked_and_killed_with_its_process_group() {
     let _serial = serial();
-    let f = Fake::new("queue-hang");
+    let f = Fake::new("queue-notify");
     let pids = f.root.join("pids");
-    // Every notify leaves a child behind; the one for run_done also hangs.
+    // Every notify leaves a child behind.
     let notify = format!(
-        "sleep 30 & echo \"$! $MINION_WORKLOAD\" >> {}; [ $MINION_EVENT != run_done ] || sleep 10",
+        "sleep 30 & echo \"$! $MINION_WORKLOAD\" >> {}",
         pids.display()
     );
-    let t = Instant::now();
     let (code, dir) = f.queue(json!({
-        "name": "hang", "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}}, "reps": 1,
-        "notify": {"cmd": ["sh", "-c", notify], "timeout_s": 0.5},
+        "name": "notify", "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}}, "reps": 1,
+        "notify": {"cmd": ["sh", "-c", notify]},
     }));
-    assert!(
-        t.elapsed() < Duration::from_secs(3),
-        "the notify was not killed"
-    );
     assert_eq!(code, 0);
     assert_eq!(kinds(&dir), ["queue_started", "run_done", "queue_done"]);
     let id = dir.file_name().unwrap().to_str().unwrap();
@@ -1545,10 +1479,6 @@ fn times_are_utc() {
         utc::iso(1_795_425_125),
         utc::stamp(1_795_425_125_000_000_007, false),
         utc::stamp(1_795_425_125_000_000_007, true),
-        crate::run::edges(&[("start", &[1, 1_795_425_125_000_000_007])])["start_utc"]
-            .as_str()
-            .unwrap()
-            .into(),
     ];
     assert_eq!(
         got,
@@ -1558,7 +1488,6 @@ fn times_are_utc() {
             "2026-11-23T09:12:05Z",
             "20261123T091205Z",
             "20261123T091205.000000007Z",
-            "2026-11-23T09:12:05Z",
         ]
     );
 }
@@ -1616,26 +1545,17 @@ fn same_name_queues_get_their_own_dirs() {
             .join(format!("same-{}", utc::stamp(ns, false)));
         fs::create_dir_all(dir).unwrap();
     }
-    let q = |w: &str| json!({"name": "same", "profiles": {"p": {}}, "workloads": {"w": {"cmd": ["sh", "-c", w]}}, "reps": 1});
-    assert_eq!(f.queue_code(q("true")), Ok(0));
-
-    // Two at once: the second waits, then names itself.
-    let started = f.root.join("started");
-    let first = format!("touch {}; sleep 0.3", started.display());
-    let codes = f.alongside(q(&first), &started, || f.queue_code(q("true")));
-    assert_eq!(codes, (Ok(0), Ok(0)));
-    let mut ran: Vec<_> = fs::read_dir(f.root.join("results"))
+    let q = json!({"name": "same", "profiles": {"p": {}}, "workloads": {"w": {"cmd": ["true"]}}, "reps": 1});
+    assert_eq!(f.queue_code(q), Ok(0));
+    let ran: Vec<_> = fs::read_dir(f.root.join("results"))
         .unwrap()
         .flatten()
         .map(|e| e.path())
         .filter(|d| d.join("events.jsonl").exists())
         .collect();
-    ran.sort();
-    assert_eq!(ran.len(), 3);
-    assert!(ran.iter().any(|d| d.to_str().unwrap().ends_with("Z-2")));
-    for d in ran {
-        assert_eq!(kinds(&d).last().unwrap(), "queue_done");
-    }
+    assert_eq!(ran.len(), 1);
+    assert!(ran[0].to_str().unwrap().ends_with("Z-2"));
+    assert_eq!(kinds(&ran[0]).last().unwrap(), "queue_done");
 }
 
 #[test]

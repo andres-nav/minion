@@ -22,13 +22,9 @@ pub fn iso(secs: u64) -> String {
 
 /// 20261123T142501Z for names, or 20261123T142501.123456789Z with the nanoseconds.
 pub fn stamp(ns: u128, with_ns: bool) -> String {
-    let (y, m, d, hh, mm, ss) = civil((ns / 1_000_000_000) as u64);
-    let frac = if with_ns {
-        format!(".{:09}", ns % 1_000_000_000)
-    } else {
-        String::new()
-    };
-    format!("{y:04}{m:02}{d:02}T{hh:02}{mm:02}{ss:02}{frac}Z")
+    let s = iso((ns / 1_000_000_000) as u64).replace(['-', ':'], "");
+    let frac = format!(".{:09}Z", ns % 1_000_000_000);
+    if with_ns { s.replace('Z', &frac) } else { s }
 }
 
 pub fn log(msg: impl Display) {

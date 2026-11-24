@@ -79,8 +79,8 @@ fn run(args: &[String]) -> Result<u8, String> {
     };
     let o = parse_opts(verb, opts, geteuid())?;
     match (verb.as_str(), &o.args[..]) {
-        ("run", []) => return run::run(&o.sysfs, &o.out, cmd, geteuid()),
-        ("queue", [file]) => return queue::run(&o, Path::new(file), geteuid()),
+        ("run", []) => return run::run(&o.sysfs, &o.out, cmd),
+        ("queue", [file]) => return queue::run(&o, Path::new(file)),
         (_, []) => {}
         _ => return Err(USAGE.into()),
     }
@@ -97,9 +97,6 @@ fn run(args: &[String]) -> Result<u8, String> {
             };
             println!("{}", root.ask("restore")?);
         }
-        "reap" if geteuid() == 0 => {
-            return Err("reap is refused as root: it kills what the lock file says".into());
-        }
         "reap" => {
             let n = lock::reap(&o.lock)?;
             utc::log(format!("killed {n} leftover workload processes"));
@@ -111,6 +108,11 @@ fn run(args: &[String]) -> Result<u8, String> {
 
 /// Root must not let a caller point its reads and writes at other files.
 fn parse_opts(verb: &str, args: &[String], euid: u32) -> Result<Opts, String> {
+    if euid == 0 && ["run", "queue", "reap"].contains(&verb) {
+        return Err(format!(
+            "{verb} is refused as root: it runs or kills your processes"
+        ));
+    }
     let mut o = Opts {
         sysfs: "/sys".into(),
         state_dir: ["/var/lib", NAME].iter().collect(),

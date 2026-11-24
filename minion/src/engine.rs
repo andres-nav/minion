@@ -10,9 +10,6 @@ pub fn apply(j: &mut Journal, sys: &Path, profile: &State) -> Result<(), String>
     settings::validate(sys, profile)?;
     let before = settings::snapshot(sys)?;
     if last(&j.lines, "saved").is_none() {
-        if j.lines.is_empty() {
-            j.append(json!({"t": "open"}))?;
-        }
         j.append(json!({"t": "saved", "state": before}))?;
     }
     let ours = ours(&j.lines)?;
@@ -76,7 +73,6 @@ pub fn restore(j: &mut Journal, sys: &Path) -> Result<Vec<Value>, String> {
         s.apply(sys, &back)?;
     }
     j.append(json!({"t": "restored", "conflicts": conflicts}))?;
-    j.append(json!({"t": "close"}))?;
     j.close()?;
     Ok(conflicts)
 }
@@ -95,7 +91,6 @@ fn last(lines: &[Value], t: &str) -> Option<usize> {
     lines.iter().rposition(|l| l["t"] == t)
 }
 
-/// The state of the last line of type t, or an empty state if there is none.
 fn state_of(lines: &[Value], t: &str) -> Result<State, String> {
     match last(lines, t) {
         Some(i) => serde_json::from_value(lines[i]["state"].clone())

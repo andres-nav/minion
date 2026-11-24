@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{self, ErrorKind, Write};
+use std::iter;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
@@ -38,7 +39,6 @@ pub struct Queue {
     pub meters: Vec<Value>,
     pub out: PathBuf,
     pub notify: Vec<String>,
-    pub notify_timeout: Duration,
     pub thermal: Option<Thermal>,
 }
 
@@ -59,13 +59,9 @@ pub struct Run {
 
 /// Runs the queue in file to its end or to a signal, then restores the settings
 /// and releases the queue lock. Returns the exit code.
-pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
-    if euid == 0 {
-        return Err("queue is refused as root: it runs your commands".into());
-    }
-    let given: Value = fs::read_to_string(file)
-        .map_err(|e| e.to_string())
-        .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))
+pub fn run(o: &Opts, file: &Path) -> Result<u8, String> {
+    let given: Value = fs::read(file)
+        .and_then(|s| Ok(serde_json::from_slice(&s)?))
         .map_err(|e| format!("{}: {e}", file.display()))?;
     let q = parse(&given)?;
     for (name, p) in &q.profiles {
@@ -179,7 +175,6 @@ impl Running<'_> {
             "resolved": {
                 "seed": self.q.seed, "settle_s": self.q.settle.as_secs_f64(),
                 "meters": self.q.meters, "profiles": targets,
-                "notify_timeout_s": self.q.notify_timeout.as_secs_f64(),
             },
             "start": start,
             "time": run::edges(&[("start", started)]),
@@ -232,8 +227,7 @@ impl Running<'_> {
     /// error. Returns whether the settings drifted from target.
     fn one(&mut self, r: &Run, target: &State, thermal: Value) -> Result<bool, String> {
         let dir = self.dir.join("runs").join(&r.id);
-        let err = |e: std::io::Error| format!("{}: {e}", dir.display());
-        fs::create_dir_all(&dir).map_err(err)?;
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let out = |name: &str| {
             File::create_new(dir.join(name)).map_err(|e| format!("{}/{name}: {e}", dir.display()))
         };
@@ -341,20 +335,18 @@ impl Running<'_> {
         let Some((prog, args)) = self.q.notify.split_first() else {
             return;
         };
-        let env = [
+        let mut cmd = workload(prog, args, &lock::mark(&self.o.lock, &self.id));
+        cmd.envs([
             ("MINION_EVENT", event),
             ("MINION_QUEUE", self.id.as_str()),
             ("MINION_RUN", run),
             ("MINION_STATUS", status),
             ("MINION_DETAIL", detail),
-        ];
-        let mut cmd = workload(prog, args, &lock::mark(&self.o.lock, &self.id));
-        cmd.envs(env);
-        let timeout = self.q.notify_timeout;
-        match run_with_timeout(cmd, timeout) {
+        ]);
+        match run_with_timeout(cmd, NOTIFY_TIMEOUT) {
             Ok(Some(o)) if o.status.success() => {}
             Ok(Some(o)) => log(format!("notify {event}: {}", o.status)),
-            Ok(None) => log(format!("notify {event}: killed after {timeout:?}")),
+            Ok(None) => log(format!("notify {event}: killed after {NOTIFY_TIMEOUT:?}")),
             Err(e) => log(format!("notify {event}: {prog}: {e}")),
         }
     }
@@ -411,12 +403,7 @@ pub fn workload(prog: &str, args: &[String], mark: &str) -> Command {
 fn new_dir(out: &Path, name: &str) -> Result<(String, PathBuf), String> {
     fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
     let base = format!("{name}-{}", utc::stamp(now_ns(), false));
-    for n in 1..=100 {
-        let id = if n == 1 {
-            base.clone()
-        } else {
-            format!("{base}-{n}")
-        };
+    for id in iter::once(base.clone()).chain((2..=100).map(|n| format!("{base}-{n}"))) {
         let dir = out.join(&id);
         match fs::create_dir(&dir) {
             Ok(()) => return Ok((id, dir)),
@@ -434,16 +421,12 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
     let get = |k: &str| m.get(k).unwrap_or(&Value::Null);
     let profiles: BTreeMap<String, State> =
         serde_json::from_value(get("profiles").clone()).map_err(|e| format!("profiles: {e}"))?;
-    let mut workloads = BTreeMap::new();
-    for (name, w) in get("workloads")
+    let workloads = get("workloads")
         .as_object()
         .ok_or("workloads: needs an object")?
-    {
-        workloads.insert(
-            name.clone(),
-            command(w, &format!("workload {name}"), &["cmd"])?,
-        );
-    }
+        .iter()
+        .map(|(n, w)| Ok((n.clone(), command(w, &format!("workload {n}"), &["cmd"])?)))
+        .collect::<Result<_, String>>()?;
     let q = Queue {
         name: get("name").as_str().ok_or("name: needs a string")?.into(),
         reps: get("reps")
@@ -462,13 +445,8 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
         out: get("out").as_str().ok_or("out: needs a string")?.into(),
         notify: match get("notify") {
             Value::Null => vec![],
-            n => command(n, "notify", &["cmd", "timeout_s"])?,
+            n => command(n, "notify", &["cmd"])?,
         },
-        notify_timeout: seconds(
-            &get("notify")["timeout_s"],
-            NOTIFY_TIMEOUT,
-            "notify timeout_s",
-        )?,
         thermal: match get("thermal") {
             Value::Null => None,
             t => Some(Thermal {
@@ -524,7 +502,6 @@ pub fn command(v: &Value, what: &str, keys: &[&str]) -> Result<Vec<String>, Stri
     Ok(cmd)
 }
 
-/// v in seconds, or default if v is missing.
 pub fn seconds(v: &Value, default: Duration, what: &str) -> Result<Duration, String> {
     match v {
         Value::Null => Ok(default),
@@ -535,16 +512,12 @@ pub fn seconds(v: &Value, default: Duration, what: &str) -> Result<Duration, Str
     }
 }
 
-pub struct SplitMix64(pub u64);
-
-impl SplitMix64 {
-    pub fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
-        let z = self.0;
-        let z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-        let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-        z ^ (z >> 31)
-    }
+pub fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let z = *state;
+    let z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// reps rounds, each running every (profile, workload) once, in an order
@@ -555,12 +528,12 @@ pub fn plan(q: &Queue) -> Vec<Run> {
         .keys()
         .flat_map(|p| q.workloads.keys().map(move |w| (p, w)))
         .collect();
-    let mut rng = SplitMix64(q.seed);
+    let mut rng = q.seed;
     let mut runs = vec![];
     for round in 1..=q.reps {
         let mut order = pairs.clone();
         for i in (1..order.len()).rev() {
-            order.swap(i, (rng.next() % (i as u64 + 1)) as usize);
+            order.swap(i, (splitmix64(&mut rng) % (i as u64 + 1)) as usize);
         }
         for (position, (p, w)) in order.into_iter().enumerate() {
             runs.push(Run {
