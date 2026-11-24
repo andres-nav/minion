@@ -1651,3 +1651,65 @@ fn reap_reads_a_lock_path_with_a_space() {
     assert_eq!(crate::lock::reap(&lock), Ok(1));
     assert_eq!(leftover.wait().unwrap().signal(), Some(9));
 }
+
+/// A fake power PMU of the given type, as the kernel lists it under
+/// bus/event_source/devices/power.
+fn power_pmu(sys: &Path, kind: &str) {
+    let pmu = sys.join("bus/event_source/devices/power");
+    put(&pmu.join("type"), &format!("{kind}\n"));
+    put(&pmu.join("cpumask"), "0-1,4\n");
+    for (name, code) in [("energy-pkg", "0x02"), ("energy-ram", "0x03")] {
+        put(
+            &pmu.join(format!("events/{name}")),
+            &format!("event={code}\n"),
+        );
+        put(
+            &pmu.join(format!("events/{name}.scale")),
+            "2.3283064365386962890625e-10\n",
+        );
+        put(&pmu.join(format!("events/{name}.unit")), "Joules\n");
+    }
+}
+
+#[test]
+fn the_power_pmu_is_read_from_sysfs() {
+    let f = Fake::new("perf-pmu");
+    power_pmu(&f.sys, "78");
+    let scale = 2f64.powi(-32); // the scale the files give
+    let event = |name: &str, config| crate::perf::Event {
+        name: name.into(),
+        config,
+        scale,
+    };
+    assert_eq!(
+        crate::perf::pmu(&f.sys).unwrap(),
+        (
+            78,
+            vec![0, 1, 4],
+            vec![event("energy-pkg", 2), event("energy-ram", 3)]
+        )
+    );
+    assert_eq!(crate::perf::cpus("0,48"), Some(vec![0, 48]));
+    for bad in ["", "x", "1-", "-1"] {
+        assert_eq!(crate::perf::cpus(bad), None, "{bad:?}");
+    }
+    let pmu = f.sys.join("bus/event_source/devices/power/events");
+    put(&pmu.join("energy-ram.unit"), "Watts\n");
+    assert!(crate::perf::pmu(&f.sys).unwrap_err().contains("energy-ram"));
+}
+
+#[test]
+fn run_falls_back_to_perf_and_says_why_it_failed() {
+    let f = Fake::new("run-perf");
+    let uj = f.zone("intel-rapl:0", "package-0", 0, RANGE, Some(1));
+    fs::set_permissions(&uj, fs::Permissions::from_mode(0o000)).unwrap();
+    power_pmu(&f.sys, &u32::MAX.to_string()); // no such PMU: the open fails
+    let (code, run) = f.run("true");
+    let rapl = &run["meters"]["rapl"];
+    assert_eq!((code, &rapl["zones"]), (0, &json!({})));
+    let why = rapl["perf_error"].as_str().unwrap();
+    assert!(
+        why.starts_with("perf_event_open energy-pkg on cpu 0: "),
+        "{why}"
+    );
+}

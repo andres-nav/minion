@@ -488,6 +488,16 @@ check_exit() {
   want 0 cmdm gru run energy --host fake --arg cmdm.json
   has "$(echo "$T"/remote/proj/results/energy/cmdm-*/runs/*/run.json)" '"delta":{"uj":2000000.0}'
 
+  # With energy_uj unreadable, run counts RAPL through perf. A power PMU of no such type fails
+  # to open, and the run goes on and says why.
+  cp -r "$sys" "$T/sys-perf" && chmod 000 "$T/sys-perf/class/powercap/intel-rapl:0/energy_uj"
+  p=$T/sys-perf/bus/event_source/devices/power
+  mkdir -p "$p/events" && echo 4294967295 > "$p/type" && echo 0 > "$p/cpumask"
+  echo event=0x02 > "$p/events/energy-pkg" && echo Joules > "$p/events/energy-pkg.unit"
+  echo 2.3283064365386962890625e-10 > "$p/events/energy-pkg.scale"
+  "$M" run --sysfs "$T/sys-perf" --out "$T/perf-run.json" -- true || fail "run with no perf"
+  grep -qF '"perf_error": "perf_event_open energy-pkg on cpu 0: ' "$T/perf-run.json" || fail "run: no perf error"
+
   # The privileged verbs by hand, with the profile and the queue id on stdin.
   echo '{"cpu.governor": {"policy0": "performance"}}' | "$M" apply $R || fail "minion apply"
   grep -qx performance "$gov" || fail "apply: governor not set"

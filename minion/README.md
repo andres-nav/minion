@@ -63,10 +63,17 @@ realtime also as `*_utc`, and the duration in seconds from the monotonic clock),
 zone: counters, joules and mean watts, corrected for one counter wrap), the settings snapshot
 before and after, and `drift` if they differ. It is created before the command starts and never
 overwritten. Zones whose `energy_uj` can't be read (root-only by default) are listed as
-`unreadable`. A zone's joules are left out, with a warning, when the run was long enough to wrap
-its counter twice at the zone's highest power limit, or when the zone has no power limit. The
-command stays in the runner's process group, so Ctrl-C reaches it, and what it leaves running is
-left alone (a queue kills it).
+`unreadable`. If none can be read and the kernel has the power PMU
+(`bus/event_source/devices/power`), the meter counts its energy events through `perf_event_open`
+instead: one counter per event on each CPU of the PMU's `cpumask` (one per package), opened once
+and read once at each edge. Their zones, such as `power/energy-pkg/cpu0`, hold the count at each
+edge, the `scale` (joules per count), joules and mean watts. perf's counts have 64 bits and don't
+wrap, but while they are open the kernel keeps a timer per package
+([RESEARCH.md](../docs/RESEARCH.md#2-linux-mechanisms)). This needs `perf_event_paranoid` 0 or
+less, or `CAP_PERFMON`; otherwise `perf_error` says why. A zone's joules are left out, with a
+warning, when the run was long enough to wrap its counter twice at the zone's highest power limit,
+or when the zone has no power limit. The command stays in the runner's process group, so Ctrl-C
+reaches it, and what it leaves running is left alone (a queue kills it).
 
 `meters.noise`, always there, records what else ran: it is read just outside each edge, outside
 the other meters. Per CPU, the change of each `/proc/interrupts` and `/proc/softirqs` row that

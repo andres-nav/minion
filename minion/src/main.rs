@@ -3,6 +3,7 @@ mod ffi;
 mod journal;
 mod lock;
 mod noise;
+mod perf;
 mod queue;
 mod run;
 mod settings;
