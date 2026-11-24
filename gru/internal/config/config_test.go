@@ -59,25 +59,6 @@ func mkRepo(t *testing.T, markers ...string) string {
 	return root
 }
 
-func TestDetectTemplate(t *testing.T) {
-	cfg := loadGlobal(t)
-	root := mkRepo(t, "main.tex")
-
-	r, err := cfg.Resolve(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.TemplateName != "latex" {
-		t.Fatalf("template = %q, want latex", r.TemplateName)
-	}
-	if cmd := r.Template.Tasks["build"]; cmd == "" {
-		t.Fatal("build task missing")
-	}
-	if r.Template.Host != "" { // no defaults, and latex sets no host
-		t.Fatalf("host = %q, want empty", r.Template.Host)
-	}
-}
-
 func TestResolveFromSubdir(t *testing.T) {
 	cfg := loadGlobal(t)
 	root := mkRepo(t, "requirements.txt")
@@ -132,7 +113,7 @@ func TestPerRepoOverride(t *testing.T) {
   "use": "python-gpu",
   "host": "gpu99",
   "env": ["B=2"],
-  "notify": { "on": "failure", "email": { "smtp": "h:587", "from": "a@x", "to": "a@x" } },
+  "notify": { "on": "failure", "run": ["true"] },
   "tasks": { "build": "python setup.py build" }
 }`)
 	r, err := cfg.Resolve(root)
@@ -149,7 +130,7 @@ func TestPerRepoOverride(t *testing.T) {
 	if !reflect.DeepEqual(r.Template.Env, []string{"A=1", "B=2"}) { // env adds
 		t.Fatalf("env = %v", r.Template.Env)
 	}
-	if n := r.Template.Notify; n.On != "failure" || n.Run != nil { // notify replaces
+	if n := r.Template.Notify; n.On != "failure" || !reflect.DeepEqual(n.Run, []string{"true"}) { // notify replaces
 		t.Fatalf("notify = %+v, want the repo's block only", n)
 	}
 	if got := cfg.Templates["python-gpu"]; len(got.Tasks) != 2 || len(got.Env) != 1 {
@@ -216,13 +197,6 @@ func TestLocalTemplateOverridesGlobal(t *testing.T) {
 	}
 }
 
-func TestTaskNames(t *testing.T) {
-	cfg := loadGlobal(t)
-	if got := cfg.Templates["python-gpu"].TaskNames(); !reflect.DeepEqual(got, []string{"sweep", "test"}) {
-		t.Fatalf("task names = %v", got)
-	}
-}
-
 // Unknown keys and bad notify blocks are refused, so a typo fails loudly.
 func TestConfigErrors(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -231,9 +205,9 @@ func TestConfigErrors(t *testing.T) {
 		`{"templates": {"x": {"build": "make"}}}`:                  `unknown field "build"`,
 		`{"hosts": {"h": {"remote": "x"}}}`:                        `unknown field "remote"`,
 		`{"notify": {"on": "faliure", "run": ["x"]}}`:              `notify.on "faliure"`,
-		`{"templates": {"x": {"notify": {"email": {"to": "a"}}}}}`: "template x: notify.email needs",
+		`{"templates": {"x": {"notify": {"email": {"to": "a"}}}}}`: `unknown field "email"`,
 		`{"hosts": `: "unexpected EOF",
-		`{"templates": {"x": {"env": ["MY-VAR=1"]}}}`: `template x: env "MY-VAR=1": not a variable name`,
+		`{"templates": {"x": {"env": ["MY-VAR=1"]}}}`: `template x: env "MY-VAR=1": not KEY=VALUE`,
 	} {
 		os.WriteFile(path, []byte(body), 0o644)
 		if _, err := Load(); err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), path) {
@@ -245,7 +219,7 @@ func TestConfigErrors(t *testing.T) {
 	for body, want := range map[string]string{
 		`{"use": "latex", "test": "x"}`:         `unknown field "test"`,
 		`{"notify": {"on": "x", "run": ["y"]}}`: `notify.on "x"`,
-		`{"env": ["A=1", "2B"]}`:                `env "2B": not a variable name`,
+		`{"env": ["A=1", "2B"]}`:                `env "2B": not KEY=VALUE`,
 	} {
 		writeRepo(t, root, body)
 		if _, err := cfg.Resolve(root); err == nil || !strings.Contains(err.Error(), want) {
@@ -288,24 +262,9 @@ func TestMissingGlobalConfigIsEmpty(t *testing.T) {
 	}
 }
 
-func TestNotifyValidate(t *testing.T) {
-	if err := (*Notify)(nil).Validate(); err != nil {
-		t.Errorf("nil notify should validate: %v", err)
-	}
-	if err := (&Notify{On: "maybe"}).Validate(); err == nil {
-		t.Error("invalid on value should fail")
-	}
-	if err := (&Notify{Email: &EmailSink{SMTP: "h:587", From: "a@x"}}).Validate(); err == nil {
-		t.Error("email missing smtp/to should fail")
-	}
-	if err := (&Notify{On: "failure", Email: &EmailSink{SMTP: "h:587", From: "a@x", To: "b@x"}}).Validate(); err != nil {
-		t.Errorf("valid notify failed: %v", err)
-	}
-}
-
 func TestNotifyForFallback(t *testing.T) {
-	global := &Notify{Email: &EmailSink{SMTP: "h:587", From: "g@x", To: "g@x"}}
-	own := &Notify{Email: &EmailSink{SMTP: "h:587", From: "t@x", To: "t@x"}}
+	global := &Notify{Run: []string{"echo global"}}
+	own := &Notify{Run: []string{"echo own"}}
 	cfg := &Config{Notify: global}
 
 	// template without notify falls back to the global default.

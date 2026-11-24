@@ -5,8 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"syscall"
 )
 
@@ -89,12 +87,8 @@ func wrapperPidfd(dir string) int {
 	if _, ok := jobStatus(dir); ok || !onThisHost(dir) {
 		return -1
 	}
-	b, err := os.ReadFile(filepath.Join(dir, "pid"))
-	if err != nil {
-		return -1
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil {
+	pid, ok := readInt(filepath.Join(dir, "pid"))
+	if !ok {
 		return -1
 	}
 	fd, _, errno := syscall.Syscall(sysPidfdOpen, uintptr(pid), 0, 0)

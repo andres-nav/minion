@@ -11,8 +11,8 @@ import (
 )
 
 type job struct {
-	id, status, repo, task string
-	start                  time.Time
+	id, status, task string
+	start            time.Time
 }
 
 // jobs lists t's jobs of this host, newest launch first; with all, of every project.
@@ -28,7 +28,7 @@ func jobs(t *target, all bool) ([]job, error) {
 			continue
 		}
 		start, _ := idTime(f[0])
-		js = append(js, job{id: f[0], status: f[1], repo: f[2], task: f[3], start: start})
+		js = append(js, job{id: f[0], status: f[1], task: f[3], start: start})
 	}
 	return js, nil
 }
@@ -49,7 +49,7 @@ func cmdPs(args []string) int {
 	fs := flag.NewFlagSet("ps", flag.ContinueOnError)
 	host := hostFlag(fs)
 	all := fs.Bool("all", false, "show all jobs on the host, not just this project's")
-	if err := fs.Parse(args); err != nil {
+	if _, err := parseArgs(fs, args, false); err != nil {
 		return 2
 	}
 	t, err := connect(*host, false)
@@ -60,13 +60,13 @@ func cmdPs(args []string) int {
 	if err != nil {
 		return errf("%v", err)
 	}
-	fmt.Printf("%-32s %-10s %-17s %-6s %s\n", "NAME", "TASK", "STARTED", "AGE", "STATUS")
+	fmt.Printf("%-32s %-10s %-17s %s\n", "NAME", "TASK", "STARTED", "STATUS")
 	for _, j := range js {
-		when, age := "?", "?"
+		when := "?"
 		if !j.start.IsZero() {
-			when, age = psTime(j.start), humanizeAge(time.Since(j.start))
+			when = psTime(j.start)
 		}
-		fmt.Printf("%-32s %-10s %-17s %-6s %s\n", j.id, j.task, when, age, j.status)
+		fmt.Printf("%-32s %-10s %-17s %s\n", j.id, j.task, when, j.status)
 	}
 	if len(js) == 0 && *all {
 		fmt.Printf("(no jobs on %s)\n", t.alias)
@@ -78,16 +78,3 @@ func cmdPs(args []string) int {
 
 // psTime shows a job's start time, in UTC.
 func psTime(t time.Time) string { return t.UTC().Format("2006-01-02 15:04Z") }
-
-func humanizeAge(d time.Duration) string {
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", max(int(d.Seconds()), 0))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	}
-}

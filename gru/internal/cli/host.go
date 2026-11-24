@@ -111,11 +111,12 @@ func dial(r *config.Resolved, override string, agent bool) (*target, error) {
 func (t *target) bootstrap() error {
 	platform := runtime.GOOS + "/" + runtime.GOARCH
 	if !t.Local {
-		var err error
-		if platform, err = t.Platform(); err != nil {
+		unm, err := t.Output("uname -sm")
+		if err != nil {
 			return err
 		}
-		bin, err := ssh.AgentBinary(platform)
+		platform = ssh.UnameToGo(unm)
+		bin, err := ssh.Binary("gru", platform)
 		if err != nil {
 			return err
 		}
@@ -123,7 +124,7 @@ func (t *target) bootstrap() error {
 			return err
 		}
 	}
-	bin, err := ssh.MinionBinary(platform)
+	bin, err := ssh.Binary("minion", platform)
 	if err != nil {
 		return nil // tasks there get an empty GRU_MINION
 	}

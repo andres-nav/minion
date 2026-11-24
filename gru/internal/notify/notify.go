@@ -1,13 +1,9 @@
-// Package notify sends a "job finished" notification from the machine the job
-// ran on. Transports use only the Go standard library (net/smtp), so the remote
-// needs nothing beyond the gru agent already uploaded there — no curl, no
-// mail client, no credentials daemon.
+// Package notify composes a finished job's message, which the notify run hooks
+// get as $GRU_SUBJECT and $GRU_BODY.
 package notify
 
 import (
 	"fmt"
-	"net"
-	"net/smtp"
 	"strings"
 	"time"
 )
@@ -22,7 +18,7 @@ type Result struct {
 	LogTail  string
 }
 
-// Subject is the one-line summary (also used as the email subject).
+// Subject is the one-line summary.
 func (r Result) Subject() string {
 	state := "FAILED"
 	if r.Exit == 0 {
@@ -43,74 +39,4 @@ func (r Result) Body() string {
 		b.WriteString("\n")
 	}
 	return b.String()
-}
-
-// Email is an SMTP transport. Addr is host:port (e.g. smtp.gmail.com:587). Auth
-// is attempted when User is set; net/smtp negotiates STARTTLS when the server
-// advertises it (as Gmail does on :587).
-type Email struct {
-	Addr string
-	From string
-	To   []string
-	User string // SMTP login; defaults to From when empty
-	Pass string
-}
-
-// Send delivers subject/body to every recipient in one message.
-func (e Email) Send(subject, body string) error {
-	if e.Addr == "" || e.From == "" || len(e.To) == 0 {
-		return fmt.Errorf("email: addr, from, and to are required")
-	}
-	host, _, err := splitHostPort(e.Addr)
-	if err != nil {
-		return err
-	}
-	var auth smtp.Auth
-	if user := e.login(); user != "" {
-		auth = smtp.PlainAuth("", user, e.Pass, host)
-	}
-	msg := buildMessage(e.From, e.To, subject, body)
-	if err := smtp.SendMail(e.Addr, auth, e.From, e.To, msg); err != nil {
-		return fmt.Errorf("email: send via %s: %w", e.Addr, err)
-	}
-	return nil
-}
-
-func (e Email) login() string {
-	if e.User != "" {
-		return e.User
-	}
-	if e.Pass != "" {
-		return e.From // password given but no explicit user: log in as the sender
-	}
-	return ""
-}
-
-// buildMessage assembles an RFC 5322 message with CRLF line endings.
-func buildMessage(from string, to []string, subject, body string) []byte {
-	var b strings.Builder
-	fmt.Fprintf(&b, "From: %s\r\n", from)
-	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
-	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
-	b.WriteString("MIME-Version: 1.0\r\n")
-	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
-	b.WriteString("\r\n")
-	// Normalize the body to CRLF. Do NOT dot-stuff here: smtp.SendMail writes the
-	// message through textproto.DotWriter, which already escapes leading dots on
-	// the wire — stuffing again would double every '.'-leading line in delivered mail.
-	for _, line := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
-		b.WriteString(line)
-		b.WriteString("\r\n")
-	}
-	return []byte(b.String())
-}
-
-// splitHostPort splits host:port, requiring both parts (SMTP needs an explicit
-// port). Uses net.SplitHostPort so bracketed IPv6 literals ([::1]:587) parse.
-func splitHostPort(addr string) (host, port string, err error) {
-	host, port, err = net.SplitHostPort(addr)
-	if err != nil || host == "" || port == "" {
-		return "", "", fmt.Errorf("email: smtp address %q must be host:port", addr)
-	}
-	return host, port, nil
 }

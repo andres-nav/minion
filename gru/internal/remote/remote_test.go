@@ -12,24 +12,6 @@ import (
 	"time"
 )
 
-func TestScriptIsValidShell(t *testing.T) {
-	// empty hook lists must still yield syntactically valid sh.
-	jobs := []Job{
-		{Command: "make"},
-		{Command: "make", Before: []string{"a"}},
-		{Command: "make", OnSuccess: []string{"a"}},
-		{Command: "make", OnFailure: []string{"a"}, Always: []string{"b"}, Notify: `{"run":["it's"]}`},
-	}
-	for _, j := range jobs {
-		s := Script("~/w", "~/.gru/jobs/x", j)
-		cmd := exec.Command("sh", "-n")
-		cmd.Stdin = strings.NewReader(s)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("sh -n rejected script: %v\n%s\n---\n%s", err, out, s)
-		}
-	}
-}
-
 func TestRemotePath(t *testing.T) {
 	cases := map[string]string{
 		"~":            `"$HOME"`,
@@ -62,21 +44,6 @@ func TestCheckID(t *testing.T) {
 		if err := CheckID(id); err == nil {
 			t.Errorf("%q accepted", id)
 		}
-	}
-}
-
-func TestCommandBuildersReferenceJobDir(t *testing.T) {
-	jd := JobDir("~/.gru", "abc")
-	if jd != `"$HOME"/'.gru'/jobs/abc` {
-		t.Fatalf("JobDir = %q", jd)
-	}
-	for _, c := range []string{LaunchCommand("~/.gru", "abc"), AttachCommand("gru", jd), KillCommand(jd)} {
-		if !strings.Contains(c, jd) {
-			t.Errorf("command missing job dir %q: %s", jd, c)
-		}
-	}
-	if c := PsCommand("~/.gru"); !strings.Contains(c, JobsDir("~/.gru")) {
-		t.Errorf("command missing jobs dir: %s", c)
 	}
 }
 

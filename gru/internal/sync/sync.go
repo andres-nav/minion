@@ -1,6 +1,6 @@
 // Package sync implements gru's pure-Go, file-level sync: it walks a tree,
-// compares file size+mtime to decide what changed, and streams only the changed
-// files over an io stream (the ssh pipe). No external rsync is used.
+// compares size, mtime and mode to decide what changed, and streams only the
+// changed files over an io stream (the ssh pipe). No external rsync is used.
 package sync
 
 import (
@@ -15,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -56,17 +55,12 @@ func Walk(root string, exclude []string) (Manifest, error) {
 		if rel == "." {
 			return nil
 		}
-		if d.IsDir() {
-			if excluded(rel, exclude) {
-				return filepath.SkipDir
-			}
-			return nil
+		if excluded(rel, exclude) && d.IsDir() {
+			return filepath.SkipDir
 		}
-		if excluded(rel, exclude) {
-			return nil
+		if !excluded(rel, exclude) {
+			m.add(rel, p) // os.Stat follows symlinks, so symlinked files are synced as files
 		}
-		// os.Stat follows symlinks, so symlinked files are synced as files.
-		m.add(rel, p)
 		return nil
 	})
 	if err != nil {
@@ -111,7 +105,7 @@ func Deleted(local, remote Manifest) []string {
 			out = append(out, p)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -158,20 +152,12 @@ func Match(root string, patterns []string) ([]string, error) {
 			return nil, err
 		}
 		for _, m := range matches {
-			fi, err := os.Stat(m)
-			if err != nil {
-				continue
-			}
-			if fi.IsDir() {
-				filepath.WalkDir(m, func(p string, d fs.DirEntry, werr error) error {
-					if werr == nil && d.Type().IsRegular() {
-						add(p)
-					}
-					return nil
-				})
-			} else if fi.Mode().IsRegular() {
-				add(m)
-			}
+			filepath.WalkDir(m, func(p string, _ fs.DirEntry, _ error) error {
+				if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+					add(p)
+				}
+				return nil
+			})
 		}
 	}
 	slices.Sort(out)
@@ -186,7 +172,7 @@ func Changed(local, remote Manifest) []string {
 			out = append(out, p)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -302,17 +288,8 @@ func writeFile(full string, hdr frame, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	mode := os.FileMode(hdr.Mode).Perm()
-	if mode == 0 {
-		mode = 0o644
-	}
-	os.Chmod(tmp, mode)
-	if err := os.Rename(tmp, full); err != nil {
-		return err
-	}
-	if hdr.Mtime != 0 {
-		t := time.Unix(hdr.Mtime, 0)
-		os.Chtimes(full, t, t)
-	}
-	return nil
+	os.Chmod(tmp, os.FileMode(hdr.Mode).Perm())
+	t := time.Unix(hdr.Mtime, 0)
+	os.Chtimes(tmp, t, t)
+	return os.Rename(tmp, full)
 }
