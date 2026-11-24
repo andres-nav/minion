@@ -58,10 +58,7 @@ pub struct Run {
 
 /// Runs the queue in file to its end or to a signal, then restores the settings
 /// and releases the queue lock. Returns the exit code.
-pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
-    if euid == 0 {
-        return Err("queue is refused as root: it runs your commands".into());
-    }
+pub fn run(o: &Opts, file: &Path) -> Result<u8, String> {
     let given: Value = fs::read_to_string(file)
         .map_err(|e| e.to_string())
         .and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string()))

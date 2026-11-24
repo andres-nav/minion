@@ -106,7 +106,7 @@ impl Fake {
         let out = self.root.join("run.json");
         let _ = fs::remove_file(&out);
         let cmd = ["sh", "-c", script].map(String::from);
-        let code = crate::run::run(&self.sys, &out, &cmd, 1000).unwrap();
+        let code = crate::run::run(&self.sys, &out, &cmd).unwrap();
         (code, read_json(&out))
     }
 
@@ -138,7 +138,7 @@ impl Fake {
         }
         let file = self.root.join(format!("{name}-{}.json", utc::now_ns()));
         fs::write(&file, q.to_string()).unwrap();
-        crate::queue::run(&self.opts(), &file, 1000)
+        crate::queue::run(&self.opts(), &file)
     }
 
     /// The one results dir of the queue named name.
@@ -567,18 +567,20 @@ fn overrides_are_refused_as_root() {
         );
         assert_eq!(crate::parse_opts("restore", &a, 1000).unwrap().test, a);
     }
+    for verb in ["run", "queue", "reap"] {
+        refused(
+            crate::parse_opts(verb, &[], 0),
+            &format!("{verb} is refused as root"),
+        );
+    }
     let out = strings(&["--out", "/tmp/x"]);
-    refused(
-        crate::parse_opts("run", &out, 0),
-        "--out is refused as root",
-    );
     assert!(
         crate::parse_opts("run", &out, 1000)
             .unwrap()
             .test
             .is_empty()
     );
-    let q = crate::parse_opts("queue", &strings(&["q.json"]), 0).unwrap();
+    let q = crate::parse_opts("queue", &strings(&["q.json"]), 1000).unwrap();
     assert!(q.test.is_empty());
     let o = crate::parse_opts("restore", &[], 0).unwrap();
     assert_eq!(
@@ -780,26 +782,16 @@ fn run_refusals() {
     let out = f.root.join("run.json");
     let marker = f.root.join("ran");
     let cmd = ["touch".into(), marker.display().to_string()];
-    refused(
-        crate::run::run(&f.sys, &out, &cmd, 0),
-        "run is refused as root",
-    );
-    refused(
-        crate::run::run(&f.sys, &out, &[], 1000),
-        "run needs a command",
-    );
+    refused(crate::run::run(&f.sys, &out, &[]), "run needs a command");
     let nodir = f.root.join("nodir/run.json");
-    refused(crate::run::run(&f.sys, &nodir, &cmd, 1000), "No such file");
+    refused(crate::run::run(&f.sys, &nodir, &cmd), "No such file");
     fs::write(&out, "old").unwrap();
-    refused(crate::run::run(&f.sys, &out, &cmd, 1000), "exists"); // never overwrite a result
+    refused(crate::run::run(&f.sys, &out, &cmd), "exists"); // never overwrite a result
     assert!(!marker.exists());
     assert_eq!(fs::read_to_string(&out).unwrap(), "old");
     fs::remove_file(&out).unwrap();
     let missing = strings(&["/nonexistent/cmd"]);
-    refused(
-        crate::run::run(&f.sys, &out, &missing, 1000),
-        "/nonexistent/cmd",
-    );
+    refused(crate::run::run(&f.sys, &out, &missing), "/nonexistent/cmd");
     assert!(!out.exists()); // no empty result left behind
 }
 
@@ -1336,14 +1328,9 @@ fn bad_queues_are_refused_before_anything_runs() {
         ),
     ] {
         fs::write(&file, q.to_string()).unwrap();
-        refused(crate::queue::run(&f.opts(), &file, 1000), why);
+        refused(crate::queue::run(&f.opts(), &file), why);
     }
     assert!(parse(&with("name", json!("n".repeat(64)))).is_ok());
-    fs::write(&file, ok.to_string()).unwrap();
-    refused(
-        crate::queue::run(&f.opts(), &file, 0),
-        "queue is refused as root",
-    );
     assert!(!f.root.join("results").exists());
     assert!(!f.root.join("lock").exists());
 }

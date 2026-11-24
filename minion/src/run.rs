@@ -294,10 +294,7 @@ pub fn meters(sys: &Path, specs: &[Value], mark: &str) -> Result<Vec<Box<dyn Met
 }
 
 /// Runs cmd as measure does and writes run.json to out. Returns its exit code.
-pub fn run(sys: &Path, out: &Path, cmd: &[String], euid: u32) -> Result<u8, String> {
-    if euid == 0 {
-        return Err("run is refused as root: it runs your command".into());
-    }
+pub fn run(sys: &Path, out: &Path, cmd: &[String]) -> Result<u8, String> {
     let (prog, args) = cmd.split_first().ok_or("run needs a command after --")?;
     let file = File::create_new(out).map_err(|e| format!("create {}: {e}", out.display()))?;
     let meters = meters(sys, &["rapl".into()], "")?;
