@@ -68,7 +68,7 @@ type target struct {
 
 // aim resolves the host (override, else the template's; a name not in hosts
 // is an ssh alias) without connecting. A local target runs in the project
-// itself, with this executable as its agent and the bundled minion.
+// itself, with this executable as its agent.
 func aim(r *config.Resolved, override string) (*target, error) {
 	name := cmp.Or(override, r.Template.Host)
 	if name == "" {
@@ -79,23 +79,22 @@ func aim(r *config.Resolved, override string) (*target, error) {
 	if t.alias == "localhost" || t.alias == "local" {
 		exe, err := os.Executable()
 		t.Client, t.dir, t.agent = ssh.Local(), r.Root, remote.ShellQuote(exe)
-		if bin, err := ssh.MinionBinary(runtime.GOOS + "/" + runtime.GOARCH); err == nil {
-			t.minion = remote.ShellQuote(bin)
-		}
 		return t, err
 	}
 	t.dir = remoteDirFor(r.Template.RemoteDir, h.RemoteDir, r.Root)
 	return t, nil
 }
 
-// dial connects to the target aim resolves; a remote one gets its agent and
-// minion bootstrapped when agent is set.
+// dial connects to the target aim resolves. With agent set, a remote host
+// gets gru's agent, and any host minion's build for it, in its state dir.
 func dial(r *config.Resolved, override string, agent bool) (*target, error) {
 	t, err := aim(r, override)
-	if err != nil || t.Client != nil { // local
-		return t, err
+	if err != nil {
+		return nil, err
 	}
-	t.Client = ssh.New(t.alias)
+	if t.Client == nil {
+		t.Client = ssh.New(t.alias)
+	}
 	if agent {
 		t.Open() // one multiplexed connection for the whole command
 		if err := t.bootstrap(); err != nil {
@@ -106,21 +105,26 @@ func dial(r *config.Resolved, override string, agent bool) (*target, error) {
 	return t, nil
 }
 
-// bootstrap puts the gru agent on the host and, if gru carries a minion for
-// the host's platform, minion.
+// bootstrap puts the gru agent on a remote host and, if gru carries a minion
+// for the host's platform, minion on any host: named by its hash, so it finds
+// its root copy by its own name.
 func (t *target) bootstrap() error {
-	platform, err := t.Platform()
+	platform := runtime.GOOS + "/" + runtime.GOARCH
+	if !t.Local {
+		var err error
+		if platform, err = t.Platform(); err != nil {
+			return err
+		}
+		bin, err := ssh.AgentBinary(platform)
+		if err != nil {
+			return err
+		}
+		if t.agent, err = t.EnsureAgent(t.state, version, platform, bin); err != nil {
+			return err
+		}
+	}
+	bin, err := ssh.MinionBinary(platform)
 	if err != nil {
-		return err
-	}
-	bin, err := ssh.AgentBinary(platform)
-	if err != nil {
-		return err
-	}
-	if t.agent, err = t.EnsureAgent(t.state, version, platform, bin); err != nil {
-		return err
-	}
-	if bin, err = ssh.MinionBinary(platform); err != nil {
 		return nil // tasks there get an empty GRU_MINION
 	}
 	t.minion, err = t.EnsureMinion(t.state, version, platform, bin)

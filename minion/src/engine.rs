@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::journal::{self, Journal};
+use crate::journal::Journal;
 use crate::settings::{self, SETTINGS, State, Values};
 
 /// Applies a profile. The first apply of a journal saves the full state first.
@@ -51,7 +51,7 @@ pub fn apply(j: &mut Journal, sys: &Path, profile: &State) -> Result<(), String>
 /// Puts back every saved value and closes the open journal. An object that
 /// differs from both its saved and its last applied value was changed by someone
 /// else: it is kept and returned as a conflict.
-pub fn restore(mut j: Journal, sys: &Path) -> Result<Vec<Value>, String> {
+pub fn restore(j: &mut Journal, sys: &Path) -> Result<Vec<Value>, String> {
     let saved = state_of(&j.lines, "saved")?;
     let applied = ours(&j.lines)?;
     let now = settings::snapshot(sys)?;
@@ -79,26 +79,6 @@ pub fn restore(mut j: Journal, sys: &Path) -> Result<Vec<Value>, String> {
     j.append(json!({"t": "close"}))?;
     j.close()?;
     Ok(conflicts)
-}
-
-/// The open journal's last line and the objects that now differ from their saved value.
-pub fn status(sys: &Path, dir: &Path) -> Result<Value, String> {
-    let lines = journal::read(dir)?;
-    let Some(end) = lines.last() else {
-        return Ok(json!({"open": false}));
-    };
-    let saved = state_of(&lines, "saved")?;
-    let changed: State = settings::snapshot(sys)?
-        .into_iter()
-        .map(|(id, now)| {
-            let old = saved.get(&id);
-            let diff = now
-                .into_iter()
-                .filter(|(o, v)| old.and_then(|s| s.get(o)).is_some_and(|s| s != v));
-            (id, diff.collect())
-        })
-        .collect();
-    Ok(json!({"open": true, "last": end["t"], "changed": changed}))
 }
 
 /// The state minion last left: saved if nothing was written, else the last

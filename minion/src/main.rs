@@ -5,19 +5,20 @@ mod lock;
 mod noise;
 mod queue;
 mod run;
+mod serve;
 mod settings;
 #[cfg(test)]
 mod tests;
 mod utc;
 
-use std::io::{self, Read};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
-use crate::ffi::{SIG_IGN, SIGHUP, SIGINT, SIGTERM, geteuid, signal};
-use crate::journal::Journal;
+use crate::ffi::geteuid;
+use crate::serve::{NEEDS_ROOT, Root};
 
 const NAME: &str = env!("CARGO_PKG_NAME");
 /// gru's version, which its build passes in: minion ships with gru.
@@ -28,55 +29,42 @@ const VERSION: &str = match option_env!("MINION_VERSION") {
 const USAGE: &str = concat!(
     "usage: ",
     env!("CARGO_PKG_NAME"),
-    " <verb> [--sysfs DIR] [--state-dir DIR] [--lock FILE] [--out FILE] [--held] [Q.json] [-- CMD...]
+    " <verb> [--sysfs DIR] [--state-dir DIR] [--lock FILE] [--lib DIR] [--out FILE] [Q.json] [-- CMD...]
 
   snapshot   print the current settings as JSON
-  apply      apply a profile (JSON on stdin), saving the original settings first
-  restore    put the original settings back and close the journal
-  status     show the open journal and what differs from the original settings (as root)
+  restore    put the original settings back and close the journal, unless a queue runs
   run        run CMD, reading the meters right before and after it, into --out (default run.json)
   queue      run every run of the queue in Q.json under its profile, then restore
   reap       kill the leftover workloads of a queue that died (as the user, never as root)
+  serve      the root side: apply and restore requests on stdin, then restore
 
-apply and restore act only while no queue holds the queue lock. With --held the caller is the
-queue that holds it: stdin is {\"queue\": ID} for restore, plus \"profile\" for apply.
+restore and a queue that changes settings start `sudo -n <root copy> serve`, which `gru setup`
+allows; without it they exit 77.
 
---sysfs, --state-dir and --lock are for tests and are refused as root. With them, queue runs
-apply and restore in-process instead of through sudo."
+--sysfs, --state-dir, --lock and --lib (where the root copies are) are for tests and are refused
+as root."
 );
 
+#[derive(Clone)]
 struct Opts {
     sysfs: PathBuf,
     state_dir: PathBuf,
     lock: PathBuf,
+    lib: PathBuf,
     out: PathBuf,
     args: Vec<String>,
-    /// The caller is the queue that holds the queue lock.
-    held: bool,
-    /// Set by a test override: queue then calls the privileged verbs in-process.
-    test: bool,
+    /// The test overrides given, which serve gets too.
+    test: Vec<String>,
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if matches!(args.first().map(String::as_str), Some("apply" | "restore")) {
-        ignore_stop_signals();
-    }
     match run(&args) {
         Ok(code) => ExitCode::from(code),
         Err(e) => {
             utc::log(e);
             ExitCode::FAILURE
         }
-    }
-}
-
-/// A signal to a queue's process group reaches its sudo children: apply and
-/// restore finish what they started. The journal covers SIGKILL.
-fn ignore_stop_signals() {
-    for sig in [SIGHUP, SIGINT, SIGTERM] {
-        // SAFETY: SIG_IGN installs no handler.
-        unsafe { signal(sig, SIG_IGN) };
     }
 }
 
@@ -97,81 +85,28 @@ fn run(args: &[String]) -> Result<u8, String> {
         _ => return Err(USAGE.into()),
     }
     match verb.as_str() {
-        "snapshot" => print(json!(settings::snapshot(&o.sysfs)?)),
-        "apply" | "restore" => {
-            let mut input = vec![];
-            if verb == "apply" || o.held {
-                io::stdin()
-                    .read_to_end(&mut input)
-                    .map_err(|e| format!("stdin: {e}"))?;
+        "snapshot" => println!("{:#}", json!(settings::snapshot(&o.sysfs)?)),
+        "serve" => serve::serve(&o, io::stdin().lock(), io::stdout().lock())?,
+        "restore" => {
+            if let Some(q) = lock::held_by(&o.lock)? {
+                println!("queue {q:?} holds the queue lock and restores at its end: nothing done");
+                return Ok(0);
             }
-            let said = privileged(&o, verb, o.held, &input)?;
-            if !said.is_empty() {
-                println!("{said}");
-            }
-            Ok(())
+            let Some(mut root) = Root::start(&o) else {
+                return Ok(NEEDS_ROOT);
+            };
+            println!("{}", root.ask("restore")?);
         }
-        "status" => print(engine::status(&o.sysfs, &o.state_dir)?),
         "reap" if geteuid() == 0 => {
-            Err("reap is refused as root: it kills what the lock file says".into())
+            return Err("reap is refused as root: it kills what the lock file says".into());
         }
         "reap" => {
-            lock::reap(&o.lock).map(|n| utc::log(format!("killed {n} leftover workload processes")))
+            let n = lock::reap(&o.lock)?;
+            utc::log(format!("killed {n} leftover workload processes"));
         }
-        _ => Err(USAGE.into()),
+        _ => return Err(USAGE.into()),
     }
-    .map(|()| 0)
-}
-
-/// apply or restore, checked with the journal locked: with held, only while the
-/// queue named on stdin holds the queue lock; without, only while no queue does.
-/// So a privileged child that outlives its queue does nothing. Returns what it
-/// says: for restore, "" if no journal was open.
-fn privileged(o: &Opts, verb: &str, held: bool, input: &[u8]) -> Result<String, String> {
-    let input: Value = match input {
-        [] => Value::Null,
-        _ => serde_json::from_slice(input).map_err(|e| format!("stdin: {e}"))?,
-    };
-    let (queue, profile) = if held {
-        let keys: &[_] = if verb == "apply" {
-            &["queue", "profile"]
-        } else {
-            &["queue"]
-        };
-        queue::object(&input, "stdin", keys)?;
-        let id = input["queue"].as_str().ok_or("stdin: needs the queue id")?;
-        (Some(id), &input["profile"])
-    } else {
-        (None, &input)
-    };
-    let mut j = Journal::open(&o.state_dir)?;
-    let holder = lock::held_by(&o.lock)?;
-    if holder.as_deref() != queue {
-        let why = match queue {
-            Some(id) => format!("queue {id:?} doesn't hold the queue lock: nothing done"),
-            None => format!(
-                "queue {:?} holds the queue lock: nothing done",
-                holder.unwrap()
-            ),
-        };
-        return match (verb, queue) {
-            ("restore", None) => Ok(format!("{why}; it restored at its start")),
-            _ => Err(why),
-        };
-    }
-    if verb == "apply" {
-        let profile =
-            serde_json::from_value(profile.clone()).map_err(|e| format!("profile: {e}"))?;
-        return engine::apply(&mut j, &o.sysfs, &profile).map(|()| String::new());
-    }
-    if j.lines.is_empty() {
-        return Ok(String::new());
-    }
-    let kept = engine::restore(j, &o.sysfs)?;
-    let kept = kept
-        .iter()
-        .map(|c| format!("; kept {c}: changed by someone else"));
-    Ok(format!("restored{}", kept.collect::<String>()))
+    Ok(0)
 }
 
 /// Root must not let a caller point its reads and writes at other files.
@@ -180,10 +115,10 @@ fn parse_opts(verb: &str, args: &[String], euid: u32) -> Result<Opts, String> {
         sysfs: "/sys".into(),
         state_dir: ["/var/lib", NAME].iter().collect(),
         lock: format!("/run/lock/{NAME}.lock").into(),
+        lib: "/usr/local/lib/gru".into(),
         out: "run.json".into(),
         args: vec![],
-        held: false,
-        test: false,
+        test: vec![],
     };
     let mut it = args.iter();
     while let Some(flag) = it.next() {
@@ -191,11 +126,8 @@ fn parse_opts(verb: &str, args: &[String], euid: u32) -> Result<Opts, String> {
             "--sysfs" => &mut o.sysfs,
             "--state-dir" => &mut o.state_dir,
             "--lock" => &mut o.lock,
+            "--lib" => &mut o.lib,
             "--out" if verb == "run" => &mut o.out,
-            "--held" if verb == "apply" || verb == "restore" => {
-                o.held = true;
-                continue;
-            }
             a if !a.starts_with('-') => {
                 o.args.push(a.into());
                 continue;
@@ -205,13 +137,11 @@ fn parse_opts(verb: &str, args: &[String], euid: u32) -> Result<Opts, String> {
         if euid == 0 {
             return Err(format!("{flag} is refused as root"));
         }
-        *field = it.next().ok_or(format!("{flag} needs a value"))?.into();
-        o.test |= flag != "--out";
+        let value = it.next().ok_or(format!("{flag} needs a value"))?;
+        *field = value.into();
+        if flag != "--out" {
+            o.test.extend([flag.clone(), value.clone()]);
+        }
     }
     Ok(o)
-}
-
-fn print(v: Value) -> Result<(), String> {
-    println!("{v:#}");
-    Ok(())
 }
