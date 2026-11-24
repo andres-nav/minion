@@ -80,6 +80,11 @@ func JobDir(stateDir, id string) string { return JobsDir(stateDir) + "/" + id }
 // IDTaken is LaunchCommand's exit code when the job's directory already exists.
 const IDTaken = 73
 
+// waits starts each sh -c of a job: on a kill, that sh waits for what it runs,
+// as the wrapper does. dash forks even a lone command and would die at once,
+// letting the wrapper end the job while the task is still stopping.
+const waits = "trap 'exit 143' TERM INT HUP; "
+
 // Script builds the sh wrapper of a job. The command and each hook run in their
 // own `sh -c`, so their syntax or an exit can't break the wrapper. Whatever ends
 // the job (the command, a failing before hook, a kill, a failed cd), the EXIT
@@ -89,7 +94,7 @@ func Script(workDir, jobDir string, j Job) string {
 	var b strings.Builder
 	run := func(cmds []string, suffix string) {
 		for _, c := range cmds {
-			fmt.Fprintf(&b, "  sh -c %s%s\n", ShellQuote(c), suffix)
+			fmt.Fprintf(&b, "  sh -c %s%s\n", ShellQuote(waits+c), suffix)
 		}
 	}
 	for _, e := range j.Env {
@@ -129,7 +134,7 @@ func Script(workDir, jobDir string, j Job) string {
 	b.WriteString("  exit $ec\n}\ntrap finish EXIT\ntrap 'ec=143; echo \"[gru] killed\"; exit' TERM INT HUP\n")
 	fmt.Fprintf(&b, "cd %s || exit\n", RemotePath(workDir))
 	run(j.Before, " || { ec=$?; exit; }")
-	fmt.Fprintf(&b, "sh -c %s\nec=$?\n", ShellQuote(j.Command))
+	fmt.Fprintf(&b, "sh -c %s\nec=$?\n", ShellQuote(waits+j.Command))
 	return b.String()
 }
 
