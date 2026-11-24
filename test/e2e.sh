@@ -530,7 +530,15 @@ check_serve() {
   sed -i '/^Defaults!/d' "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-*
   want 77 tty gru run energy --host fake --arg perfq.json
   grep -q "must have a tty" "$T/tty.out" || fail "requiretty: not what stopped serve"
+  # sudo-rs has no requiretty, so its visudo refuses that line: setup leaves it out.
+  touch "$GRU_TEST_DESTDIR/sudo-rs"
   setup
+  ! grep -q requiretty "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-* || fail "sudo-rs: the requiretty line was kept"
+  want 0 sudors gru run energy --host fake --arg perfq.json
+  rm "$GRU_TEST_DESTDIR/sudo-rs"
+  setup
+  grep -q '^Defaults!GRU_MINION_.* !requiretty$' "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-* ||
+    fail "classic sudo: no requiretty line"
   # Root checks its own copy against the hash in its name.
   u=$(echo "$T"/state/bin/minion-"$V"-linux-"$arch"-*)
   command cp "$u" "$T/upload" && echo x >> "$u"
