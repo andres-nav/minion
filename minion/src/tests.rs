@@ -308,10 +308,7 @@ fn apply_then_restore_gives_the_original() {
     assert!(restore(&f.sys, &f.state).unwrap().is_empty());
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(!f.journal().exists());
-    assert_eq!(
-        f.done(),
-        ["open", "saved", "apply", "applied", "restored", "close"]
-    );
+    assert_eq!(f.done(), ["saved", "apply", "applied", "restored"]);
 }
 
 #[test]
@@ -349,14 +346,15 @@ fn restore_twice_is_harmless() {
     restore(&f.sys, &f.state).unwrap();
     assert_eq!(f.serve("restore\n"), ["ok no journal open"]);
     assert_eq!(snapshot(&f.sys).unwrap(), before);
-    assert_eq!(f.done().len(), 6);
+    assert_eq!(f.done().len(), 4);
 }
 
 #[test]
 fn crash_between_apply_and_applied_restores_every_object() {
     let f = Fake::new("crash");
     let before = snapshot(&f.sys).unwrap();
-    // The journal a crash leaves: an apply intent, no read-back, a torn last line.
+    // The journal a crash leaves (with the open line older builds wrote): an apply
+    // intent, no read-back, a torn last line.
     let lines = [
         json!({"t": "open"}),
         json!({"t": "saved", "state": before}),
@@ -370,7 +368,7 @@ fn crash_between_apply_and_applied_restores_every_object() {
 
     assert!(restore(&f.sys, &f.state).unwrap().is_empty());
     assert_eq!(snapshot(&f.sys).unwrap(), before);
-    assert_eq!(f.done(), ["open", "saved", "apply", "restored", "close"]);
+    assert_eq!(f.done(), ["open", "saved", "apply", "restored"]);
 }
 
 #[test]
@@ -1064,10 +1062,7 @@ fn sigterm_stops_the_queue_restores_and_releases_the_lock() {
     assert_eq!(ev[3]["status"], "stopped");
     assert_eq!(fs::read_dir(dir.join("runs")).unwrap().count(), 1);
     // The second run's profile is never applied.
-    assert_eq!(
-        f.done(),
-        ["open", "saved", "apply", "applied", "restored", "close"]
-    );
+    assert_eq!(f.done(), ["saved", "apply", "applied", "restored"]);
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert!(f.lock_is_free());
 }
