@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Output, Stdio};
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 
@@ -21,9 +21,11 @@ use crate::utc::{self, log, now_ns};
 use crate::{NAME, Opts, VERSION};
 
 #[rustfmt::skip]
-const KEYS: [&str; 9] = ["name", "profiles", "workloads", "reps", "seed", "settle_s", "meters", "out", "notify"];
+const KEYS: [&str; 10] = ["name", "profiles", "workloads", "reps", "seed", "settle_s", "meters", "out", "notify", "thermal"];
 const SETTLE: Duration = Duration::from_secs(1);
+const POLL: Duration = Duration::from_secs(1);
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
+const THERMAL_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub struct Queue {
     pub name: String,
@@ -36,6 +38,14 @@ pub struct Queue {
     pub out: PathBuf,
     pub notify: Vec<String>,
     pub notify_timeout: Duration,
+    pub thermal: Option<Thermal>,
+}
+
+/// Before each run, wait until every hwmon temperature is within band_c of
+/// its value at the queue's start, up to timeout.
+pub struct Thermal {
+    pub band_c: f64,
+    pub timeout: Duration,
 }
 
 pub struct Run {
@@ -170,6 +180,12 @@ impl Running<'_> {
     /// not already in it. Stops early on a signal or an error.
     fn runs(&mut self, plan: &[Run], targets: &BTreeMap<String, State>) -> Result<(), String> {
         let mut current = None;
+        let baseline = self
+            .q
+            .thermal
+            .as_ref()
+            .map(|_| temps(&self.o.sysfs))
+            .unwrap_or_default();
         for r in plan {
             if stopped() {
                 break;
@@ -181,10 +197,11 @@ impl Running<'_> {
                 current = Some(&r.profile);
             }
             pause(self.q.settle);
+            let thermal = self.cool(&r.id, &baseline);
             if stopped() {
                 break;
             }
-            if self.one(r, target)? {
+            if self.one(r, target, thermal)? {
                 current = None;
             }
         }
@@ -193,7 +210,7 @@ impl Running<'_> {
 
     /// Runs r and writes its run.json. A failing workload is recorded, not an
     /// error. Returns whether the settings drifted from target.
-    fn one(&mut self, r: &Run, target: &State) -> Result<bool, String> {
+    fn one(&mut self, r: &Run, target: &State, thermal: Value) -> Result<bool, String> {
         let dir = self.dir.join("runs").join(&r.id);
         let err = |e: std::io::Error| format!("{}: {e}", dir.display());
         fs::create_dir_all(&dir).map_err(err)?;
@@ -217,6 +234,9 @@ impl Running<'_> {
         for (k, v) in r.json().as_object().unwrap() {
             rec[k.as_str()] = v.clone();
         }
+        if !thermal.is_null() {
+            rec["thermal"] = thermal;
+        }
         run::write_new(&dir.join("run.json"), &rec)?;
 
         self.ran += 1;
@@ -236,6 +256,37 @@ impl Running<'_> {
             self.send("drift", &r.id, "", &why);
         }
         Ok(drift)
+    }
+
+    /// Waits, checking once a second, until every hwmon temperature is within
+    /// the band of its baseline, or the timeout; then sends thermal_timeout.
+    /// Returns the record for run.json, or null without a thermal wait.
+    fn cool(&mut self, run: &str, baseline: &BTreeMap<String, f64>) -> Value {
+        let Some(t) = &self.q.thermal else {
+            return Value::Null;
+        };
+        let start = Instant::now();
+        let hot = |now: &BTreeMap<String, f64>| -> Vec<String> {
+            let over = now
+                .iter()
+                .filter(|(k, c)| baseline.get(*k).is_some_and(|b| **c > b + t.band_c));
+            over.map(|(k, _)| k.clone()).collect()
+        };
+        let mut now = temps(&self.o.sysfs);
+        while !hot(&now).is_empty() && start.elapsed() < t.timeout && !stopped() {
+            pause(POLL.min(t.timeout.saturating_sub(start.elapsed())));
+            now = temps(&self.o.sysfs);
+        }
+        let (hot, waited) = (hot(&now), start.elapsed().as_secs_f64());
+        if !hot.is_empty() && !stopped() {
+            let why = format!(
+                "{} above start + {} °C after {waited:.0} s",
+                hot.join(", "),
+                t.band_c
+            );
+            self.send("thermal_timeout", run, "", &why);
+        }
+        json!({"baseline": baseline, "now": now, "waited_s": waited, "hot": hot})
     }
 
     /// Puts the original settings back and sends restore_ok (for the leftover
@@ -438,6 +489,21 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
             NOTIFY_TIMEOUT,
             "notify timeout_s",
         )?,
+        thermal: match get("thermal") {
+            Value::Null => None,
+            t => Some(Thermal {
+                band_c: match object(t, "thermal", &["band_c", "timeout_s"])
+                    .map(|_| &t["band_c"])?
+                {
+                    Value::Null => 2.0,
+                    b => b
+                        .as_f64()
+                        .filter(|b| *b >= 0.0)
+                        .ok_or("thermal band_c: needs degrees >= 0")?,
+                },
+                timeout: seconds(&t["timeout_s"], THERMAL_TIMEOUT, "thermal timeout_s")?,
+            }),
+        },
         profiles,
         workloads,
     };
@@ -596,6 +662,34 @@ fn stop_on_signals() {
         // SAFETY: on_signal only uses atomics and kill, which are async-signal-safe.
         unsafe { signal(sig, on_signal as *const () as usize) };
     }
+}
+
+/// Every hwmon temperature in °C, by "hwmon0/temp1".
+fn temps(sys: &Path) -> BTreeMap<String, f64> {
+    let mut temps = BTreeMap::new();
+    for hw in fs::read_dir(sys.join("class/hwmon"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        for f in fs::read_dir(hw.path()).into_iter().flatten().flatten() {
+            let name = f.file_name().into_string().unwrap_or_default();
+            let Some(sensor) = name
+                .strip_suffix("_input")
+                .filter(|s| s.starts_with("temp"))
+            else {
+                continue;
+            };
+            let mc = fs::read_to_string(f.path())
+                .ok()
+                .and_then(|s| s.trim().parse::<f64>().ok());
+            if let Some(mc) = mc {
+                let hw = hw.file_name().to_string_lossy().into_owned();
+                temps.insert(format!("{hw}/{sensor}"), mc / 1000.0);
+            }
+        }
+    }
+    temps
 }
 
 fn stopped() -> bool {
