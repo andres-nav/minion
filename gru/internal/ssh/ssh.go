@@ -137,26 +137,6 @@ func (c *Client) Run(command string, stdin io.Reader, stdout, stderr io.Writer) 
 	return ExitCode(cmd.Run())
 }
 
-// RunStdout runs command and hands its stdout stream to consume, returning the
-// command's exit code. Used to receive a file stream from the agent.
-func (c *Client) RunStdout(command string, stderr io.Writer, consume func(io.Reader) error) (int, error) {
-	cmd := c.cmd(command)
-	cmd.Stderr = stderr
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return -1, err
-	}
-	if err := cmd.Start(); err != nil {
-		return -1, err
-	}
-	cErr := consume(out)
-	wErr := cmd.Wait()
-	if cErr != nil {
-		return -1, cErr
-	}
-	return ExitCode(wErr)
-}
-
 // Output runs command and returns its trimmed stdout.
 func (c *Client) Output(command string) (string, error) {
 	var out, errb bytes.Buffer
@@ -190,30 +170,15 @@ func ExitCode(err error) (int, error) {
 	return -1, err
 }
 
-// AgentBinary returns the local gru binary for platform ("goos/goarch"): this
-// executable for its own platform, else the bundled gru-<goos>-<goarch>.
-func AgentBinary(platform string) (string, error) {
+// Binary returns the local build of name ("gru" or "minion") for platform
+// ("goos/goarch"): this executable for gru on its own platform, else the
+// bundled <name>-<goos>-<goarch>.
+func Binary(name, platform string) (string, error) {
 	self, err := os.Executable()
-	if err != nil {
-		return "", err
+	if err != nil || name == "gru" && platform == runtime.GOOS+"/"+runtime.GOARCH {
+		return self, err
 	}
-	return agentBinary(self, platform)
-}
-
-func agentBinary(self, platform string) (string, error) {
-	if platform == runtime.GOOS+"/"+runtime.GOARCH {
-		return self, nil
-	}
-	return bundled(self, "gru-"+dashed(platform))
-}
-
-// MinionBinary returns the bundled minion-<goos>-<goarch>, minion's build for platform.
-func MinionBinary(platform string) (string, error) {
-	self, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return bundled(self, "minion-"+dashed(platform))
+	return bundled(self, name+"-"+dashed(platform))
 }
 
 // bundled finds name next to self or in its ../libexec/gru, where `make build`
@@ -227,12 +192,6 @@ func bundled(self, name string) (string, error) {
 	return "", fmt.Errorf("no %s next to %s or in its ../libexec/gru; build it with `make build`", name, self)
 }
 
-// Platform returns the host's GOOS/GOARCH, from `uname -sm`.
-func (c *Client) Platform() (string, error) {
-	unm, err := c.Output("uname -sm")
-	return unameToGo(unm), err
-}
-
 // EnsureAgent puts bin, the agent for platform, in the host's stateDir and
 // returns its invocation, as one shell word. A new upload must answer with
 // version.
@@ -241,7 +200,7 @@ func (c *Client) EnsureAgent(stateDir, version, platform, bin string) (string, e
 	if err != nil || !uploaded {
 		return invoke, err
 	}
-	if v, err := c.Output(invoke + " _agent version"); err != nil || v != "gru "+version {
+	if v, err := c.Output(invoke + " version"); err != nil || v != "gru "+version {
 		return "", fmt.Errorf("agent %s reports %q (%v), want %q", invoke, v, err, "gru "+version)
 	}
 	return invoke, nil
@@ -283,8 +242,8 @@ func (c *Client) ensure(stateDir, name, bin string) (string, bool, error) {
 // dashed turns goos/goarch into goos-goarch, as in file names.
 func dashed(platform string) string { return strings.ReplaceAll(platform, "/", "-") }
 
-// unameToGo maps `uname -sm` output to a GOOS/GOARCH string.
-func unameToGo(unm string) string {
+// UnameToGo maps `uname -sm` output to a GOOS/GOARCH string.
+func UnameToGo(unm string) string {
 	f := strings.Fields(strings.ToLower(unm))
 	if len(f) != 2 {
 		return unm

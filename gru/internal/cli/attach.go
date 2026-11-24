@@ -11,7 +11,7 @@ import (
 func cmdAttach(args []string) int {
 	fs := flag.NewFlagSet("attach", flag.ContinueOnError)
 	host := hostFlag(fs)
-	id, err := parsePositional(fs, args)
+	id, err := parseArgs(fs, args, true)
 	if err != nil {
 		return 2
 	}

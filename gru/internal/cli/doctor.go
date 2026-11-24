@@ -17,8 +17,8 @@ import (
 func cmdDoctor(args []string) int {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	host := hostFlag(fs)
-	notify := fs.Bool("notify", false, "also send a test notification (email and/or run hooks) from --host or the template's host")
-	if err := fs.Parse(args); err != nil {
+	notify := fs.Bool("notify", false, "also run the notify hooks as a test from --host or the template's host")
+	if _, err := parseArgs(fs, args, false); err != nil {
 		return 2
 	}
 	r, err := project() // loads and checks the config
@@ -60,13 +60,12 @@ func cmdDoctor(args []string) int {
 	return 0
 }
 
-// sendNotifyTest sends a test notification through the resolved block (email
-// and/or run hooks, whatever its `on`) from the target host, to check the
-// credentials and the way there end to end.
+// sendNotifyTest runs the resolved block's hooks as a test notification
+// (whatever its `on`) from the target host, to check them end to end.
 func sendNotifyTest(r *config.Resolved, host string) int {
 	n := r.Config.NotifyFor(r.Template)
 	if n == nil {
-		return errf("no notify configured (add a notify block with email or run to the template or the config)")
+		return errf("no notify configured (add a notify block with run hooks to the template or the config)")
 	}
 	test := *n
 	test.On = "always"

@@ -99,11 +99,8 @@ func Script(workDir, jobDir string, j Job) string {
 	}
 	for _, e := range j.Env {
 		// double-quoted so spaces survive while $VAR still expands.
-		if k, v, ok := strings.Cut(e, "="); ok {
-			fmt.Fprintf(&b, "export %s=\"%s\"\n", k, v)
-		} else {
-			fmt.Fprintf(&b, "export %s\n", e)
-		}
+		k, v, _ := strings.Cut(e, "=")
+		fmt.Fprintf(&b, "export %s=\"%s\"\n", k, v)
 	}
 	fmt.Fprintf(&b, "J=%s\n", jobDir)
 	fmt.Fprintf(&b, "export GRU_ARGS=%s GRU_AGENT=%s GRU_MINION=%s GRU_JOB_ID=%s GRU_TASK=%s GRU_HOST=%s GRU_GIT=%s GRU_DIRTY=%t\n",

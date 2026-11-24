@@ -14,6 +14,7 @@ import (
 
 	"github.com/andres-nav/minion/gru/internal/config"
 	"github.com/andres-nav/minion/gru/internal/remote"
+	"github.com/andres-nav/minion/gru/internal/sync"
 )
 
 // cmdRun runs a task of the template on the resolved host (the template's or
@@ -24,7 +25,7 @@ func cmdRun(args []string) int {
 	detach := fs.Bool("detach", false, "launch without attaching")
 	arg := fs.String("arg", "", "task text exposed to the command/hooks as $GRU_ARGS")
 	noSync := fs.Bool("no-sync", false, "don't sync local files; run against the code already on the host")
-	task, err := parsePositional(fs, args)
+	task, err := parseArgs(fs, args, true)
 	if err != nil {
 		return 2
 	}
@@ -56,10 +57,10 @@ func cmdRun(args []string) int {
 	defer t.Close()
 
 	if !t.Local && !*noSync {
-		// Push local dirs (e.g. ~/.midway) to the same remote path, then the
+		// Push local dirs (e.g. ~/.aws) to the same remote path, then the
 		// sibling packages the project needs, then the project.
 		for _, p := range tm.Push {
-			n, _, err := pushChanges(t, expandLocalHome(p), nil, p, false, false)
+			n, _, err := pushChanges(t, expandLocalHome(p), nil, p, false, sync.Walk)
 			if err != nil {
 				return errf("push %s: %v", p, err)
 			}
@@ -71,13 +72,13 @@ func cmdRun(args []string) int {
 			if dir == t.dir {
 				return errf("needs %s: it would sync into the project's remote dir %s (put {repo} in remote_dir)", need, dir)
 			}
-			n, _, err := pushChanges(t, local, tm.Exclude, dir, false, true)
+			n, _, err := pushChanges(t, local, tm.Exclude, dir, false, sync.WalkGit)
 			if err != nil {
 				return errf("needs %s: %v", need, err)
 			}
 			fmt.Fprintf(os.Stderr, "synced dep %s (%d file(s)) to %s:%s\n", need, n, t.alias, dir)
 		}
-		n, _, err := pushChanges(t, r.Root, tm.Exclude, t.dir, false, true)
+		n, _, err := pushChanges(t, r.Root, tm.Exclude, t.dir, false, sync.WalkGit)
 		if err != nil {
 			return errf("%v", err)
 		}
@@ -147,15 +148,12 @@ func launch(t *target, ts string, script func(id string) string) (string, error)
 }
 
 // gitProvenance returns the commit SHA and dirty flag of the tree at dir.
-func gitProvenance(dir string) (sha string, dirty bool) {
-	sha = strings.TrimSpace(gitOut(dir, "rev-parse", "HEAD"))
-	dirty = strings.TrimSpace(gitOut(dir, "status", "--porcelain")) != ""
-	return
-}
-
-func gitOut(dir string, args ...string) string {
-	out, _ := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
-	return string(out)
+func gitProvenance(dir string) (string, bool) {
+	git := func(args ...string) string {
+		out, _ := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+		return strings.TrimSpace(string(out))
+	}
+	return git("rev-parse", "HEAD"), git("status", "--porcelain") != ""
 }
 
 // resolvedNotify returns n as one line of JSON with its ${ENV} secrets
@@ -167,13 +165,6 @@ func resolvedNotify(n *config.Notify) (string, error) {
 	}
 	r := *n
 	var err error
-	if n.Email != nil {
-		e := *n.Email
-		if e.Pass, err = resolveSecret(e.Pass); err != nil {
-			return "", err
-		}
-		r.Email = &e
-	}
 	r.Env = map[string]string{}
 	for k, v := range n.Env {
 		if r.Env[k], err = resolveSecret(v); err != nil {

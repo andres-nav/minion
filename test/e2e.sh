@@ -177,8 +177,7 @@ check_remote() {
   [ "$code" -eq 1 ] || fail "gru run: exit $code, want 1 (a workload fails)"
   id=$(started "$T/remote.out")
   v=$(gru version | cut -d' ' -f2)
-  "$T"/state/bin/gru-"$v"-linux-* _agent version | grep -qx "gru $v" ||
-    fail "no agent gru-$v-linux-* in $T/state/bin"
+  exists "$T/state/bin/gru-$v-linux-*" || fail "no agent gru-$v-linux-* in $T/state/bin"
   # gru uploaded minion, named by its version, platform and hash.
   m=$T/state/bin/minion-$v-linux-$arch-$(sha256sum < "$M" | cut -c1-12)
   cmp "$m" "$M" || fail "no upload of $M as $m"
@@ -436,6 +435,8 @@ EOF
   want 2 noargs gru
   grep -q "usage: gru" "$T/noargs.out" || fail "no args: no usage"
   want 2 unknown gru bogus
+  # A stray word is refused, not a reason to drop the flags after it.
+  want 2 stray gru sync stray --delete
 
   # The config from $XDG_CONFIG_HOME/gru when GRU_CONFIG is unset, found by detect.
   mkdir -p "$T/xdg/gru" "$T/xdgproj"

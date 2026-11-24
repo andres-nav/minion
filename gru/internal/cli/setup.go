@@ -65,7 +65,7 @@ func cmdSetup(args []string) int {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	host := hostFlag(fs)
 	remove := fs.Bool("remove", false, "remove minion's root copies and sudoers line")
-	if err := fs.Parse(args); err != nil {
+	if _, err := parseArgs(fs, args, false); err != nil {
 		return 2
 	}
 	if !terminal() {

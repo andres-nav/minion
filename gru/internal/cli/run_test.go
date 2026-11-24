@@ -33,17 +33,19 @@ func TestLaunchDrawsAnotherIDWhenTaken(t *testing.T) {
 	}
 }
 
-func TestParsePositional(t *testing.T) {
+func TestParseArgs(t *testing.T) {
 	for args, want := range map[string]string{"x": "x", "x --host h": "x", "--host h x": "x", "": ""} {
 		fs := flagSet()
-		if got, err := parsePositional(fs, strings.Fields(args)); err != nil || got != want {
+		if got, err := parseArgs(fs, strings.Fields(args), true); err != nil || got != want {
 			t.Errorf("%q: got %q err %v", args, got, err)
 		}
 	}
-	fs := flagSet()
-	fs.SetOutput(new(strings.Builder))
-	if _, err := parsePositional(fs, []string{"x", "--host", "h", "y"}); err == nil {
-		t.Error("a second positional was accepted")
+	for args, positional := range map[string]bool{"x --host h y": true, "x --host h": false} {
+		fs := flagSet()
+		fs.SetOutput(new(strings.Builder))
+		if _, err := parseArgs(fs, strings.Fields(args), positional); err == nil {
+			t.Errorf("%q: an extra positional was accepted", args)
+		}
 	}
 }
 
@@ -70,6 +72,10 @@ func TestDial(t *testing.T) {
 	exe, _ := os.Executable()
 	if tg, _ := dial(r, "localhost", false); tg.agent != "'"+exe+"'" {
 		t.Errorf("local agent = %q, want this executable", tg.agent)
+	}
+	r.Template.RemoteDir = "slot/{repo}"
+	if tg, _ := dial(r, "", false); tg.dir != "slot/proj" {
+		t.Errorf("dir %q: the template's remote_dir doesn't win over the host's", tg.dir)
 	}
 	r.Template.Host = ""
 	if _, err := dial(r, "", false); err != errNoHost {
