@@ -4,7 +4,8 @@
 # what gru's drop-in in $GRU_TEST_DESTDIR/etc/sudoers.d lets this user run: its
 # Cmnd_Alias "<glob> <arg>", with any test options after <arg>. -l only says
 # so. If $GRU_TEST_DESTDIR/etc/sudoers has "Defaults requiretty", it needs a
-# tty unless the drop-in's "Defaults!<alias> !requiretty" covers the command.
+# tty unless the drop-in's "Defaults!<alias> !requiretty" covers the command,
+# except as sudo-rs ($GRU_TEST_DESTDIR/sudo-rs), which has no requiretty.
 echo "sudo $*" >> "$GRU_TEST_DESTDIR/sudo.log"
 n= l=
 while :; do
@@ -26,7 +27,8 @@ for f in "$GRU_TEST_DESTDIR"/etc/sudoers.d/*; do
     esac
   done < "$f"
 done
-if grep -qx 'Defaults requiretty' "$GRU_TEST_DESTDIR/etc/sudoers" 2> /dev/null && [ -z "$notty" ] && ! tty -s; then
+if [ ! -e "$GRU_TEST_DESTDIR/sudo-rs" ] && grep -qx 'Defaults requiretty' "$GRU_TEST_DESTDIR/etc/sudoers" 2> /dev/null &&
+  [ -z "$notty" ] && ! tty -s; then
   echo "sudo: sorry, you must have a tty to run sudo" >&2
   exit 1
 fi

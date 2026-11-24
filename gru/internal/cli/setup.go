@@ -54,6 +54,7 @@ a=GRU_MINION_$(echo "$2" | tr a-z.- A-Z__)
 printf "Cmnd_Alias %s = %s serve\nDefaults!%s !requiretty\n%s ALL=(root) NOPASSWD: %s\n" \
   "$a" "$lib/minion-*" "$a" "$2" "$a" > "$f"
 chmod 440 "$f"
+visudo -cf "$f" > /dev/null 2>&1 || sed -i "/^Defaults/d" "$f" # sudo-rs: no requiretty, nor tty needed
 visudo -cf "$f" > /dev/null || { rm -f "$f"; exit 1; }
 mv -f "$f" "$d/gru-minion-$2"
 ' sh "${GRU_TEST_DESTDIR-}" "$u" "$t" "${1##*/}" "$2"
