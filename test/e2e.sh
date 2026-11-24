@@ -61,6 +61,7 @@ cat > "$GRU_CONFIG" << EOF
 {
   "hosts": {
     "fake": {"remote_dir": "$T/remote/{repo}", "state_dir": "$T/state"},
+    "named": {"ssh": "named-alias", "remote_dir": "$T/remote/{repo}", "state_dir": "$T/state"},
     "localhost": {"state_dir": "$T/state-local"}
   },
   "notify": {"run": ["echo \"\$GRU_SUBJECT\" >> $T/notify.log"]}
@@ -471,6 +472,14 @@ check_serve() {
   setup --remove
   [ ! -e "$lib" ] && ! exists "$GRU_TEST_DESTDIR/etc/sudoers.d/*" || fail "setup --remove left files"
   gru doctor --host fake | grep -q "root: run gru setup --host fake" || fail "doctor: setup missing not shown"
+  # Hints name the host as given to --host, not its ssh alias.
+  gru doctor --host named | grep -q "root: run gru setup --host named$" || fail "doctor: hint names the alias"
+  says 77 named 'minion needs root on named: run `gru setup --host named` once in a terminal' \
+    gru run energy --host named --arg perfq.json
+  # With no journal open, restore needs no root.
+  n=$(wc -l < "$GRU_TEST_DESTDIR/sudo.log")
+  says 0 norestore "no journal open" gru minion restore $R --host fake
+  [ "$(wc -l < "$GRU_TEST_DESTDIR/sudo.log")" = "$n" ] || fail "restore with no journal open called sudo"
   says 77 noroot 'minion needs root on fake: run `gru setup --host fake` once in a terminal' \
     gru run energy --host fake --arg perfq.json
   ! exists "$T/remote/proj/results/energy/perfq-*" || fail "a queue without root left results"
@@ -484,6 +493,13 @@ check_serve() {
   machine_clean
   [ "$(stat -c %a "$lib"/minion-"$V"-* "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-* | xargs)" = "755 440" ] ||
     fail "the root copy is not 0755 or the sudoers line not 0440"
+  # A later sudoers rule that wants a password wins over the drop-in: setup and
+  # doctor make a queue's own call and say why it fails.
+  touch "$GRU_TEST_DESTDIR/later-rule"
+  script -qec "gru setup --host fake" /dev/null > "$T/later.out" 2>&1 && fail "setup passed with a later rule winning"
+  grep -q "sudo: a password is required; a later sudoers rule wins" "$T/later.out" || fail "later rule: no clear message"
+  gru doctor --host fake | grep -q "root: sudo: a password is required$" || fail "doctor: no reason shown"
+  rm "$GRU_TEST_DESTDIR/later-rule"
   # The drop-in lets a detached queue, with no tty, start serve.
   sed -i '/^Defaults!/d' "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-*
   says 77 tty "must have a tty" gru run energy --host fake --arg perfq.json
@@ -527,8 +543,8 @@ check_serve() {
   exec 3>&-
   [ "$(stat -c %a "$T/runner") $(stat -c %a "$T/runner/journal.jsonl")" = "711 600" ] ||
     fail "the state dir is not 0711 with a 0600 journal"
-  says 77 leftover 'a previous queue left settings applied on fake: run `gru minion restore --host fake`' \
-    gru run energy --host fake --arg plain.json
+  says 77 leftover 'a previous queue left settings applied on named: run `gru minion restore --host named`' \
+    gru run energy --host named --arg plain.json
   grep -qx performance "$gov" || fail "the leftover was touched without root"
   setup
   gru minion restore $R --host fake | grep -qx restored || fail "gru minion restore"

@@ -107,7 +107,8 @@ The task and every hook see these variables:
 
 | Variable | Seen by | Value |
 |---|---|---|
-| `GRU_JOB_ID`, `GRU_TASK`, `GRU_HOST`, `GRU_ARGS` | all | the job id, task, host, `--arg` text |
+| `GRU_JOB_ID`, `GRU_TASK`, `GRU_HOST`, `GRU_ARGS` | all | the job id, task, host (its ssh alias), `--arg` text |
+| `GRU_HOST_NAME` | all | the host as given to `--host` (a `hosts` key, or the alias), for hints such as minion's `gru setup --host` |
 | `GRU_GIT`, `GRU_DIRTY` | all | the commit, and whether the tree had changes |
 | `GRU_AGENT`, `GRU_MINION` | all | the uploaded agent and minion; `GRU_MINION` is empty where no minion build exists for the platform |
 | `GRU_NOTIFY` | all, with a notify block | the resolved block in a 0600 file, for a task's own notifications |

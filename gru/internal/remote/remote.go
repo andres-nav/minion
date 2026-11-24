@@ -15,6 +15,7 @@ type Job struct {
 	ID        string
 	Task      string
 	Host      string
+	Name      string // the --host name: a hosts key, or the ssh alias
 	Repo      string // the local project's name, for `ps`
 	Git       string // local commit SHA of the synced code
 	Dirty     bool   // was the working tree dirty at launch
@@ -103,8 +104,8 @@ func Script(workDir, jobDir string, j Job) string {
 		fmt.Fprintf(&b, "export %s=\"%s\"\n", k, v)
 	}
 	fmt.Fprintf(&b, "J=%s\n", jobDir)
-	fmt.Fprintf(&b, "export GRU_ARGS=%s GRU_AGENT=%s GRU_MINION=%s GRU_JOB_ID=%s GRU_TASK=%s GRU_HOST=%s GRU_GIT=%s GRU_DIRTY=%t\n",
-		ShellQuote(j.Args), j.Agent, j.Minion, ShellQuote(j.ID), ShellQuote(j.Task), ShellQuote(j.Host), ShellQuote(j.Git), j.Dirty)
+	fmt.Fprintf(&b, "export GRU_ARGS=%s GRU_AGENT=%s GRU_MINION=%s GRU_JOB_ID=%s GRU_TASK=%s GRU_HOST=%s GRU_HOST_NAME=%s GRU_GIT=%s GRU_DIRTY=%t\n",
+		ShellQuote(j.Args), j.Agent, j.Minion, ShellQuote(j.ID), ShellQuote(j.Task), ShellQuote(j.Host), ShellQuote(j.Name), ShellQuote(j.Git), j.Dirty)
 	fmt.Fprintf(&b, "printf %%s %s > \"$J/task\"; printf %%s %s > \"$J/repo\"\n", ShellQuote(j.Task), ShellQuote(j.Repo))
 	b.WriteString("ec=1 start=$(date +%s) start_ns=$(\"$GRU_AGENT\" _agent now)\n")
 	if j.Notify != "" {

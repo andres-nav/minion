@@ -94,7 +94,7 @@ impl Root {
         let spawned = sudo.stdin(r1).stdout(w2).process_group(0).spawn();
         drop(sudo); // closes our r1 and w2, so a failing sudo reads as EOF
         if spawned.is_err() || root.read().is_err() {
-            let h = std::env::var("GRU_HOST").unwrap_or("<host>".into()); // gru's name for it
+            let h = std::env::var("GRU_HOST_NAME").unwrap_or("<host>".into()); // gru's --host
             log(format!(
                 "minion needs root on {h}: run `gru setup --host {h}` once in a terminal"
             ));

@@ -93,6 +93,10 @@ fn run(args: &[String]) -> Result<u8, String> {
                 println!("queue {q:?} holds the queue lock and restores at its end: nothing done");
                 return Ok(0);
             }
+            if !o.state_dir.join("journal.jsonl").exists() {
+                println!("no journal open"); // seen through the 0711 state dir, without root
+                return Ok(0);
+            }
             let Some(mut root) = Root::start(&o) else {
                 return Ok(NEEDS_ROOT);
             };
