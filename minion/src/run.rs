@@ -12,7 +12,7 @@ use serde_json::{Map, Value, json};
 use crate::ffi::{
     CLOCK_MONOTONIC, CLOCK_REALTIME, SIGKILL, SIGTERM, Timespec, clock_gettime, kill,
 };
-use crate::{queue, settings, utc};
+use crate::{perf, queue, settings, utc};
 
 /// Something read at the edges of a run, never in between. Meters nest: the
 /// start reads them last to first, the end first to last, so `time`, first, is
@@ -33,10 +33,12 @@ pub trait Meter {
 /// other logs and machines.
 struct Clock;
 
-/// The readable `energy_uj` counters of the powercap zones.
+/// The readable `energy_uj` counters of the powercap zones. With none readable,
+/// the power PMU's energy events through perf, or why they can't be counted.
 struct Rapl {
     zones: Vec<Zone>,
     unreadable: Vec<String>,
+    perf: Result<Vec<PerfZone>, String>,
 }
 
 struct Zone {
@@ -45,6 +47,14 @@ struct Zone {
     file: File,
     range_uj: u64,
     max_uw: Option<u64>,
+}
+
+struct PerfZone {
+    id: String,
+    name: String,
+    cpu: u32,
+    file: File,
+    scale: f64,
 }
 
 /// The monotonic and the realtime clock in ns, read back to back.
@@ -94,6 +104,7 @@ impl Rapl {
         let mut rapl = Rapl {
             zones: vec![],
             unreadable: vec![],
+            perf: Ok(vec![]),
         };
         let mut dirs: Vec<_> = fs::read_dir(sys.join("class/powercap"))
             .into_iter()
@@ -120,8 +131,32 @@ impl Rapl {
                 _ => rapl.unreadable.push(id),
             }
         }
+        if rapl.zones.is_empty() && sys.join("bus/event_source/devices/power").exists() {
+            rapl.perf = perf_zones(sys);
+        }
         rapl
     }
+}
+
+/// A counter per energy event on one CPU of each package, opened once, so an
+/// edge is only one read per counter.
+fn perf_zones(sys: &Path) -> Result<Vec<PerfZone>, String> {
+    let (kind, cpus, events) = perf::pmu(sys)?;
+    let mut zones = vec![];
+    for e in events {
+        for &cpu in &cpus {
+            let file = perf::open(kind, e.config, cpu)
+                .map_err(|err| format!("perf_event_open {} on cpu {cpu}: {err}", e.name))?;
+            zones.push(PerfZone {
+                id: format!("power/{}/cpu{cpu}", e.name),
+                name: e.name.clone(),
+                cpu,
+                file,
+                scale: e.scale,
+            });
+        }
+    }
+    Ok(zones)
 }
 
 impl Meter for Rapl {
@@ -142,19 +177,23 @@ impl Meter for Rapl {
                     .parse()
                     .map_err(|e| format!("{} energy_uj {s:?}: {e}", z.id))
             })
+            .chain(
+                self.perf
+                    .iter()
+                    .flatten()
+                    .map(|z| perf::count(&z.file).map_err(|e| format!("read {}: {e}", z.id))),
+            )
             .collect::<Result<Vec<_>, _>>()
             .map(Value::from)
     }
     /// Joules are corrected for one wrap of the counter, and left out when the
-    /// run was long enough to wrap it twice at the zone's highest power.
+    /// run was long enough to wrap it twice at the zone's highest power. perf's
+    /// counts are 64 bits and don't wrap.
     fn report(&self, start: &Value, end: &Value, secs: f64) -> (Value, Vec<String>) {
         let mut zones = Map::new();
         let mut warnings = vec![];
-        for (z, (a, b)) in self
-            .zones
-            .iter()
-            .zip(u64s(start).into_iter().zip(u64s(end)))
-        {
+        let counts: Vec<_> = u64s(start).into_iter().zip(u64s(end)).collect();
+        for (z, &(a, b)) in self.zones.iter().zip(&counts) {
             let uj = if b >= a { b - a } else { b + z.range_uj - a };
             let wrap_s = z.max_uw.map(|w| z.range_uj as f64 / w as f64);
             let joules = wrap_s.is_some_and(|w| secs < w).then(|| uj as f64 / 1e6);
@@ -174,16 +213,30 @@ impl Meter for Rapl {
                        "wrap_seconds": wrap_s, "joules": joules, "watts": joules.map(|j| j / secs)}),
             );
         }
-        if !self.unreadable.is_empty() {
+        let perf = self.perf.iter().flatten();
+        for (z, &(a, b)) in perf.zip(counts.iter().skip(self.zones.len())) {
+            let joules = (b - a) as f64 * z.scale;
+            zones.insert(
+                z.id.clone(),
+                json!({"name": z.name, "cpu": z.cpu, "start": a, "end": b, "scale": z.scale,
+                       "joules": joules, "watts": joules / secs}),
+            );
+        }
+        if !self.unreadable.is_empty() && self.perf.as_ref().is_ok_and(Vec::is_empty) {
             warnings.push(format!(
                 "rapl: can't read {:?} (energy_uj is often root-only)",
                 self.unreadable
             ));
         }
-        (
-            json!({"zones": zones, "unreadable": self.unreadable}),
-            warnings,
-        )
+        let mut v = json!({"zones": zones, "unreadable": self.unreadable});
+        if let Err(e) = &self.perf {
+            warnings.push(format!(
+                "rapl: can't read {:?}, nor through perf: {e}",
+                self.unreadable
+            ));
+            v["perf_error"] = json!(e);
+        }
+        (v, warnings)
     }
 }
 
