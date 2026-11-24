@@ -6,13 +6,12 @@
 while [ $# -gt 0 ]; do
   case $1 in
     -O | -N) exit 255 ;;
-    -o | -p | -l | -i | -F | -J) shift 2 ;;
+    -o) shift 2 ;;
     -*) shift ;;
     *) break ;;
   esac
 done
 case $1 in *.invalid) echo "ssh: Could not resolve hostname $1" >&2; exit 255 ;; esac
 shift
-[ $# -gt 0 ] || exit 255
 HOME=${E2E_REMOTE_HOME:-$HOME}
 cd "$HOME" && exec env -i HOME="$HOME" PATH="$PATH" TZ="${TZ:-}" GRU_TEST_DESTDIR="${GRU_TEST_DESTDIR:-}" sh -c "$*"

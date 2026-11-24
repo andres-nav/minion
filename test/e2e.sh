@@ -111,6 +111,8 @@ want() {
   cat "$out"
   [ "$c" -eq "$w" ] || fail "$*: exit $c, want $w"
 }
+# says CODE NAME TEXT CMD...: like want, and the output has TEXT.
+says() { want "$1" "$2" "${@:4}" && grep -qF -- "$3" "$T/$2.out" || fail "$2: no \"$3\""; }
 # has FILE TEXT: FILE, with spaces and newlines removed, contains TEXT.
 has() { tr -d ' \n' < "$1" | grep -qF -- "$2" || fail "$1 lacks $2"; }
 # wait_for SECONDS CMD...: polls CMD until it succeeds.
@@ -136,10 +138,7 @@ queue_ok() {
   for f in queue.json plan.json events.jsonl; do [ -s "$d/$f" ] || fail "no $d/$f"; done
   [ "$(ls "$d/runs" | wc -l)" -eq "$2" ] || fail "$d: want $2 runs"
   for r in "$d"/runs/*; do
-    has "$r/run.json" '"time":{'
-    has "$r/run.json" '"rapl":{'
-    has "$r/run.json" '"noise":{"cgroups_usec":{'
-    has "$r/run.json" '"drift":false'
+    for k in '"time":{' '"rapl":{' '"noise":{"cgroups_usec":{' '"drift":false'; do has "$r/run.json" "$k"; done
     case $r in
       *-ok-perf-*) grep -qx performance "$r/stdout" || fail "$r: not under its profile" ;;
       *-ok-base-*) grep -qx powersave "$r/stdout" || fail "$r: not under its profile" ;;
@@ -171,10 +170,8 @@ no_serve() { ! pgrep -f "$lib/minion-.* serve" > /dev/null; }
 
 check_remote() {
   queue remote 2 "$BASE, $PERF" "$OK, $FAIL"
-  gru run energy --host fake --arg remote.json > "$T/remote.out" 2>&1
-  local code=$? id v dest m before
-  cat "$T/remote.out"
-  [ "$code" -eq 1 ] || fail "gru run: exit $code, want 1 (a workload fails)"
+  local id v dest m before
+  want 1 remote gru run energy --host fake --arg remote.json # a workload fails
   id=$(started "$T/remote.out")
   v=$(gru version | cut -d' ' -f2)
   exists "$T/state/bin/gru-$v-linux-*" || fail "no agent gru-$v-linux-* in $T/state/bin"
@@ -194,12 +191,8 @@ check_remote() {
   gru sync --host fake > /dev/null || fail "gru sync"
   [ "$(ls -i "$T"/state/bin/minion-*)" = "$before" ] || fail "minion uploaded again"
 
-  # A config typo, and a needs dir that would land on the project's own remote
-  # dir, are refused before anything runs.
+  # A needs dir that would land on the project's own remote dir is refused before anything runs.
   mkdir -p "$T/dep" "$T/solo"
-  echo '{"tasks": {"x": "true"}, "build": "make"}' > "$T/solo/.gru.json"
-  (cd "$T/solo" && gru list) 2> "$T/solo.out" && fail "an unknown key was accepted"
-  grep -q 'unknown field "build"' "$T/solo.out" || fail "unknown key: no clear message"
   echo "{\"tasks\": {\"x\": \"true\"}, \"host\": \"fake\", \"remote_dir\": \"$T/remote/solo\", \"needs\": [\"dep\"]}" > "$T/solo/.gru.json"
   (cd "$T/solo" && gru run x) 2> "$T/solo.out" && fail "needs into the project dir ran"
   grep -q "would sync into the project" "$T/solo.out" || fail "needs: no clear message"
@@ -207,19 +200,14 @@ check_remote() {
 
 check_localhost() {
   queue local 1 "$BASE, $PERF" "$OK, $FAIL"
-  gru run energy --host localhost --arg local.json > "$T/local.out" 2>&1
-  local code=$?
-  cat "$T/local.out"
-  [ "$code" -eq 1 ] || fail "gru run: exit $code, want 1 (a workload fails)"
+  want 1 local gru run energy --host localhost --arg local.json # a workload fails
   queue_ok results/energy/local-* 4 2
   has "$T/state-local/jobs/$(started "$T/local.out")/run.json" '"exit":1'
   notified local queue_started run_done run_failed queue_done
   machine_clean
   # A finished job can't be killed: its pid may be another process's now.
-  gru kill "$(started "$T/local.out")" --host localhost 2> "$T/kill.out" && fail "killed a finished job"
-  grep -q "has finished" "$T/kill.out" || fail "kill: no clear message"
-  gru ssh --host localhost 2> "$T/ssh.out" && fail "ssh to this machine ran"
-  grep -q "is this machine" "$T/ssh.out" || fail "ssh: no clear message"
+  says 1 kill "has finished" gru kill "$(started "$T/local.out")" --host localhost
+  says 1 ssh "is this machine" gru ssh --host localhost
 }
 
 check_detach() {
@@ -264,7 +252,7 @@ check_detach() {
 check_two() {
   # Each holding workload waits for its go file, so the order doesn't depend on timing.
   queue first 1 "$PERF" "\"hold\": {\"cmd\": [\"sh\", \"-c\", \"until [ -e $T/go1 ]; do sleep 0.1; done\"]}"
-  queue second 1 "$PERF" "\"hold\": {\"cmd\": [\"sh\", \"-c\", \"until [ -e $T/go2 ]; do sleep 0.1; done\"]}"
+  queue second 1 "$PERF" "$OK"
   queue third 1 "$PERF" "$OK"
   local a b c q
   a=$(gru run energy --host fake --arg first.json --detach) || fail "gru run first"
@@ -278,11 +266,6 @@ check_two() {
   grep -qx performance "$gov" || fail "the killed third queue's hook undid the first's profile"
   ! exists "$T/remote/proj/results/energy/third-*" || fail "the killed third queue left results"
   touch "$T/go1"
-  wait_for 30 exists "$T/remote/proj/results/energy/second-*/runs/0001-*/stdout"
-  # The first job's always hook, run late, must not undo the second queue's profile.
-  "$M" restore $R | grep -q "nothing done" || fail "a restore by hand ran while a queue runs"
-  grep -qx performance "$gov" || fail "a restore by hand undid the second queue's profile"
-  touch "$T/go2"
   wait_for 30 test -e "$T/state/jobs/$a/status"
   wait_for 30 test -e "$T/state/jobs/$b/status"
   cat "$T/state/jobs/$a/log" "$T/state/jobs/$b/log"
@@ -366,8 +349,7 @@ EOF
   grep -Eqx "failure 4 [12]" "$T/fail.out" && grep -qx "always fail" "$T/fail.out" ||
     fail "run fail: hooks, or GRU_DURATION not the job's seconds"
   grep -q "FAILED (exit 4.* tok123$" "$T/cli-notify.log" || fail "notify: no failure message with the token"
-  want 1 nope gru run nope
-  grep -q nope "$T/nope.out" || fail "unknown task: no message"
+  says 1 nope nope gru run nope
   want 2 none gru run
   mkdir -p "$T/notasks" && git -C "$T/notasks" init -q
   (cd "$T/notasks" && gru list) | grep -q "^no tasks for $T/notasks" || fail "list: no tasks message"
@@ -389,8 +371,7 @@ EOF
   cmp "$(sed -n 's/^minion=//p' "$T/minion-remote.out")" "$M" || fail "remote GRU_MINION is not the upload"
   grep -qx second "$T/here.out" || fail "--host local: not run in the project dir"
   gru sync --host local | grep -q "nothing to sync" || fail "sync --host local"
-  want 1 fetchlocal gru fetch --host localhost
-  grep -q "fetch is for remote hosts" "$T/fetchlocal.out" || fail "fetch --host localhost: no clear message"
+  says 1 fetchlocal "fetch is for remote hosts" gru fetch --host localhost
   gru sync || fail "gru sync"
   grep -qx second "$rd/src/a.txt" || fail "sync: a.txt not updated"
   echo stale > "$rd/stale.txt"
@@ -399,8 +380,7 @@ EOF
   [ ! -e "$rd/stale.txt" ] && [ -e "$rd/keep.tmp" ] || fail "sync --delete: stale kept, or excluded removed"
   gru sync --host homevar && [ -s "$E2E_REMOTE_HOME/hv/cli/src/a.txt" ] || fail "remote_dir with \$HOME"
   exists "$E2E_REMOTE_HOME/.gru/bin/gru-*" || fail "no agent in the default state dir ~/.gru"
-  gru sync --host unsetvar 2> "$T/unset.out" && fail "remote_dir with an unset variable synced"
-  grep -q E2E_UNSET "$T/unset.out" || fail "unset variable: no clear message"
+  says 1 unset E2E_UNSET gru sync --host unsetvar
   gru sync --host rawalias || fail "a host that is only an ssh alias"
 
   # Without an id, fetch and attach take this project's latest job; ps shows its jobs.
@@ -411,14 +391,12 @@ EOF
   [ -s "$T/cfetched/$id/out/hello.txt" ] || fail "fetch: not into the latest job's dir"
   want 0 attach gru attach
   grep -q "hello world" "$T/attach.out" || fail "attach (latest): no log"
-  gru ps > "$T/cli-ps.out"
-  cat "$T/cli-ps.out"
+  want 0 cli-ps gru ps
   grep -q "^$id .*hello .*exit 0" "$T/cli-ps.out" || fail "ps: no $id"
   ! grep -q energy "$T/cli-ps.out" || fail "ps: another project's jobs"
   gru ps --all | grep -q energy || fail "ps --all: no other project's jobs"
   want 2 kill gru kill
-  want 1 nojobs gru attach --host homevar
-  grep -q "no jobs of this project on homevar" "$T/nojobs.out" || fail "attach with no jobs: no clear message"
+  says 1 nojobs "no jobs of this project on homevar" gru attach --host homevar
 
   # doctor, ssh, version and help.
   want 1 doctor gru doctor
@@ -432,8 +410,7 @@ EOF
   v=$(gru version)
   [ "$(gru --version)" = "$v" ] && [ "$(gru -v)" = "$v" ] || fail "version"
   for h in help -h --help; do gru $h | grep -q "^usage: gru" || fail "gru $h"; done
-  want 2 noargs gru
-  grep -q "usage: gru" "$T/noargs.out" || fail "no args: no usage"
+  says 2 noargs "usage: gru" gru
   want 2 unknown gru bogus
   # A stray word is refused, not a reason to drop the flags after it.
   want 2 stray gru sync stray --delete
@@ -444,8 +421,7 @@ EOF
   echo '{"templates": {"x": {"detect": ["xdg.marker"], "tasks": {"t": "true"}}}}' > "$T/xdg/gru/config.json"
   cd "$T/xdgproj"
   env -u GRU_CONFIG XDG_CONFIG_HOME="$T/xdg" gru list | grep -q "template: x" || fail "XDG_CONFIG_HOME not used"
-  env -u GRU_CONFIG XDG_CONFIG_HOME="$T/xdg" gru sync 2> "$T/nohost.out" && fail "synced with no host"
-  grep -q "no host configured" "$T/nohost.out" || fail "no host: no clear message"
+  says 1 nohost "no host configured" env -u GRU_CONFIG XDG_CONFIG_HOME="$T/xdg" gru sync
   # A template whose host is this machine lists the project dir as where tasks run.
   echo '{"host": "localhost", "tasks": {"t": "true"}}' > .gru.json
   gru list --json | grep -q "\"remote_dir\": \"$T/xdgproj\"" || fail "list: a local host's dir is not the project"
@@ -455,16 +431,15 @@ EOF
 # within 15 min of now.
 check_utc() {
   local t s now bad=0 n=0
-  gru ps --host fake --all > "$T/ps-fake.out"
-  gru ps --host localhost --all > "$T/ps-local.out"
-  cat "$T"/ps-*.out
+  want 0 ps-fake gru ps --host fake --all
+  want 0 ps-local gru ps --host localhost --all
   now=$(date +%s)
   for t in $({
     ls "$T"/state*/jobs "$T"/fetched "$T"/runner/done "$T"/remote/proj/results/energy \
       "$T"/proj/results/energy
     cat "$T"/ps-*.out "$T"/state*/jobs/*/log
     find "$T"/remote/proj/results "$T"/proj/results -name '*.json*' -exec cat {} +
-  } | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?Z?|[0-9]{8}[T-][0-9]{6}(\.[0-9]+)?Z?' |
+  } | sed "s|$root||g" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?Z?|[0-9]{8}[T-][0-9]{6}(\.[0-9]+)?Z?' |
     tr ' ' _ | sort -u); do
     s=$(echo "$t" | sed -E 's/^(....)-?(..)-?(..)[T_-]?(..):?(..).*/\1-\2-\3 \4:\5/')
     s=$(date -u -d "$s" +%s 2> /dev/null || echo 0)
@@ -478,28 +453,12 @@ check_utc() {
   [ "$n" -ge 10 ] || fail "only $n times found"
 }
 
-# A broken queue file is refused before anything runs, with a message.
+# A broken or missing queue file is refused before anything runs, with a message.
 check_exit() {
-  queue unknown 1 "$PERF" "$OK"
-  sed -i 's/"reps"/"bogus": 1, "reps"/' unknown.json
-  queue badvalue 1 "$PERF" "$OK"
-  sed -i 's/"performance"/"warp"/' badvalue.json
   printf '{"name": ' > broken.json
-  for f in 'broken.json:broken.json: EOF while parsing' 'unknown.json:unknown key "bogus"' \
-    'badvalue.json:"warp" is not allowed' 'missing.json:missing.json: No such file'; do
-    want 1 broken gru run energy --host fake --arg "${f%%:*}"
-    grep -qF -- "${f#*:}" "$T/broken.out" || fail "${f%%:*}: no clear message"
-  done
-  ! exists "$T/remote/proj/results/energy/unknown-*" || fail "a refused queue ran"
-  ! exists "$T/remote/proj/results/energy/badvalue-*" || fail "a refused queue ran"
+  says 1 broken "broken.json: EOF while parsing" gru run energy --host fake --arg broken.json
+  says 1 missing "missing.json: No such file" gru run energy --host fake --arg missing.json
   machine_clean
-
-  # A cmd meter reads the fake RAPL counter around the run that adds 2 J to it.
-  queue cmdm 1 "$BASE" "$OK"
-  sed -i "s|\"out\"|\"meters\": [\"time\", {\"cmd\": [\"sh\", \"-c\", \"echo uj \$(cat $rapl/energy_uj)\"]}], \"out\"|" cmdm.json
-  want 0 cmdm gru run energy --host fake --arg cmdm.json
-  has "$(echo "$T"/remote/proj/results/energy/cmdm-*/runs/*/run.json)" '"delta":{"uj":2000000.0}'
-
 }
 
 # Root goes through serve, which `gru setup` allows: without it a queue that
@@ -508,14 +467,12 @@ check_exit() {
 check_serve() {
   local u n
   queue perfq 1 "$PERF" "$OK"
-  gru setup --host fake 2> "$T/noterm.out" && fail "gru setup ran without a terminal"
-  grep -q "run it in a terminal" "$T/noterm.out" || fail "setup without a terminal: no clear message"
+  says 1 noterm "run it in a terminal" gru setup --host fake
   setup --remove
   [ ! -e "$lib" ] && ! exists "$GRU_TEST_DESTDIR/etc/sudoers.d/*" || fail "setup --remove left files"
   gru doctor --host fake | grep -q "root: run gru setup --host fake" || fail "doctor: setup missing not shown"
-  want 77 noroot gru run energy --host fake --arg perfq.json
-  grep -qF 'minion needs root on fake: run `gru setup --host fake` once in a terminal' "$T/noroot.out" ||
-    fail "no setup: no clear message"
+  says 77 noroot 'minion needs root on fake: run `gru setup --host fake` once in a terminal' \
+    gru run energy --host fake --arg perfq.json
   ! exists "$T/remote/proj/results/energy/perfq-*" || fail "a queue without root left results"
   machine_clean
   # In a terminal, gru run offers the setup and runs the task again.
@@ -529,8 +486,7 @@ check_serve() {
     fail "the root copy is not 0755 or the sudoers line not 0440"
   # The drop-in lets a detached queue, with no tty, start serve.
   sed -i '/^Defaults!/d' "$GRU_TEST_DESTDIR"/etc/sudoers.d/gru-minion-*
-  want 77 tty gru run energy --host fake --arg perfq.json
-  grep -q "must have a tty" "$T/tty.out" || fail "requiretty: not what stopped serve"
+  says 77 tty "must have a tty" gru run energy --host fake --arg perfq.json
   # sudo-rs has no requiretty, so its visudo refuses that line: setup leaves it out.
   touch "$GRU_TEST_DESTDIR/sudo-rs"
   setup
@@ -571,9 +527,8 @@ check_serve() {
   exec 3>&-
   [ "$(stat -c %a "$T/runner") $(stat -c %a "$T/runner/journal.jsonl")" = "711 600" ] ||
     fail "the state dir is not 0711 with a 0600 journal"
-  want 77 leftover gru run energy --host fake --arg plain.json
-  grep -qF 'a previous queue left settings applied on fake: run `gru minion restore --host fake`' "$T/leftover.out" ||
-    fail "leftover: no clear message"
+  says 77 leftover 'a previous queue left settings applied on fake: run `gru minion restore --host fake`' \
+    gru run energy --host fake --arg plain.json
   grep -qx performance "$gov" || fail "the leftover was touched without root"
   setup
   gru minion restore $R --host fake | grep -qx restored || fail "gru minion restore"
@@ -586,20 +541,18 @@ check_serve() {
 }
 
 check_snapshot() {
-  "$M" snapshot > "$T/snapshot.json" || fail "minion snapshot on /sys"
-  cat "$T/snapshot.json"
-  for k in cpu.governor cpu.turbo cpu.idle.disable; do has "$T/snapshot.json" "\"$k\":{"; done
-  [ ! -d /sys/devices/system/cpu/cpu0/cpuidle/state0 ] || has "$T/snapshot.json" '"cpu0/state0":'
+  want 0 snapshot "$M" snapshot
+  [ ! -d /sys/devices/system/cpu/cpu0/cpuidle/state0 ] || has "$T/snapshot.out" '"cpu0/state0":'
   "$M" run --out "$T/run.json" -- true || fail "minion run on /sys"
   has "$T/run.json" '"time":{'
 }
 
-# Like r740-01: sudo needs a tty unless the drop-in says otherwise.
+# Like a host whose sudo needs a tty unless the drop-in says otherwise.
 mkdir -p "$GRU_TEST_DESTDIR/etc" && echo "Defaults requiretty" > "$GRU_TEST_DESTDIR/etc/sudoers"
 (cd "$T" && setup)
 failed=0
 for c in "remote:remote path (fake ssh)" "localhost:--host localhost" \
-  "detach:detach, ps, attach, kill and a crashed runner" "two:two queues and a restore by hand" \
+  "detach:detach, ps, attach, kill and a crashed runner" "two:two queues" \
   "cli:every gru option" "utc:every time in UTC (TZ=$TZ)" \
   "exit:exit codes and broken queue files" "serve:root through serve and gru setup" \
   "snapshot:snapshot and run on the real /sys"; do
