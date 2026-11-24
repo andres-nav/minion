@@ -27,15 +27,15 @@ profile sets a higher `cpu.freq` max: set `cpu.freq` in it too.
 
 ## Usage
 
+With gru, run these on a host as `gru minion <verb> --host X`:
+
 ```sh
-minion snapshot                    # current settings as JSON
-minion snapshot > p.json           # edit p.json down to what should change, then:
-sudo -n minion apply < p.json      # save the originals, apply, read back
-sudo minion status                 # what differs from the originals
-sudo -n minion restore             # put the originals back
+minion snapshot                    # current settings as JSON; edit it down to a profile
+minion restore                     # put back what a dead queue left applied
+minion queue q.json                # a whole queue (below); with gru, as a gru run task
 ```
 
-By hand, `apply` and `restore` act only while no queue holds the queue lock (below).
+`restore` does nothing while a queue holds the queue lock: that queue restores at its end.
 
 A profile has the same shape as a snapshot and lists only the objects to change:
 
@@ -44,9 +44,28 @@ A profile has the same shape as a snapshot and lists only the objects to change:
 ```
 
 Every value is checked before anything is written: unknown settings, objects or values are refused,
-and so is what the kernel would refuse or override (above). `apply` and `restore` read only stdin
-and `/sys`, and write only `/sys` and the journal in `/var/lib/minion`, which only root can read,
-so `status` needs root too.
+and so is what the kernel would refuse or override (above).
+
+## Root
+
+Only `minion serve` writes settings, as root: one per queue (or per `restore`), started as
+`sudo -n /usr/local/lib/gru/<its own file name> serve`. `gru setup --host X` installs that root
+copy of each build (gru names a build by its version, platform and hash) and a sudoers drop-in
+that allows only `minion-* serve` there, also without a tty. serve reads nothing but its pipe:
+lines `apply PROFILE` and `restore`, each answered by `ok TEXT` or `error TEXT`, after a first
+line that says it runs. It writes only `/sys` and the journal in `/var/lib/minion` (0711: anyone
+can see whether `journal.jsonl` exists, a journal is open, but not list or read it). It takes the
+journal lock at its first request and holds it to its end, and when the pipe closes (its queue
+ended or died, also by `kill -9`) it restores and exits. It blocks on the pipe between requests,
+so it never wakes during a run, and it never kills anything. sudo runs in its own process group,
+so a stop signal to the queue doesn't reach serve.
+
+A queue that changes settings starts serve before it takes the queue lock, so without the setup
+it stops before touching anything, with exit 77 and "minion needs root on <host>: run `gru setup
+--host <host>` once in a terminal". A queue that changes nothing needs no root and calls no sudo,
+unless a journal is open: then, after it takes the lock, it restores through serve first, or
+without the setup stops with exit 77 and "a previous queue left settings applied on <host>: run
+`gru minion restore --host <host>`".
 
 ## Run
 
@@ -117,7 +136,7 @@ the run; at the start edge, before the workload starts.
 - **Profiles.** A profile lists only what it changes. Each one is resolved over the settings at
   the start: every object that any profile sets is held at this profile's value, or else at its
   start value, so a run never inherits the settings of the run before it. A profile is applied
-  (`sudo -n minion apply --held`) only when the machine is not already in it.
+  (through serve) only when the machine is not already in it.
 - **Queue lock.** A blocking `flock` on `/run/lock/minion.lock` (world-writable, gone at
   reboot), held to the end. A second queue logs the holder's id and sleeps in the kernel until
   the lock is free, then runs. Where `/run/lock` is root's and 0755 (Fedora, RHEL, Amazon Linux),
@@ -125,8 +144,8 @@ the run; at the start edge, before the workload starts.
   `f /run/lock/minion.lock 0666 root root -`; until then a queue stops with that hint.
 - **Start.** In this order: take the lock; choose the queue id (`<name>-<UTC time>`, or with `-2`,
   `-3`, ... if a queue of that name started in the same second) and write it into the lock; reap
-  the leftover workloads of a queue that died; restore a leftover journal (`sudo -n minion
-  restore --held`, every time).
+  the leftover workloads of a queue that died; restore a leftover journal (through serve, every
+  time).
 - **Runs.** Each run: apply if needed, settle, run the workload with `run`'s meters (stdin from
   `/dev/null`, stdout and stderr to files, in its own process group, killed if the runner dies,
   and marked for reap). Right after the end meter read, whatever the workload left running in its
@@ -145,21 +164,8 @@ the run; at the start edge, before the workload starts.
   settle), the queue restores the settings, then releases the lock. It exits 0 when every run
   succeeded and the restore worked, 128 + the signal when stopped, and 1 otherwise.
 
-`apply --held` and `restore --held` (from a queue) and `restore` (from the hook below) need a
-sudoers rule that lets the user run them without a password; sudo finds `minion` on its
-`secure_path`, so install it there, owned by root.
-
-A queue's privileged calls can outlive it: sudo starts in milliseconds, and neither
-`PR_SET_PDEATHSIG` nor an inherited fd survives its setuid exec. So `apply` and `restore` check
-the queue lock while they hold the journal lock. With `--held`, stdin names the caller's queue
-(`{"queue": ID}`, plus `"profile"` for apply), and they act only while that queue holds the
-lock. Without it, they act only while no queue does, and a `restore` then says that the queue
-holding it restored at its start. A stray call that saw a dead queue's id before the next queue
-wrote its own is undone by that queue's restore at start. The lock is opened with `O_NONBLOCK` and
-`O_NOFOLLOW`, and anything but a regular file is refused, so a FIFO or symlink put in its place
-can't block or redirect them. `apply` and `restore` ignore SIGHUP, SIGINT and SIGTERM, which reach
-them through sudo when the queue's process group is signalled, so they never stop half-way; the
-journal covers SIGKILL.
+The queue lock is opened with `O_NONBLOCK` and `O_NOFOLLOW`, and anything but a regular file is
+refused, so a FIFO or symlink put in its place can't block or redirect a queue.
 
 `minion reap` (as the user; refused as root) kills the leftover workloads of a queue that
 died: each workload has `MINION_WORKLOAD=<lock> <queue id>` in its environment, and so do
@@ -172,8 +178,8 @@ Each queue writes to a new directory, `<out>/<name>-<YYYYMMDDTHHMMSSZ>/`:
 ```
 queue.json    the queue as given; the resolved seed, settle, meters, profiles and
               notify_timeout_s; the settings at the start; the queue's start on both clocks
-              (`time`; its end is the queue_done event); the runner's version, lock and
-              privileged (`sudo` or `in-process`); the GRU_* variables (job id, task, host)
+              (`time`; its end is the queue_done event); the runner's version (gru's), lock
+              and whether it used serve; the GRU_* variables (job id, task, host)
 plan.json     the seed and every run: id, round, position, workload, profile
 events.jsonl  one line per event: event, time, time_utc, queue, run, status, detail
 runs/0001-ep-stable-r01/
@@ -206,19 +212,21 @@ it. In the project's `.gru.json` (or its template):
 
 ```json
 {
-  "tasks": {"energy": "minion queue $GRU_ARGS"},
-  "always": ["minion reap", "sudo -n minion restore"]
+  "tasks": {"energy": "\"$GRU_MINION\" queue $GRU_ARGS"},
+  "always": ["\"$GRU_MINION\" reap"]
 }
 ```
 
 ```sh
+gru setup --host X                  # once per host and build, in a terminal
 gru run energy --arg q.json --detach
 ```
 
-`gru kill` sends SIGTERM: the queue stops its workload and restores. If the runner dies
-without restoring (`kill -9`, a crash), its workload and notify die with it, and the `always` hooks
-reap their children and restore. If another queue was waiting and took the lock first, that queue
-reaps and restores before its first run, and the hooks leave it alone.
+gru uploads minion with its agent and gives its path in `GRU_MINION`. `gru kill` sends SIGTERM:
+the queue stops its workload and restores. If the runner dies without restoring (`kill -9`, a
+crash), its workload and notify die with it, its serve restores, and the `always` hook reaps
+their children. If another queue was waiting and took the lock first, that queue reaps before
+its first run, and the hook leaves it alone.
 
 ## Journal
 
@@ -238,6 +246,6 @@ cargo test     # on a fake sysfs and powercap tree in a temp dir; one test reads
 cargo clippy --all-targets -- -D warnings
 ```
 
-`--sysfs DIR`, `--state-dir DIR` and `--lock FILE` point the runner at a test tree. They are
-refused as root. With any of them, `queue` calls `apply` and `restore` in-process instead of
-through sudo, so a whole queue runs without root.
+`--sysfs DIR`, `--state-dir DIR`, `--lock FILE` and `--lib DIR` (where the root copies are)
+point the runner at a test tree. They are refused as root, and serve gets them too. The unit
+tests run serve on a thread; `make e2e` runs it through a sudo stand-in.
