@@ -71,8 +71,9 @@ left alone (a queue kills it).
 `meters.noise`, always there, records what else ran: it is read just outside each edge, outside
 the other meters. Per CPU, the change of each `/proc/interrupts` and `/proc/softirqs` row that
 changed; the change of `ctxt` in `/proc/stat`; the CPU time (`cpu.stat` `usage_usec`) of each
-other top-level cgroup (`cgroups_usec`); and at both edges the users with a logind session and
-the load average.
+cgroup beside the runner's: the other children of the root and of each cgroup above the runner's,
+such as other users' slices (`cgroups_usec`); and at both edges the users with a logind session
+and the load average.
 
 ## Queue
 

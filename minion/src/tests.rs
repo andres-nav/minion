@@ -694,18 +694,37 @@ fn the_noise_record_reads_proc_and_other_cgroups_around_a_run() {
     let a = f.sys.join("fs/cgroup/a.slice/cpu.stat");
     put(&a, "usage_usec 100\nuser_usec 60\n");
     put(&f.sys.join("fs/cgroup/b.slice/cpu.stat"), "usage_usec 7\n");
+    // Our cgroup and those above it are left out, the other children of each are in,
+    // such as another user's slice next to ours.
     let me = fs::read_to_string("/proc/self/cgroup").unwrap();
     let ours = me
         .lines()
-        .find_map(|l| l.strip_prefix("0::/")?.split('/').next());
-    let ours = ours.filter(|o| !o.is_empty()).unwrap_or("our.slice"); // left out of the record
-    put(
-        &f.sys.join("fs/cgroup").join(ours).join("cpu.stat"),
-        "usage_usec 1\n",
-    );
+        .find_map(|l| l.strip_prefix("0::/"))
+        .unwrap_or_default();
+    let mut want = json!({"a.slice": 150, "b.slice": 0});
+    let mut parent = String::new();
+    for o in ours.split('/').filter(|o| !o.is_empty()) {
+        if !parent.is_empty() {
+            let other = format!("{parent}/other.scope");
+            put(
+                &f.sys.join("fs/cgroup").join(&other).join("cpu.stat"),
+                "usage_usec 5\n",
+            );
+            want[other] = json!(0);
+        }
+        parent = if parent.is_empty() {
+            o.into()
+        } else {
+            format!("{parent}/{o}")
+        };
+        put(
+            &f.sys.join("fs/cgroup").join(&parent).join("cpu.stat"),
+            "usage_usec 1\n",
+        );
+    }
     let (_, run) = f.run(&format!("printf 'usage_usec 250\\n' > {}", a.display()));
     let n = &run["meters"]["noise"];
-    assert_eq!(n["cgroups_usec"], json!({"a.slice": 150, "b.slice": 0}));
+    assert_eq!(n["cgroups_usec"], want);
     assert!(
         n["ctxt"].as_u64().is_some() && n["interrupts"].is_object() && n["softirqs"].is_object()
     );
