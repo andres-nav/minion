@@ -10,36 +10,42 @@ use crate::run::Meter;
 
 pub struct Noise {
     cgroups: PathBuf,
-    /// The top-level cgroup the runner is in.
+    /// The runner's cgroup, as its path under the cgroup root.
     ours: String,
 }
 
 impl Noise {
     pub fn open(sys: &Path) -> Noise {
         let me = fs::read_to_string("/proc/self/cgroup").unwrap_or_default();
-        let ours = me
-            .lines()
-            .find_map(|l| l.strip_prefix("0::/")?.split('/').next());
+        let ours = me.lines().find_map(|l| l.strip_prefix("0::/"));
         Noise {
             cgroups: sys.join("fs/cgroup"),
             ours: ours.unwrap_or_default().into(),
         }
     }
 
-    /// The CPU time in µs of each top-level cgroup but ours.
+    /// The CPU time in µs of each cgroup beside ours: the other children of the
+    /// root and of every cgroup above ours, such as other users' slices.
     fn cgroups(&self) -> Map<String, Value> {
-        let dirs = fs::read_dir(&self.cgroups).into_iter().flatten().flatten();
-        dirs.filter_map(|e| {
-            let name = e
-                .file_name()
-                .into_string()
-                .ok()
-                .filter(|n| *n != self.ours)?;
-            let stat = fs::read_to_string(e.path().join("cpu.stat")).ok()?;
-            let usec = stat.lines().find_map(|l| l.strip_prefix("usage_usec "))?;
-            Some((name, json!(usec.trim().parse::<u64>().ok()?)))
-        })
-        .collect()
+        let mut m = Map::new();
+        let mut parent = PathBuf::new();
+        for ours in self.ours.split('/') {
+            let dirs = fs::read_dir(self.cgroups.join(&parent))
+                .into_iter()
+                .flatten();
+            for e in dirs.flatten().filter(|e| e.file_name() != ours) {
+                let Ok(stat) = fs::read_to_string(e.path().join("cpu.stat")) else {
+                    continue;
+                };
+                let usec = stat.lines().find_map(|l| l.strip_prefix("usage_usec "));
+                if let Some(usec) = usec.and_then(|u| u.trim().parse::<u64>().ok()) {
+                    let name = parent.join(e.file_name()).to_string_lossy().into_owned();
+                    m.insert(name, json!(usec));
+                }
+            }
+            parent.push(ours);
+        }
+        m
     }
 }
 
