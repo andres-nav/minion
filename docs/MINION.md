@@ -25,7 +25,7 @@ attributing energy to tenants or processes, a benchmark framework, dashboards, a
 
 - Settings: `cpu.governor`, `cpu.epp`, `cpu.turbo`, `cpu.freq` (min and max) and
   `cpu.idle.disable`.
-- Verbs: `snapshot`, `apply`, `restore`, `status`, `run`, `queue` and `reap`.
+- Verbs: `snapshot`, `restore`, `run`, `queue`, `reap` and `serve` (root's side).
 - Meters: `time`, `rapl` and `cmd`.
 - Queue: randomized interleaved rounds under the queue lock, with reap, events and notify.
 - Around each run: the settings snapshot and a basic noise record (interrupts, softirqs, context
@@ -41,7 +41,7 @@ tested yet.
 A measured window runs from the meter reads right before the workload starts to those right after
 its main process exits. Apart from starting the workload, the runner only waits in `waitpid`: it
 does not log, write, send or fork. Settings snapshots, the settle, `run.json`, events,
-`notify.cmd` and sudo calls all happen between runs. The `rapl` meter reads `energy_uj` through
+`notify.cmd` and requests to serve all happen between runs. The `rapl` meter reads `energy_uj` through
 sysfs, one `pread` per zone on files opened once per queue, not through perf, which keeps a
 periodic timer ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
 
@@ -51,7 +51,7 @@ ends when the main process exits; what happens to what it left behind is in
 [minion/README.md](../minion/README.md#queue). The [tighter window](#tighter-window) waits for
 them instead.
 
-### Settings and privileged verbs
+### Settings and root
 
 A setting is a plugin over sysfs files, one per object (`policy0`, `cpu3/state2`). Objects are
 found under the sysfs root, so a name from the caller is only a key and never becomes a path.
@@ -60,11 +60,14 @@ Settings are written in a fixed order, a setting before those whose valid range 
 restored in the same order, not the reverse, which breaks such dependencies
 ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
 
-`apply` and `restore` are the only writers. A queue runs them as `sudo -n minion apply --held`
-and `sudo -n minion restore --held`, through one sudoers rule, much like GEOPM Service (save
-before the first write, restore when the client is gone). Root never runs user code or reads the
-queue file: the queue pipes what a verb needs on stdin. As root the binary refuses the path
-options (`--sysfs`, `--state-dir`, `--lock`, `--out`) and the verbs `run`, `queue` and `reap`.
+Only `minion serve` writes settings: one root process per queue, started through sudo, which
+gets apply and restore requests on a pipe and restores when the pipe closes, so also when the
+queue dies. That is GEOPM Service's rule (save before the first write, restore when the client is
+gone) with a pipe for the session. Root never runs user code, reads user files or kills: serve
+reads only its pipe, `/sys` and its journal. As root the binary refuses the path options
+(`--sysfs`, `--state-dir`, `--lock`, `--lib`, `--out`) and the verbs `run`, `queue` and `reap`.
+The sudoers drop-in that `gru setup` writes allows only `/usr/local/lib/gru/minion-* serve`, a
+root-owned copy of each build ([details](../minion/README.md#root)).
 
 ### Journal
 
@@ -84,21 +87,22 @@ A queue holds a blocking `flock` on `/run/lock/minion.lock` from start to end. f
 `kill -9`, and a waiter sleeps in the kernel with no wakeups. When it is freed, all waiters wake
 and one wins (not first come, first served). Any local user can take it and block queues while
 they hold it. It replaces hand-made "wait for job X" tasks. The holder writes its queue id
-(`turbo-cost-20261123T091200Z`) into the file, so a waiter can log whom it waits for, and the
-privileged verbs can refuse a sudo child that outlived its queue
-([details](../minion/README.md#queue)).
+(`turbo-cost-20261123T091200Z`) into the file, so a waiter can log whom it waits for and reap can
+spare the holder's workloads ([details](../minion/README.md#queue)). A queue's serve takes the
+journal lock only at its first request, which the queue sends once it holds the queue lock, so
+serves follow the queues' order and can't deadlock.
 
 There is no service: a gru job hosts the queue ([DESIGN.md](DESIGN.md#how-they-connect)), or
 `setsid` or tmux without gru. A job started with setsid stays in the login session's cgroup, so
 on a host with logind's `KillUserProcesses=yes` it dies when gru's ssh connection closes; such a
-host needs `KillExcludeUsers=` for the user. Two paths clean up after a crash: the next queue
-reaps and restores a leftover at its start, and the gru job's `always` hooks run `minion reap`
-and `sudo -n minion restore`. For `gru kill` and `kill -9`, see
+host needs `KillExcludeUsers=` for the user (`gru setup` warns). A queue that dies, also by
+`kill -9`, closes its pipe, so its serve restores; the gru job's `always` hook runs `minion
+reap` for what its workloads left. For `gru kill`, see
 [minion/README.md](../minion/README.md#with-gru). The other cases:
 
-- **The whole job is killed, or the runner ran without gru**: no hook runs. The journal stays
-  open until the next queue reaps and restores, or someone runs `minion reap; sudo -n minion
-  restore`.
+- **serve itself is killed** (by root): the journal stays open. The next queue restores it at
+  its start, or `gru minion restore --host X` does; a queue that changes nothing stops until
+  then, since it can't read the journal but sees that it is open.
 - **Restore fails**: the journal stays open and `restore_failed` is sent. Every later queue tries
   again at its start and runs nothing until it works. No verb gives up on a journal yet.
 - **Reboot**: minion writes only sysfs, so the reboot resets every setting to its boot value.
@@ -218,8 +222,8 @@ Phase 5.
   the machine-lock events) and a heartbeat ping, so a service such as Healthchecks.io alerts when
   a machine goes quiet.
 - `abandon`, for an admin to close a journal that can't be restored.
-- On shared machines, the journal records the caller's uid and the boot, and `--held` checks
-  `SUDO_UID` against it (admins excepted), since anyone can read the queue id.
+- On shared machines, the journal records the caller's uid (`SUDO_UID`) and the boot, and serve
+  refuses another user's journal (admins excepted).
 
 ### Machine lock (opt-in)
 
@@ -258,7 +262,8 @@ Phase 7. One experiment can span hosts, like the two-machine A/B tests.
   multi-host queues can't deadlock.
 - A follower holds its state only while the leader's session lives: `hold` restores and exits at
   EOF on stdin, which sshd gives a non-pty command when the connection ends, or when a lease runs
-  out. If a follower dies, the leader runs `minion reap; sudo -n minion restore` there.
+  out: a follower is a serve whose pipe is the ssh session. If a follower's queue side dies, the
+  leader runs `minion reap; minion restore` there.
 - At each edge the leader asks every host to read its meters and return them with its
   `CLOCK_REALTIME`, so skew and clock offsets are recorded. Energy is compared only on the same
   machine.
@@ -283,8 +288,8 @@ match it.
 Phases 2 to 4 are tested on a fake sysfs only; checking them on a real machine comes next.
 
 1. **gru changes**: done (#3, #6, #7, #8, #10; [list](DESIGN.md#status-and-plan)).
-2. **State engine**: done (#2): the journal, `snapshot`, `apply`, `restore`, `status`, three
-   settings.
+2. **State engine**: done (#2): the journal, `snapshot`, `apply`, `restore`, three settings;
+   `minion serve` and `gru setup` since.
 3. **`minion run`**: done (#4): `time` and `rapl` at the edges and a drift flag.
 4. **Queue and the gru connection**: done (#9, #11), with `make e2e` (#12).
 5. **Measurement quality**: the [tighter window](#tighter-window), [more
