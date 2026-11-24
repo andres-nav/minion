@@ -202,6 +202,33 @@ func TestKilledJobRecordsAndNotifies(t *testing.T) {
 	}
 }
 
+// A killed job records its status and runs its hooks only once its task has
+// stopped, also with dash (Ubuntu's sh), whose `sh -c` forks the task and dies
+// at the signal instead of exec'ing it.
+func TestKilledJobWaitsForTheTask(t *testing.T) {
+	for _, shell := range []string{"sh", "dash"} {
+		bin, err := exec.LookPath(shell)
+		if err != nil {
+			continue
+		}
+		dir := t.TempDir()
+		os.Symlink(bin, filepath.Join(dir, "sh"))
+		t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+		task := `sh -c 'trap "sleep 1; echo stopped; exit 0" TERM; echo started; sleep 30 & wait'`
+		jd, _ := launch(t, Job{Command: task, Always: []string{"echo always"}}, "")
+		for i := 0; i < 100; i++ {
+			if b, _ := os.ReadFile(filepath.Join(jd, "log")); strings.Contains(string(b), "started") {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		sh(t, KillCommand(ShellQuote(jd)), "")
+		if status, log := wait(t, jd); status != "143" || !strings.HasSuffix(log, "stopped\n[gru] killed\nalways\n") {
+			t.Errorf("%s: status %s log %q", bin, status, log)
+		}
+	}
+}
+
 func TestScriptArgsAreLiteral(t *testing.T) {
 	jd, _ := launch(t, Job{Command: `printf '%s\n' "$GRU_ARGS"`, Args: `fix it; rm -rf / $HOME '"`}, "")
 	if _, log := wait(t, jd); log != "fix it; rm -rf / $HOME '\"\n" {
