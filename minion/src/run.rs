@@ -47,16 +47,17 @@ struct Zone {
     max_uw: Option<u64>,
 }
 
-/// The monotonic and the realtime clock in ns, read back to back. With these
-/// clock ids and a valid pointer, clock_gettime can't fail.
-pub fn clocks() -> Vec<u64> {
+/// The monotonic and the realtime clock in ns, read back to back.
+pub fn clocks() -> Result<Vec<u64>, String> {
     [CLOCK_MONOTONIC, CLOCK_REALTIME]
         .into_iter()
         .map(|clock| {
             let mut ts = Timespec { sec: 0, nsec: 0 };
             // SAFETY: ts is a valid timespec for the call to fill.
-            unsafe { clock_gettime(clock, &mut ts) };
-            ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
+            if unsafe { clock_gettime(clock, &mut ts) } != 0 {
+                return Err("clock_gettime failed".to_string());
+            }
+            Ok(ts.sec as u64 * 1_000_000_000 + ts.nsec as u64)
         })
         .collect()
 }
@@ -78,7 +79,7 @@ impl Meter for Clock {
         "time"
     }
     fn read(&self) -> Result<Value, String> {
-        Ok(clocks().into())
+        clocks().map(Value::from)
     }
     fn report(&self, start: &Value, end: &Value, secs: f64) -> (Value, Vec<String>) {
         let mut v = edges(&[("start", &u64s(start)), ("end", &u64s(end))]);

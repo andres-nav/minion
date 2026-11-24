@@ -634,7 +634,7 @@ impl crate::run::Meter for Stamp {
         "stamp"
     }
     fn read(&self) -> Result<Value, String> {
-        Ok(json!(crate::run::clocks()[0]))
+        Ok(json!(crate::run::clocks()?[0]))
     }
     fn report(&self, start: &Value, end: &Value, _: f64) -> (Value, Vec<String>) {
         (json!([start, end]), vec![])
