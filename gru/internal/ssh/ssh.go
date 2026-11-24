@@ -88,8 +88,9 @@ func (c *Client) Open() {
 		return
 	}
 	// nil stdio → /dev/null, so the master holds no command pipe and Wait never
-	// blocks on it.
-	m := exec.Command("ssh", "-o", "ControlMaster=yes", "-o", "ControlPath="+c.ctlPath, "-N", c.Host)
+	// blocks on it. ControlPersist=no keeps it in front: a ControlPersist from
+	// ~/.ssh/config would fork it away once up, and Close could not end it.
+	m := exec.Command("ssh", "-o", "ControlMaster=yes", "-o", "ControlPersist=no", "-o", "ControlPath="+c.ctlPath, "-N", c.Host)
 	if err := m.Start(); err != nil {
 		return
 	}

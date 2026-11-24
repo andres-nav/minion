@@ -6,8 +6,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestAgentBinary(t *testing.T) {
@@ -190,5 +193,47 @@ func TestControlPathNeedsOwnPrivateDir(t *testing.T) {
 	os.Chmod(dir, 0o755)
 	if p := controlPath("h"); p != "" {
 		t.Fatalf("control path %q in a dir others can read", p)
+	}
+}
+
+// A user's ControlPersist makes an ssh master fork into the background once it
+// is up. gru's own master must stay in front, so Close can end it.
+func TestOwnMasterEndsWithClose(t *testing.T) {
+	controlRoot = t.TempDir()
+	defer func() { controlRoot = "/tmp" }()
+	bin := t.TempDir()
+	// Like OpenSSH with ControlPersist in ~/.ssh/config, after 0.3 s of login.
+	fake := `#!/bin/sh
+cp= persist=yes op=
+while [ $# -gt 0 ]; do
+  case $1 in
+    -o) case $2 in ControlPath=*) cp=${2#ControlPath=} ;; ControlPersist=no) persist=no ;; esac; shift 2 ;;
+    -O) op=$2; shift 2 ;;
+    -*) shift ;;
+    *) break ;;
+  esac
+done
+case $op in
+  check) [ -n "$cp" ] && [ -e "$cp" ]; exit ;;
+  exit) kill "$(cat "$cp.pid")"; rm -f "$cp"; exit 0 ;;
+esac
+sleep 0.3
+if [ $persist = yes ]; then sleep 30 & echo $! > "$cp.pid"; : > "$cp"; exit 0; fi
+echo $$ > "$cp.pid"; : > "$cp"; exec sleep 30
+`
+	os.WriteFile(filepath.Join(bin, "ssh"), []byte(fake), 0o755)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	c := New("fakehost")
+	c.Open()
+	b, err := os.ReadFile(c.ctlPath + ".pid")
+	if err != nil {
+		t.Fatalf("no master: %v", err)
+	}
+	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+	c.Close()
+	time.Sleep(100 * time.Millisecond)
+	if syscall.Kill(pid, 0) == nil {
+		t.Errorf("the master %d still runs after Close", pid)
 	}
 }
