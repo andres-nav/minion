@@ -32,14 +32,14 @@ make test           # go test + vet, cargo test + clippy
 make e2e            # gru + minion end to end on this machine (Linux only)
 ```
 
-Without nix, minion's builds need `rustup target add x86_64-unknown-linux-musl
-aarch64-unknown-linux-musl`. `make install` also copies the AI skill (docs/ai/SKILL.md) to
-`~/.claude/skills/gru` if that dir exists.
+Inside `gru/`, `go build .` and `go test ./...` also work (the version is then "dev"), and
+`cargo build` and `cargo test` inside `minion/`. Without nix, minion's builds need `rustup target
+add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`. `make install` also copies the AI skill
+(docs/ai/SKILL.md) to `~/.claude/skills/gru` if that dir exists.
 
 `make e2e` (test/e2e.sh) runs real queues and every gru command and option, with no ssh and no
 root: `test/ssh` runs the "remote" commands here with their own home, `test/sudo` and
 `test/visudo` stand in for sudo (as this user, with requiretty) and visudo (classic sudo's rules,
-or sudo-rs's), and minion works on a
-fake sysfs and powercap tree. Everything lives in one temp dir (`E2E_KEEP=1` keeps it). CI runs
-`make test e2e` on every pull request. It can't cover real RAPL and cpufreq writes, real sudo, real
-ssh or several hosts: test those on a real machine.
+or sudo-rs's), and minion works on a fake sysfs and powercap tree. Everything lives in one temp
+dir (`E2E_KEEP=1` keeps it). CI runs `make test e2e` on every pull request. It can't cover real
+RAPL and cpufreq writes, real sudo, real ssh or several hosts: test those on a real machine.

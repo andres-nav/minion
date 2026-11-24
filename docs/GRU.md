@@ -13,7 +13,8 @@ host needs only a POSIX shell and coreutils (no tmux, rsync or Python).
 ## Configuration
 
 JSON: `~/.config/gru/config.json` (or `$GRU_CONFIG`, or under `$XDG_CONFIG_HOME`), with three maps:
-`hosts`, `templates` and a default `notify`. Unknown keys are refused, so a typo fails loudly.
+`hosts`, `templates` and a default `notify`. Unknown keys are refused, so a typo fails loudly
+(and so does an old `notify.email` block: `unknown field "email"`).
 
 **Hosts** (name → keys):
 
