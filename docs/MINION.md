@@ -1,8 +1,9 @@
 # minion — design
 
-minion is the runner on the measured host. This file gives the reasons for what it does and the
-design of what is planned; nothing under [Planned](#planned) is built. Usage and formats (queue
-file, journal, results, events): [minion/README.md](../minion/README.md). How it works with gru:
+minion is the runner on the measured host. This file gives the reasons for what it does, the
+design of what is planned (nothing under [Planned](#planned) is built) and the ranked
+[improvements](#improvements-ranked). Usage and formats (queue file, journal, results, events):
+[minion/README.md](../minion/README.md). How it works with gru:
 [DESIGN.md](DESIGN.md#how-they-connect). Linux and tool facts, with sources:
 [RESEARCH.md](RESEARCH.md).
 
@@ -21,29 +22,25 @@ commit, config, seed, hardware and job id; any command as a workload and meters 
 data for the three [research questions](#research-questions). Non-goals: a cluster scheduler,
 attributing energy to tenants or processes, a benchmark framework, dashboards, anything but Linux.
 
-## What is built
+## Status
 
-- Settings: `cpu.governor`, `cpu.epp`, `cpu.turbo`, `cpu.freq` (min and max) and
-  `cpu.idle.disable`.
-- Verbs: `snapshot`, `restore`, `run`, `queue`, `reap` and `serve` (root's side).
-- Meters: `time`, `rapl` and `cmd`.
-- Queue: randomized interleaved rounds under the queue lock, with reap, events and notify.
-- Around each run: the settings snapshot and a basic noise record (interrupts, softirqs, context
-  switches, other cgroups' CPU time, logins and load).
-- Restore: from the fsynced journal, keeping what someone else changed.
-- Between runs: the settle and a basic thermal wait (one baseline for the queue).
-
-`make e2e` runs queues through gru on a fake sysfs; real sysfs writes, RAPL, sudo and ssh are not
-tested yet.
+| Part | Built | Planned |
+|---|---|---|
+| Settings | `cpu.governor`, `cpu.epp`, `cpu.turbo`, `cpu.freq` (min and max), `cpu.idle.disable` | [more settings](#more-settings), [host profile](#host-profile-and-boot-only-checks) |
+| Verbs | `snapshot`, `restore`, `run`, `queue`, `reap`, and `serve` (root's side) | `scope`, `msr`, `hold`, `abandon`, `queue --resume` |
+| Meters | `time`, `rapl`, `cmd`, and a basic noise record (interrupts, softirqs, context switches, other cgroups' CPU time, logins, load) | [more meters and noise](#meters-and-noise-record) |
+| Queue | randomized interleaved rounds under the queue lock, with reap, events and notify; the settle and a basic thermal wait (one baseline per queue) | [queue features](#queue-features), [tighter window](#tighter-window), [isolation](#isolation) |
+| Restore | the fsynced journal, keeping what someone else changed; serve restores when its queue dies | the [boot unit](#boot-unit) |
+| Tested | queues through gru on a fake sysfs (`make e2e`) | real sysfs writes, RAPL, sudo and ssh |
 
 ### Stay out of the measured window
 
 A measured window runs from the meter reads right before the workload starts to those right after
 its main process exits. Apart from starting the workload, the runner only waits in `waitpid`: it
 does not log, write, send or fork. Settings snapshots, the settle, `run.json`, events,
-`notify.cmd` and requests to serve all happen between runs. The `rapl` meter reads `energy_uj` through
-sysfs, one `pread` per zone on files opened once per queue, not through perf, which keeps a
-periodic timer ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
+`notify.cmd` and requests to serve all happen between runs. The `rapl` meter reads `energy_uj`
+through sysfs, one `pread` per zone on files opened once per queue, not through perf, which keeps
+a periodic timer ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
 
 A queue's workload runs in its own process group with `PR_SET_PDEATHSIG(SIGKILL)`, so it dies
 with the runner; a stop signal only makes the runner send `SIGTERM` to that group. The window
@@ -60,14 +57,12 @@ Settings are written in a fixed order, a setting before those whose valid range 
 restored in the same order, not the reverse, which breaks such dependencies
 ([RESEARCH.md](RESEARCH.md#2-linux-mechanisms)).
 
-Only `minion serve` writes settings: one root process per queue, started through sudo, which
-gets apply and restore requests on a pipe and restores when the pipe closes, so also when the
-queue dies. That is GEOPM Service's rule (save before the first write, restore when the client is
-gone) with a pipe for the session. Root never runs user code, reads user files or kills: serve
-reads only its pipe, `/sys` and its journal. As root the binary refuses the path options
-(`--sysfs`, `--state-dir`, `--lock`, `--lib`, `--out`) and the verbs `run`, `queue` and `reap`.
-The sudoers drop-in that `gru setup` writes allows only `/usr/local/lib/gru/minion-* serve`, a
-root-owned copy of each build ([details](../minion/README.md#root)).
+Only `minion serve` writes settings: one root process per queue, which restores when its pipe
+closes, so also when the queue dies. That is GEOPM Service's rule (save before the first write,
+restore when the client is gone) with a pipe for the session. Root never runs user code, reads
+user files or kills: serve reads only its pipe, `/sys` and its journal. As root the binary refuses
+the path options and the verbs `run`, `queue` and `reap`, and sudo allows only the root-owned
+copies that `gru setup` installs ([details](../minion/README.md#root)).
 
 ### Journal
 
@@ -108,14 +103,14 @@ reap` for what its workloads left. For `gru kill`, see
 - **Reboot**: minion writes only sysfs, so the reboot resets every setting to its boot value.
   There is no boot check yet: the next queue restores the old journal like any leftover, writing
   the saved value back where the boot value equals the applied one and keeping the rest, reported
-  as changed by someone else. `gru ps` keeps showing the dead job as running.
+  as changed by someone else. `gru ps` shows the dead job as `lost`.
 - **Shutdown** should go like `gru kill` if the restore fits systemd's stop timeout (not tested).
 
 ### Queue
 
 Each round runs every (profile, workload) pair once, in a new order drawn from the seed
 (randomized interleaved rounds), because fixed and blocked orders bias results
-([RESEARCH.md](RESEARCH.md#3-methodology)). Results go to a new directory per queue and are never
+([RESEARCH.md](RESEARCH.md#33-methodology)). Results go to a new directory per queue and are never
 overwritten. The runner decides when to notify and a command decides how; with gru the command is
 gru's agent, so secrets stay in gru's notify file. Root never notifies.
 
@@ -135,9 +130,9 @@ Phase 5.
   meters. The runner then waits in one `poll()` on a `signalfd` and the FIFO (opened `O_RDWR`, so
   a closed writer can't make it spin).
 - The runner sits on a housekeeping CPU with a large timer slack; the workload resets its slack
-  to 50 µs before `exec`. Before the start read come the noise record, `sync` (so writes from
-  between runs are not flushed inside the window) and the settle. Helpers run in their own process
-  groups, killed before a window starts.
+  to 50 µs before `exec`. Before the start read come `sync` (so writes from between runs are not
+  flushed inside the window) and the settle. Helpers run in their own process groups, killed
+  before a window starts.
 
 ### More settings
 
@@ -178,7 +173,7 @@ Phase 5.
 - A delegated cgroup without a unit file (not tried): a `scope` verb moves the runner into a
   transient scope with `Delegate=yes`, split into `hk/` (the runner) and `exp/` (the workload,
   started there with `CLONE_INTO_CGROUP`). `reap` then kills a dead queue's scope. No cpuset
-  partitions: they conflict with systemd, and 5.15 has no `isolated` partitions.
+  partitions: they conflict with systemd.
 - The lowest CPU of each package stays housekeeping, since on Cascade Lake every RAPL read
   interrupts it. The runner sits on a housekeeping CPU that is not CPU 0 and whose SMT sibling is
   housekeeping too; RQ2 tests the alternatives.
@@ -287,123 +282,141 @@ match it.
 
 Phases 2 to 4 are tested on a fake sysfs only; checking them on a real machine comes next.
 
-1. **gru changes**: done (#3, #6, #7, #8, #10; [list](DESIGN.md#status-and-plan)).
-2. **State engine**: done (#2): the journal, `snapshot`, `apply`, `restore`, three settings;
-   `minion serve` and `gru setup` since.
-3. **`minion run`**: done (#4): `time` and `rapl` at the edges and a drift flag.
-4. **Queue and the gru connection**: done (#9, #11), with `make e2e` (#12).
-5. **Measurement quality**: the [tighter window](#tighter-window), [more
-   settings](#more-settings), the [host profile](#host-profile-and-boot-only-checks),
-   [isolation](#isolation), [meters and noise record](#meters-and-noise-record) and [queue
-   features](#queue-features). Done when 2 profiles × 2 workloads × 10 reps run unattended with
-   full provenance, `strace` shows no runner syscall inside a window but the wakeup that ends it,
-   and the RQ2 overhead experiment has run; `host_baseline.sh` and `slot.sh` retire.
-6. **[Machine lock](#machine-lock-opt-in)**. Done when another account is refused and sees the
-   message while the holder, root and an admin get in; the lock lifts at the end, after `kill -9`
-   of the runner, at expiry and after a reboot; and a broken PAM module or `allow.conf` leaves
-   logins open.
-7. **[Several machines](#several-machines)**. Done when a two-host queue runs with shared edges,
-   and killing the leader or cutting its network leaves the follower restored within one lease.
-8. **[GPUs and devices](#gpus-and-devices)**. Done when GPU snapshots before and after a queue
-   match and ECC or MIG mismatches are refused.
-9. **[Boot unit](#boot-unit)**. Done when snapshots match after a reboot mid-queue.
-10. **RQ3 analysis**: the A/A and injected modes, and the Python analysis over `run.json`. Done
-    when the detection rate against the number of runs is measured for two or more injected
-    sizes, with and without the noise record.
+| Phase | What | Done when |
+|---|---|---|
+| 1 | gru changes (#3, #6, #7, #8, #10): a state dir per host, unique UTC job ids, an agent file per build, quiet attach, provenance, notify for tasks | done |
+| 2 | state engine (#2): the journal, `snapshot`, apply and `restore`; `minion serve` and `gru setup` since | done |
+| 3 | `minion run` (#4): `time` and `rapl` at the edges and a drift flag | done |
+| 4 | the queue and the gru connection (#9, #11), with `make e2e` (#12) | done |
+| 5 | measurement quality: the [tighter window](#tighter-window), [more settings](#more-settings), the [host profile](#host-profile-and-boot-only-checks), [isolation](#isolation), [meters and noise record](#meters-and-noise-record) and [queue features](#queue-features). Started: the noise record (#23), `cpu.freq` and `cpu.epp` (#24), the `cmd` meter (#25), the thermal wait (#27). | 2 profiles × 2 workloads × 10 reps run unattended with full provenance, `strace` shows no runner syscall inside a window but the wakeup that ends it, and the RQ2 overhead experiment has run; `host_baseline.sh` and `slot.sh` retire |
+| 6 | the [machine lock](#machine-lock-opt-in) | another account is refused and sees the message while the holder, root and an admin get in; the lock lifts at the end, after `kill -9` of the runner, at expiry and after a reboot; a broken PAM module or `allow.conf` leaves logins open |
+| 7 | [several machines](#several-machines) | a two-host queue runs with shared edges, and killing the leader or cutting its network leaves the follower restored within one lease |
+| 8 | [GPUs and devices](#gpus-and-devices) | GPU snapshots before and after a queue match, and ECC or MIG mismatches are refused |
+| 9 | the [boot unit](#boot-unit) | snapshots match after a reboot mid-queue |
+| 10 | RQ3 analysis: the A/A and injected modes, and the Python analysis over `run.json` | the detection rate against the number of runs is measured for two or more injected sizes, with and without the noise record |
 
-### Improvements for minion
+## Improvements, ranked
 
-What the survey of measurement errors in
-[RESEARCH.md](RESEARCH.md#5-measurement-accuracy-and-repeatability) (numbers and sources there)
-asks of minion, ranked by strength of evidence and benefit to the research questions per unit of
-cost. None is built. Cost is a rough count of Rust lines in minion
-(analysis in Python); *here* means testable on this dev desktop with the fake sysfs, *machine*
-needs a real host.
+What the tools and the measurement survey in [RESEARCH.md](RESEARCH.md) ask of minion (numbers and
+sources there), ranked by strength of evidence and benefit to the research questions per unit of
+cost. Cost is in Rust lines in minion (analysis in Python); *here* means testable on the fake
+sysfs, *machine* needs a real host.
 
-1. **Check every energy reading.** *Problem:* tools still lose wraps, count zones twice and use
-   wrong units, and the kernel scaled Sapphire Rapids DRAM about 4× wrong until 2022
-   ([5.1](RESEARCH.md#51-meters), [5.4](RESEARCH.md#54-tools)). *Change:* in `rapl`, flag a zone
-   whose counter didn't move in a run of 10 ms or more (stuck, or a 1 J unit), whose mean power is
-   above its highest power limit, or whose delta equals another package's (one counter read
-   twice); store each zone's `max_energy_range_uj` next to its raw counters. *Cost:* about 40
-   lines, low risk. *Test:* here.
-2. **A/A queues and a false-positive rate per host.** *Problem:* where null changes were planted,
-   49 of 60 were flagged without an effect-size floor; EnergyTrackr flagged 36% of commits with no
-   ground truth; 12.5% of Mozilla's alert groups were false ([5.3](RESEARCH.md#53-methodology)). *Change:*
-   none in minion: the same command under two workload names already makes an A/A pair. The
+Already built from the survey: the journal with restore when the client dies, and compare and
+restore (GEOPM Service, Slurm and tuned each have part of it); randomized interleaved rounds with
+seed, round and position saved, since order bias is large and common on bare metal (Abedi 2017,
+Duplyakin 2023); events named after Slurm's mail types, with any push sink (such as Pushover)
+through `notify.cmd` or gru's `run` hooks.
+
+1. **Check every energy reading.** Tools still lose wraps, count zones twice and use wrong units,
+   and the kernel scaled Sapphire Rapids DRAM about 4× wrong until 2022
+   ([3.1](RESEARCH.md#31-meters), [3.4](RESEARCH.md#34-tools)). In `rapl`, flag a zone whose
+   counter didn't move in a run of 10 ms or more (stuck, or a 1 J unit), whose mean power is above
+   its highest power limit, or whose delta equals another package's (one counter read twice); the
+   raw counters and range are already stored. About 40 lines, low risk; here.
+2. **A/A and injected-regression modes, and a false-positive rate per host.** They give the
+   false-positive and detection rates against the number of runs (RQ3), which nobody reports for
+   energy (Laaber 2019, Bulej 2020, Fleming 2023; the gap is stated by EnergyTrackr); without an
+   effect-size floor, 49 of 60 planted null changes were flagged ([3.3](RESEARCH.md#33-methodology)).
+   Nothing to build for A/A: the same command under two workload names is an A/A pair. The
    analysis applies the test used for real comparisons (a ratio CI bootstrapped over rounds, an
-   effect-size floor, Benjamini-Hochberg across comparisons) and reports the false-positive rate.
-   A/A queues with `settle_s` 0 and 60 also pick each host's settle, since a 60 s rest did not
-   help on the one server measured. *Cost:* about 100 lines of analysis. *Test:* the analysis here,
-   the rate on a machine. *In design (phase 10); this brings its A/A half forward.*
-3. **Record what sets a meter's accuracy in `host.json`.** *Problem:* RAPL energy filtering adds
-   5-15% noise at 100 ms and stays on until reboot once SGX or TDX is enabled; kernels changed
-   units and listed different AMD zones in powercap and perf until 6.6; mitigations changed run
-   time by 2-11% ([5.1](RESEARCH.md#51-meters), [5.2](RESEARCH.md#52-sources-of-variation)).
-   *Change:* add the filtering bit (MSR 0xBC bit 0, read by the planned `msr` verb, as the Green
-   Metrics Tool does), the zones listed by powercap and by perf, `cpu/vulnerabilities/*`, and the
-   wall meter's model and accuracy to the planned CPU, kernel, microcode and BIOS fields; with
-   filtering on or unknown, flag runs shorter than 1 s. *Cost:* about 40 lines, low risk; the MSR
-   needs root. *Test:* here, except the MSR. *In design ([meters](#meters-and-noise-record));
-   new fields.*
-4. **A warm-up round and a trend check.** *Problem:* power drifts for about 7 min at constant
+   effect-size floor, Benjamini-Hochberg across comparisons) and reports the false-positive rate;
+   A/A queues with `settle_s` 0 and 60 also pick each host's settle, since a 60 s rest did not help
+   on the one server measured. About 100 lines of analysis; the rate needs a machine. Phase 10;
+   this brings its A/A half forward.
+3. **Order-independence check.** Whether a machine carries state between runs (Duplyakin 2023,
+   Maricq 2018): run some rounds in a fixed order, then test fixed against random (Kruskal-Wallis)
+   and run order against shuffled (Mann-Whitney). Analysis on top of `plan.json`; here. New.
+4. **Record what sets a meter's accuracy in `host.json`.** RAPL energy filtering adds 5-15% noise
+   at 100 ms and stays on until reboot once SGX or TDX is enabled; kernels changed units and listed
+   different AMD zones in powercap and perf until 6.6; mitigations changed run time by 2-11%;
+   AMD's energy is modeled (Schöne 2021) ([3.1](RESEARCH.md#31-meters),
+   [3.2](RESEARCH.md#32-sources-of-variation)). Add the filtering bit (MSR 0xBC bit 0, through the
+   planned `msr` verb, as the Green Metrics Tool does), the zones listed by powercap and by perf,
+   the zone backend (MSR, TPMI) and whether energy is modeled, `cpu/vulnerabilities/*`, and the
+   wall meter's model and accuracy; with filtering on or unknown, flag runs shorter than 1 s. About
+   40 lines, low risk (the MSR needs root); here, except the MSR. In design
+   ([meters](#meters-and-noise-record)), new fields.
+5. **A warm-up round, a thermal gate and a trend check.** Power drifts for about 7 min at constant
    load, labs pre-heat for 15 min, many benchmarks never reach a steady state, and fixed warm-up
-   counts are wrong in most cases ([5.2](RESEARCH.md#52-sources-of-variation),
-   [5.3](RESEARCH.md#53-methodology)). *Change:* `warmup_rounds` (default 1): shuffled rounds
-   before the first one, marked `warmup` in run.json and left out of the analysis. The analysis
-   runs a change-point test (binary segmentation or PELT) on each pair's runs in run order and
-   flags a shift. *Cost:* about 30 lines, low risk, plus 50 of analysis. *Test:* here.
-5. **Validate RAPL against the BMC and a wall meter on each host.** *Problem:* wall against RAPL
-   has a slope of about 1.17, what RAPL misses grows with load (8.7% CPU only, 19-26% with GPUs),
-   AMD's RAPL is a model, and a BMC reported 14 W steps over 60 s windows
-   ([5.1](RESEARCH.md#51-meters)). *Change:* a calibration queue in the repo (idle, one core, one
-   socket, all cores, a memory-bound and an AVX workload, 5 min each, well above the BMC window)
-   with the planned `wall` sampler; the analysis fits wall against RAPL per host, trims each edge
-   by the meters' lag and stores slope, offset and residual in the host profile. *Cost:* a queue
-   file and about 80 lines of analysis once `wall` exists. *Test:* machine with a reachable BMC
-   ([open question 1](#open-questions)).
-6. **Idle as a workload in every round, never one subtraction.** *Problem:* idle energy varies
-   more than a light job's (up to +140%), and the first active core adds 22-81 W, so energy minus
-   idle × time is not the run's own energy ([5.3](RESEARCH.md#53-methodology)). *Change:* none in
-   minion (`"idle": {"cmd": ["sleep", "60"]}` works today). The analysis reports raw energy and,
-   separately, energy minus the same round's idle, with its CI. *Cost:* about 30 lines of
-   analysis. *Test:* here.
-7. **Adaptive repetitions that stop on each pair's own precision.** *Problem:* the runs needed
-   differ more than 10× between setups; stopping when a comparison looks significant raises false
-   positives about 5×; a relative CI-width rule matched full runs best
-   ([5.3](RESEARCH.md#53-methodology), [section 3](RESEARCH.md#3-methodology)). *Change:* `reps`
-   may be `{"min": 6, "max": 60, "ci_rel": 0.01}`: after each round, stop once every pair's median
-   CI half-width is below `ci_rel` of its median, or at `max`. The rule never looks at differences
-   between pairs; plan.json grows by a round at a time. *Cost:* about 100 lines, medium risk (plan
-   and resume format). *Test:* here, with fake workloads of known spread. *In design ([queue
-   features](#queue-features)); adds the precision-only rule.*
-8. **Temperatures and fans per run, from the host and the BMC.** *Problem:* server power rose 16%
-   with CPU temperature and 5.6% with warmer rack neighbours, fan control alone moved energy 8.3%,
-   and SPECpower requires the inlet temperature ([5.2](RESEARCH.md#52-sources-of-variation)).
-   *Change:* the thermal wait (#27) records hwmon temperatures at each start; add the BMC's inlet
-   temperature and fan speeds to the `wall` series, matched to each run, as covariates for item
-   10. *Cost:* about 30 lines in the sampler, low risk. *Test:* machine with a BMC.
-9. **Placement in the profile, checked after apply.** *Problem:* one socket instead of two cut the
-   spread 30× at half load; on Zen 1, NUMA placement moved energy 8-13%; on Rome, offline SMT
-   siblings kept the package out of deep idle (+81 W) ([5.2](RESEARCH.md#52-sources-of-variation)).
-   *Change:* the workload's CPU list becomes part of the profile and of run.json; after an apply
-   that changes SMT or idle states, a 10 s idle RAPL read is compared with one taken before and a
-   jump is flagged. *Cost:* about 40 lines on top of [isolation](#isolation), medium risk.
-   *Test:* the check here, its numbers on an AMD and an Intel machine.
-10. **Covariates named before the RQ3 runs.** *Problem:* no benchmarking work was found that
-    adjusts energy with noise covariates; regression adjustment with treatment × covariate terms
-    cannot lose asymptotic precision ([5.3](RESEARCH.md#53-methodology)). *Change:* fix the
-    covariates in advance (start temperature, other cgroups' CPU time and interrupts before the
-    start read, from #23 and #27) and report adjusted and unadjusted results, judged by item 2 and
-    the injected mode. *Cost:* analysis only. *Test:* here on synthetic data, the effect on a
-    machine. *In design ([RQ3](#research-questions)).*
-11. **GPU energy from counters, with a minimum run length.** *Problem:* NVML power covers 25 ms of
-    every 100 ms on A100 and H100 and integrating it errs by up to 70%; the energy counter reads
-    0 J for windows shorter than its update; old sensors lag by 0.84 s
-    ([5.1](RESEARCH.md#51-meters), [5.4](RESEARCH.md#54-tools)). *Change:* the planned `nvml`
-    meter reads only the energy counter, records the driver version, flags runs shorter than 5 s
-    (the paper's minimum for power readings, until the counter's own update is measured) and
-    settles between GPU runs. *Cost:* about 10 lines on top of phase 8. *Test:* GPU machine.
+   counts are wrong in most cases ([3.2](RESEARCH.md#32-sources-of-variation),
+   [3.3](RESEARCH.md#33-methodology)); Krun and the Green Metrics Tool gate on temperature.
+   `warmup_rounds` (default 1): shuffled rounds before the first, marked `warmup` in run.json and
+   left out of the analysis; the [per-profile thermal gate](#queue-features), and, like the Green
+   Metrics Tool, a warm-up for a cold machine. The analysis runs a change-point test (binary
+   segmentation or PELT) on each pair's runs in run order and flags a shift. About 30 lines plus 50
+   of analysis, low risk; here. The basic thermal wait is built.
+6. **Validate RAPL against the BMC and a wall meter on each host.** Wall against RAPL has a slope
+   of about 1.17, what RAPL misses grows with load, AMD's RAPL is a model, and a BMC reported 14 W
+   steps over 60 s windows ([3.1](RESEARCH.md#31-meters)); BMC data is best kept off the host and
+   matched by time window (Kwollect). A calibration queue in the repo (idle, one core, one socket,
+   all cores, a memory-bound and an AVX workload, 5 min each, well above the BMC window) with the
+   planned `wall` sampler; the analysis fits wall against RAPL per host, trims each edge by the
+   meters' lag and stores slope, offset and residual in the host profile. A queue file and about 80
+   lines of analysis once `wall` exists; a machine with a reachable BMC ([open question
+   1](#open-questions)).
+7. **Idle as a workload in every round, never one subtraction.** Idle energy varies more than a
+   light job's, and the first active core adds 22-81 W, so energy minus idle × time is not the
+   run's own energy ([3.3](RESEARCH.md#33-methodology)). Nothing to build (`"idle": {"cmd":
+   ["sleep", "60"]}` works today): the analysis reports raw energy and, separately, energy minus
+   the same round's idle, with its CI. About 30 lines of analysis; here.
+8. **Adaptive repetitions that stop on each pair's own precision.** The runs needed differ more
+   than 10× between setups (Hoefler 2015, Maricq 2018, Phoronix Test Suite); stopping when a
+   comparison looks significant raises false positives about 5×; a relative CI-width rule matched
+   full runs best ([3.3](RESEARCH.md#33-methodology)). `reps` may be
+   `{"min": 6, "max": 60, "ci_rel": 0.01}`: after each round, stop once every pair's median CI
+   half-width is below `ci_rel` of its median, or at `max`; the rule never looks at differences
+   between pairs, and plan.json grows a round at a time. About 100 lines, medium risk (plan and
+   resume format); here, with fake workloads of known spread. In design ([queue
+   features](#queue-features)); adds the precision-only rule.
+9. **A canary workload that pauses the queue on drift**, for slow machine drift that statistics
+   can't fix (Green Metrics Tool, Daly 2020). In design ([queue features](#queue-features)).
+10. **Checks and quality flags kept with the run, never silent drops.** A `verify` command and
+    start/end checks from the Green Metrics Tool's list (timers, cron, NTP, swap, RAPL limits,
+    suspend and steal time; tuned verifies too), where a jump of `CLOCK_BOOTTIME` against
+    `CLOCK_MONOTONIC` is a cheap suspend check; a median/MAD outlier flag, a first-run warning
+    (hyperfine) and new `dmesg` lines (Krun). In design (flags, verify); adds the two rules.
+11. **Temperatures and fans per run, from the host and the BMC.** Server power rose 16% with CPU
+    temperature and 5.6% with warmer rack neighbours, fan control alone moved energy 8.3%, and
+    SPECpower requires the inlet temperature ([3.2](RESEARCH.md#32-sources-of-variation),
+    [3.3](RESEARCH.md#33-methodology)). The thermal wait already records hwmon temperatures at
+    each start; add the BMC's inlet temperature and fan speeds to the `wall` series, matched to
+    each run, as covariates for item 13. About 30 lines in the sampler, low risk; a machine with a
+    BMC.
+12. **Placement in the profile, checked after apply.** One socket instead of two cut the spread
+    30× at half load, NUMA placement moved energy 8-13% on Zen 1, and offline SMT siblings kept a
+    Rome package out of deep idle (+81 W) ([3.2](RESEARCH.md#32-sources-of-variation)); BenchExec
+    measured +22% CPU time from contention and +6.8% from remote memory, on old hardware
+    ([1](RESEARCH.md#1-tools)). The workload's CPU list becomes part of the profile and of
+    run.json, with host profiles that pick whole physical cores on one socket with local memory;
+    after an apply that changes SMT or idle states, a 10 s idle RAPL read is compared with one
+    taken before, and a jump is flagged. About 40 lines on top of [isolation](#isolation), medium
+    risk; the check here, its numbers on an AMD and an Intel machine.
+13. **Covariates named before the RQ3 runs.** No benchmarking work was found that adjusts energy
+    with noise covariates; CUPED cuts variance with a covariate measured before the experiment
+    (Deng 2013), and regression adjustment with treatment × covariate terms cannot lose asymptotic
+    precision ([3.3](RESEARCH.md#33-methodology)). Fix the covariates in advance and use only
+    values the change can't affect: the start temperatures (thermal wait), logins and load at the
+    start (noise record), and other cgroups' CPU time and interrupts over a window before the
+    start read (new: the noise record has only their in-run changes). Report adjusted and
+    unadjusted results, judged by item 2 and the injected mode. Analysis, plus the pre-run window;
+    here on synthetic data, the effect on a machine. In design ([RQ3](#research-questions)).
+14. **Measure and publish the runner's own overhead**, with a calibrate script, as the Green
+    Metrics Tool did. In design ([RQ2](#research-questions)).
+15. **GPU energy from counters, with a minimum run length.** NVML power covers 25 ms of every
+    100 ms on A100 and H100 and integrating it errs by up to 70%; the energy counter reads 0 J for
+    windows shorter than its update; old sensors lag by 0.84 s ([3.1](RESEARCH.md#31-meters),
+    [3.4](RESEARCH.md#34-tools)). The planned `nvml` meter reads only the energy counter, records
+    the driver version, flags runs shorter than 5 s (the paper's minimum for power readings, until
+    the counter's own update is measured) and settles between GPU runs. About 10 lines on top of
+    phase 8; a GPU machine.
+16. **Offline change-point detection across commits**, deterministic and with a minimum history
+    (Daly 2020, Fleming 2023). Later, for continuous use.
+
+Avoid: resetting to fixed defaults (pyperf, LIKWID, EnergyTrackr); one-way machine preparation
+(the Green Metrics Tool's NOP Linux); periodic samplers that visit every CPU during runs
+(turbostat); boot options such as `idle=poll` that change idle energy; the osnoise workload during
+a measured run.
 
 ## Research questions
 
