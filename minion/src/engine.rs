@@ -91,7 +91,6 @@ fn last(lines: &[Value], t: &str) -> Option<usize> {
     lines.iter().rposition(|l| l["t"] == t)
 }
 
-/// The state of the last line of type t, or an empty state if there is none.
 fn state_of(lines: &[Value], t: &str) -> Result<State, String> {
     match last(lines, t) {
         Some(i) => serde_json::from_value(lines[i]["state"].clone())

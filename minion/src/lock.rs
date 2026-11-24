@@ -96,7 +96,6 @@ fn err(path: &Path, e: io::Error) -> String {
     }
 }
 
-/// At most the first 256 bytes, the holder's queue id.
 fn holder(f: &File) -> String {
     let mut s = String::new();
     let _ = f.take(256).read_to_string(&mut s);

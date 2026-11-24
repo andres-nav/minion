@@ -502,7 +502,6 @@ pub fn command(v: &Value, what: &str, keys: &[&str]) -> Result<Vec<String>, Stri
     Ok(cmd)
 }
 
-/// v in seconds, or default if v is missing.
 pub fn seconds(v: &Value, default: Duration, what: &str) -> Result<Duration, String> {
     match v {
         Value::Null => Ok(default),
