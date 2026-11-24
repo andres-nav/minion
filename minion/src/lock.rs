@@ -59,7 +59,7 @@ pub fn held_by(path: &Path) -> Result<Option<String>, String> {
 /// that died. Returns how many it killed.
 pub fn reap(path: &Path) -> Result<usize, String> {
     let keep = held_by(path)?;
-    let prefix = format!("{MARK}={}", mark(path, ""));
+    let prefix = format!("{MARK}={}", mark(path, "")).into_bytes();
     let me = std::process::id().to_string();
     let mut killed = 0;
     for e in fs::read_dir("/proc")
@@ -67,19 +67,13 @@ pub fn reap(path: &Path) -> Result<usize, String> {
         .flatten()
     {
         let name = e.file_name().into_string().unwrap_or_default();
-        let Ok(pid) = name.parse::<i32>() else {
-            continue;
-        };
-        // Unreadable: not ours.
-        let Ok(env) = fs::read(e.path().join("environ")) else {
-            continue;
-        };
-        let mut vars = env.split(|&b| b == 0);
-        let Some(queue) = vars.find_map(|v| v.strip_prefix(prefix.as_bytes())) else {
-            continue;
-        };
-        let leftover = keep.as_deref().map(str::as_bytes) != Some(queue);
-        if leftover && name != me && kill(pid, SIGKILL) == 0 {
+        if let Ok(pid) = name.parse::<i32>()
+            && let Ok(env) = fs::read(e.path().join("environ")) // unreadable: not ours
+            && let Some(queue) = env.split(|&b| b == 0).find_map(|v| v.strip_prefix(&prefix[..]))
+            && keep.as_deref().map(str::as_bytes) != Some(queue)
+            && name != me
+            && kill(pid, SIGKILL) == 0
+        {
             killed += 1;
         }
     }

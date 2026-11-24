@@ -16,7 +16,10 @@ pub type Files = BTreeMap<String, PathBuf>;
 pub trait Setting {
     fn id(&self) -> &'static str;
     fn files(&self, sys: &Path) -> Files;
-    fn allows(&self, file: &Path, value: &str) -> bool;
+    /// Whether file may take value; a switch by default.
+    fn allows(&self, _file: &Path, value: &str) -> bool {
+        value == "0" || value == "1"
+    }
 
     fn read(&self, sys: &Path) -> Result<Values, String> {
         let mut values = Values::new();
@@ -183,14 +186,7 @@ impl Setting for Turbo {
     }
     fn files(&self, sys: &Path) -> Files {
         let f = sys.join("devices/system/cpu/intel_pstate/no_turbo");
-        if f.exists() {
-            Files::from([("no_turbo".into(), f)])
-        } else {
-            Files::new()
-        }
-    }
-    fn allows(&self, _: &Path, value: &str) -> bool {
-        value == "0" || value == "1"
+        Files::from_iter(f.exists().then(|| ("no_turbo".into(), f)))
     }
 }
 
@@ -207,9 +203,6 @@ impl Setting for IdleDisable {
                     .map(move |(state, d)| (format!("{cpu}/{state}"), d.join("disable")))
             })
             .collect()
-    }
-    fn allows(&self, _: &Path, value: &str) -> bool {
-        value == "0" || value == "1"
     }
 }
 
@@ -262,11 +255,12 @@ pub fn validate(sys: &Path, profile: &State) -> Result<(), String> {
     }
     for s in SETTINGS {
         for (obj, f) in s.forced(sys, &state)? {
-            match profile.get(s.id()).and_then(|p| p.get(&obj)) {
-                Some(v) if *v != f => {
-                    return Err(format!("{} {obj}: the kernel forces {f:?} here", s.id()));
-                }
-                _ => {}
+            if profile
+                .get(s.id())
+                .and_then(|p| p.get(&obj))
+                .is_some_and(|v| *v != f)
+            {
+                return Err(format!("{} {obj}: the kernel forces {f:?} here", s.id()));
             }
         }
     }

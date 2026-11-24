@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::engine;
 use crate::journal::Journal;
-use crate::queue::{SplitMix64, parse, plan};
+use crate::queue::{parse, plan, splitmix64};
 use crate::settings::{State, Values, snapshot};
 use crate::utc;
 
@@ -657,7 +657,7 @@ impl crate::run::Meter for Stamp {
         "stamp"
     }
     fn read(&self) -> Result<Value, String> {
-        Ok(json!(crate::run::clocks()?[0]))
+        Ok(json!(crate::run::clocks()[0]))
     }
     fn report(&self, start: &Value, end: &Value, _: f64) -> (Value, Vec<String>) {
         (json!([start, end]), vec![])
@@ -843,9 +843,9 @@ fn plan_is_seeded_and_every_round_is_complete() {
         format!("0024-{}-{}-r04", last.workload, last.profile)
     );
 
-    let mut rng = SplitMix64(0);
+    let mut rng = 0;
     assert_eq!(
-        (rng.next(), rng.next()),
+        (splitmix64(&mut rng), splitmix64(&mut rng)),
         (0xe220a8397b1dcdaf, 0x6e789e6aa1b965f4)
     );
 }

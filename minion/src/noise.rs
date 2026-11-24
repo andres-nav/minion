@@ -56,8 +56,7 @@ impl Meter for Noise {
     fn read(&self) -> Result<Value, String> {
         let stat = proc("stat")?;
         let ctxt = stat.lines().find_map(|l| l.strip_prefix("ctxt "));
-        let load = proc("loadavg")?;
-        let load: Vec<f64> = load
+        let load: Vec<f64> = proc("loadavg")?
             .split_whitespace()
             .take(3)
             .flat_map(str::parse)

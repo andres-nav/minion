@@ -47,17 +47,16 @@ struct Zone {
     max_uw: Option<u64>,
 }
 
-/// The monotonic and the realtime clock in ns, read back to back.
-pub fn clocks() -> Result<Vec<u64>, String> {
+/// The monotonic and the realtime clock in ns, read back to back. With these
+/// clock ids and a valid pointer, clock_gettime can't fail.
+pub fn clocks() -> Vec<u64> {
     [CLOCK_MONOTONIC, CLOCK_REALTIME]
         .into_iter()
         .map(|clock| {
             let mut ts = Timespec { sec: 0, nsec: 0 };
             // SAFETY: ts is a valid timespec for the call to fill.
-            if unsafe { clock_gettime(clock, &mut ts) } != 0 {
-                return Err("clock_gettime failed".to_string());
-            }
-            Ok(ts.sec as u64 * 1_000_000_000 + ts.nsec as u64)
+            unsafe { clock_gettime(clock, &mut ts) };
+            ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
         })
         .collect()
 }
@@ -79,7 +78,7 @@ impl Meter for Clock {
         "time"
     }
     fn read(&self) -> Result<Value, String> {
-        clocks().map(Value::from)
+        Ok(clocks().into())
     }
     fn report(&self, start: &Value, end: &Value, secs: f64) -> (Value, Vec<String>) {
         let mut v = edges(&[("start", &u64s(start)), ("end", &u64s(end))]);
@@ -300,11 +299,9 @@ pub fn run(sys: &Path, out: &Path, cmd: &[String]) -> Result<u8, String> {
     let meters = meters(sys, &["rapl".into()], "")?;
     let mut command = Command::new(prog);
     command.args(args);
-    let measured = measure(sys, &meters, command);
-    if measured.is_err() {
+    let (mut run, status) = measure(sys, &meters, command).inspect_err(|_| {
         let _ = fs::remove_file(out); // ours, and still empty
-    }
-    let (mut run, status) = measured?;
+    })?;
     run.as_object_mut().unwrap().remove("leftovers"); // the command shares our process group
     serde_json::to_writer_pretty(file, &run)
         .map_err(|e| format!("write {}: {e}", out.display()))?;
