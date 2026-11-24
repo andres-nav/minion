@@ -1,7 +1,6 @@
 //! The queue lock: one queue at a time. Its holder writes its queue id into the
-//! file, so a waiter can say whom it waits for, a privileged verb can tell a
-//! live queue's child from a stray one, and reap can tell its workloads from
-//! leftovers of a queue that died.
+//! file, so a waiter can say whom it waits for, and reap can tell its workloads
+//! from leftovers of a queue that died.
 
 use std::fs::{self, File, OpenOptions, Permissions, TryLockError};
 use std::io::{self, ErrorKind, Read};
@@ -19,7 +18,7 @@ pub const MARK: &str = "MINION_WORKLOAD";
 /// Returns the lock and, if it waited, for whom.
 pub fn take(path: &Path) -> Result<(File, Option<String>), String> {
     let err = |e| err(path, e);
-    let f = open(path, true).map_err(err)?;
+    let f = open(path).map_err(err)?;
     match f.try_lock() {
         Ok(()) => Ok((f, None)),
         Err(TryLockError::WouldBlock) => {
@@ -44,11 +43,10 @@ pub fn name(f: &File, id: &str) -> Result<(), String> {
         .map_err(|e| format!("write the queue lock: {e}"))
 }
 
-/// The queue that holds the lock, or None if it is free. Root calls this, so it
-/// never writes the file.
+/// The queue that holds the lock, or None if it is free.
 pub fn held_by(path: &Path) -> Result<Option<String>, String> {
     let err = |e| err(path, e);
-    let f = open(path, false).map_err(err)?;
+    let f = open(path).map_err(err)?;
     match f.try_lock() {
         Ok(()) => Ok(None),
         Err(TryLockError::WouldBlock) => Ok(Some(holder(&f))),
@@ -115,11 +113,11 @@ fn holder(f: &File) -> String {
 /// without O_CREAT, which protected_regular refuses for another user's file in
 /// a sticky directory such as /run/lock; with O_NONBLOCK, so a FIFO put there
 /// is refused instead of blocking; and with O_NOFOLLOW, so a symlink is refused.
-fn open(path: &Path, write: bool) -> io::Result<File> {
+fn open(path: &Path) -> io::Result<File> {
     loop {
         let open = OpenOptions::new()
             .read(true)
-            .write(write)
+            .write(true)
             .custom_flags(O_NONBLOCK | O_NOFOLLOW)
             .open(path);
         match open {

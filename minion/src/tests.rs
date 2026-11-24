@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::engine::{self, status};
+use crate::engine;
 use crate::journal::Journal;
 use crate::queue::{SplitMix64, parse, plan};
 use crate::settings::{State, Values, snapshot};
@@ -115,10 +115,10 @@ impl Fake {
             sysfs: self.sys.clone(),
             state_dir: self.state.clone(),
             lock: self.root.join("lock"),
+            lib: self.root.join("lib"),
             out: "run.json".into(),
             args: vec![],
-            held: false,
-            test: true,
+            test: strings(&["--sysfs", "the fake sysfs"]),
         }
     }
 
@@ -186,14 +186,13 @@ impl Fake {
         .map(String::from)
     }
 
-    /// A privileged verb as sudo would run it, with input on stdin.
-    fn verb(&self, verb: &str, held: bool, input: Value) -> Result<String, String> {
-        let input = if input.is_null() {
-            vec![]
-        } else {
-            input.to_string().into_bytes()
-        };
-        crate::privileged(&self.opts(), verb, held, &input)
+    /// serve's replies to the request lines, after its first line; the input
+    /// then ends, as when the queue is gone.
+    fn serve(&self, requests: &str) -> Vec<String> {
+        let mut out = vec![];
+        crate::serve::serve(&self.opts(), requests.as_bytes(), &mut out).unwrap();
+        let replies = String::from_utf8(out).unwrap();
+        replies.lines().skip(1).map(String::from).collect()
     }
 
     fn lock_is_free(&self) -> bool {
@@ -216,7 +215,7 @@ fn apply(sys: &Path, dir: &Path, p: &State) -> Result<(), String> {
 }
 
 fn restore(sys: &Path, dir: &Path) -> Result<Vec<Value>, String> {
-    engine::restore(Journal::open(dir)?, sys)
+    engine::restore(&mut Journal::open(dir)?, sys)
 }
 
 fn put(path: &Path, value: &str) {
@@ -304,10 +303,7 @@ fn apply_then_restore_gives_the_original() {
     assert_eq!(applied["cpu.turbo"]["no_turbo"], "1");
     assert_eq!(applied["cpu.idle.disable"]["cpu1/state2"], "1");
     assert_eq!(applied["cpu.idle.disable"]["cpu1/state1"], "0");
-    assert_eq!(
-        status(&f.sys, &f.state).unwrap()["changed"]["cpu.turbo"],
-        json!({"no_turbo": "1"})
-    );
+    assert!(f.journal().exists());
 
     assert!(restore(&f.sys, &f.state).unwrap().is_empty());
     assert_eq!(snapshot(&f.sys).unwrap(), before);
@@ -316,15 +312,14 @@ fn apply_then_restore_gives_the_original() {
         f.done(),
         ["open", "saved", "apply", "applied", "restored", "close"]
     );
-    assert_eq!(status(&f.sys, &f.state).unwrap(), json!({"open": false}));
 }
 
 #[test]
-fn the_state_dir_is_private() {
+fn the_state_dir_shows_only_whether_a_journal_is_open() {
     let f = Fake::new("private");
     let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
     apply(&f.sys, &f.state, &stable()).unwrap();
-    assert_eq!(mode(&f.state), 0o700);
+    assert_eq!(mode(&f.state), 0o711); // others can stat journal.jsonl, not list or read it
     assert_eq!(mode(&f.state.join("lock")), 0o600);
     assert_eq!(mode(&f.journal()), 0o600);
     restore(&f.sys, &f.state).unwrap();
@@ -352,7 +347,7 @@ fn restore_twice_is_harmless() {
     let before = snapshot(&f.sys).unwrap();
     apply(&f.sys, &f.state, &stable()).unwrap();
     restore(&f.sys, &f.state).unwrap();
-    assert_eq!(f.verb("restore", false, Value::Null), Ok(String::new()));
+    assert_eq!(f.serve("restore\n"), ["ok no journal open"]);
     assert_eq!(snapshot(&f.sys).unwrap(), before);
     assert_eq!(f.done().len(), 6);
 }
@@ -572,20 +567,22 @@ fn overrides_are_refused_as_root() {
             crate::parse_opts("restore", &a, 0),
             &format!("{flag} is refused as root"),
         );
-        assert!(crate::parse_opts("restore", &a, 1000).unwrap().test);
+        assert_eq!(crate::parse_opts("restore", &a, 1000).unwrap().test, a);
     }
     let out = strings(&["--out", "/tmp/x"]);
     refused(
         crate::parse_opts("run", &out, 0),
         "--out is refused as root",
     );
-    assert!(!crate::parse_opts("run", &out, 1000).unwrap().test);
     assert!(
-        !crate::parse_opts("queue", &strings(&["q.json"]), 0)
+        crate::parse_opts("run", &out, 1000)
             .unwrap()
             .test
+            .is_empty()
     );
-    let o = crate::parse_opts("status", &[], 0).unwrap();
+    let q = crate::parse_opts("queue", &strings(&["q.json"]), 0).unwrap();
+    assert!(q.test.is_empty());
+    let o = crate::parse_opts("restore", &[], 0).unwrap();
     assert_eq!(
         (o.sysfs.to_str(), o.state_dir.to_str()),
         (Some("/sys"), Some("/var/lib/minion"))
@@ -982,7 +979,7 @@ fn queue_runs_every_run_and_restores() {
         "0"
     );
     assert_eq!(queue["start"], json!(before));
-    assert_eq!(queue["runner"]["privileged"], "in-process");
+    assert_eq!(queue["runner"]["serve"], true);
 }
 
 #[test]
@@ -1201,13 +1198,7 @@ fn a_failing_notify_does_not_fail_the_queue() {
         assert_eq!(code, 0);
         assert_eq!(
             kinds(&dir),
-            [
-                "queue_started",
-                "run_done",
-                "run_done",
-                "restore_ok",
-                "queue_done"
-            ]
+            ["queue_started", "run_done", "run_done", "queue_done"]
         );
         assert_eq!(events(&dir).pop().unwrap()["status"], "ok");
     }
@@ -1367,34 +1358,48 @@ fn bad_queues_are_refused_before_anything_runs() {
 }
 
 #[test]
-fn privileged_verbs_go_through_sudo() {
-    let c = crate::queue::sudo_command(&["restore", "--held"]);
-    assert_eq!(c.get_program().to_str(), Some("sudo"));
-    let args: Vec<_> = c.get_args().map(|a| a.to_str().unwrap()).collect();
-    assert_eq!(args, ["-n", "minion", "restore", "--held"]);
-    let held = strings(&["--held"]);
-    assert!(crate::parse_opts("restore", &held, 0).unwrap().held); // allowed as root
-    assert!(!crate::parse_opts("restore", &[], 0).unwrap().held);
-}
-
-#[test]
 fn options_and_keys_are_refused_where_they_mean_nothing() {
     let f = Fake::new("misplaced");
     let snapshot = strings(&["snapshot", "--sysfs", f.sys.to_str().unwrap(), "--", "true"]);
     refused(crate::run(&snapshot), "-- CMD is only for run");
     let (held, out) = (strings(&["--held"]), strings(&["--out", "x"]));
     refused(
-        crate::parse_opts("status", &held, 1000),
-        "status has no option",
+        crate::parse_opts("restore", &held, 1000),
+        "restore has no option",
     );
     refused(
         crate::parse_opts("snapshot", &out, 1000),
         "snapshot has no option",
     );
-    let apply = json!({"queue": "q-1", "profile": {}, "extra": 1});
-    refused(f.verb("apply", true, apply), r#"unknown key "extra""#);
-    let restore = json!({"queue": "q-1", "profile": {}});
-    refused(f.verb("restore", true, restore), r#"unknown key "profile""#);
+}
+
+#[test]
+fn serve_answers_each_request_and_restores_when_its_pipe_closes() {
+    let f = Fake::new("serve");
+    let before = snapshot(&f.sys).unwrap();
+    let mut hello = vec![];
+    crate::serve::serve(&f.opts(), &b""[..], &mut hello).unwrap();
+    assert_eq!(hello, b"ok minion dev\n");
+    assert!(!f.state.exists()); // a serve whose queue died before asking takes nothing
+
+    let profile = json!(stable());
+    let requests = format!("apply {profile}\nstatus\nbogus\nrestore now\napply {{\"x\": {{}}}}\n");
+    let replies = f.serve(&requests);
+    assert_eq!(
+        replies[..4],
+        [
+            "ok ",
+            r#"error unknown request "status""#,
+            r#"error unknown request "bogus""#,
+            r#"error unknown request "restore now""#
+        ]
+    );
+    assert_eq!(replies[4], r#"error unknown setting "x""#);
+    assert_eq!(snapshot(&f.sys).unwrap(), before); // restored at the end of its input
+    assert!(!f.journal().exists());
+
+    let replies = f.serve(&format!("apply {profile}\nrestore\nrestore\n"));
+    assert_eq!(replies, ["ok ", "ok restored", "ok no journal open"]);
 }
 
 #[test]
@@ -1445,7 +1450,7 @@ fn drift_is_flagged_and_the_next_run_reapplies() {
 }
 
 #[test]
-fn a_late_restore_hook_leaves_the_running_queue_alone() {
+fn a_restore_by_hand_leaves_the_running_queue_alone() {
     let _serial = serial();
     let f = Fake::new("queue-hook");
     let before = snapshot(&f.sys).unwrap();
@@ -1463,19 +1468,9 @@ fn a_late_restore_hook_leaves_the_running_queue_alone() {
     let b = json!({"name": "b", "profiles": {"fast": stable()},
                    "workloads": {"w": {"cmd": ["sh", "-c", script]}}, "reps": 1});
     let (code, ()) = f.alongside(b, &started, || {
-        assert_eq!(hook(), Ok(0)); // a's always hook, late
+        assert_eq!(hook(), Ok(0)); // says b holds the lock, and does nothing
         let reap = ["reap", "--lock", lock.to_str().unwrap()].map(String::from);
         assert_eq!(crate::run(&reap), Ok(0)); // spares b's workload
-        // a's stray privileged children, late, and an apply by hand: all refused.
-        let other = profile(json!({"cpu.governor": {"policy0": "powersave"}}));
-        let stray = [
-            f.verb("apply", true, json!({"queue": "a-1", "profile": other})),
-            f.verb("restore", true, json!({"queue": "a-1"})),
-            f.verb("apply", false, json!(other)),
-        ];
-        for r in stray {
-            refused(r, "nothing done");
-        }
         assert_eq!(
             snapshot(&f.sys).unwrap()["cpu.governor"]["policy0"],
             "performance"
@@ -1488,7 +1483,7 @@ fn a_late_restore_hook_leaves_the_running_queue_alone() {
     assert_eq!((&run["drift"], &run["exit"]), (&json!(false), &json!(0)));
     assert_eq!(snapshot(&f.sys).unwrap(), before);
 
-    // With no queue running, the hook restores a leftover journal.
+    // With no queue running, it restores a leftover journal.
     apply(&f.sys, &f.state, &stable()).unwrap();
     assert_eq!(hook(), Ok(0));
     assert_eq!(snapshot(&f.sys).unwrap(), before);
@@ -1516,10 +1511,7 @@ fn a_notify_is_marked_and_killed_with_its_process_group() {
         "the notify was not killed"
     );
     assert_eq!(code, 0);
-    assert_eq!(
-        kinds(&dir),
-        ["queue_started", "run_done", "restore_ok", "queue_done"]
-    );
+    assert_eq!(kinds(&dir), ["queue_started", "run_done", "queue_done"]);
     let id = dir.file_name().unwrap().to_str().unwrap();
     let mark = crate::lock::mark(&f.root.join("lock"), id);
     let pids = fs::read_to_string(&pids).unwrap();
@@ -1609,43 +1601,6 @@ fn restore_refuses_a_lock_that_is_not_a_regular_file() {
     fs::write(f.root.join("file"), "").unwrap();
     std::os::unix::fs::symlink(f.root.join("file"), &lock).unwrap();
     refused(crate::run(&f.restore_args()), "symbolic links");
-}
-
-#[test]
-fn stray_privileged_children_of_a_dead_queue_do_nothing() {
-    let _serial = serial();
-    let f = Fake::new("stray");
-    let before = snapshot(&f.sys).unwrap();
-    let q = |id: &str| json!({"queue": id, "profile": stable()});
-
-    // A live queue's children act.
-    let (lock, _) = crate::lock::take(&f.root.join("lock")).unwrap();
-    crate::lock::name(&lock, "q-1").unwrap();
-    assert_eq!(f.verb("apply", true, q("q-1")), Ok(String::new()));
-    assert_eq!(
-        f.verb("restore", true, json!({"queue": "q-1"})),
-        Ok("restored".into())
-    );
-    refused(
-        f.verb("apply", true, q("q-2")),
-        r#"queue "q-2" doesn't hold the queue lock"#,
-    );
-
-    // q-1 is killed with -9 while an apply is still starting up.
-    drop(lock);
-    assert_eq!(f.verb("restore", false, Value::Null), Ok(String::new())); // its always hook
-    refused(f.verb("apply", true, q("q-1")), "nothing done");
-    refused(
-        f.verb("restore", true, json!({"queue": "q-1"})),
-        r#"queue "q-1" doesn't hold the queue lock"#,
-    );
-    assert_eq!(snapshot(&f.sys).unwrap(), before);
-    assert!(!f.journal().exists());
-
-    // By hand, with no queue running.
-    assert_eq!(f.verb("apply", false, json!(stable())), Ok(String::new()));
-    assert_eq!(f.verb("restore", false, Value::Null), Ok("restored".into()));
-    assert_eq!(snapshot(&f.sys).unwrap(), before);
 }
 
 #[test]

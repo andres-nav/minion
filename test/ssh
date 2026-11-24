@@ -1,6 +1,7 @@
 #!/bin/sh
 # Stands in for ssh in the e2e test: runs the remote command on this machine,
-# from $HOME (or $E2E_REMOTE_HOME) and with a clean environment, as sshd would. It ignores the options
+# from $HOME (or $E2E_REMOTE_HOME) and with a clean environment, as sshd would, but for the
+# e2e's GRU_TEST_DESTDIR. It ignores the options
 # and has no control master (-O and -N fail). A host ending in .invalid can't be reached.
 while [ $# -gt 0 ]; do
   case $1 in
@@ -14,4 +15,4 @@ case $1 in *.invalid) echo "ssh: Could not resolve hostname $1" >&2; exit 255 ;;
 shift
 [ $# -gt 0 ] || exit 255
 HOME=${E2E_REMOTE_HOME:-$HOME}
-cd "$HOME" && exec env -i HOME="$HOME" PATH="$PATH" TZ="${TZ:-}" sh -c "$*"
+cd "$HOME" && exec env -i HOME="$HOME" PATH="$PATH" TZ="${TZ:-}" GRU_TEST_DESTDIR="${GRU_TEST_DESTDIR:-}" sh -c "$*"
