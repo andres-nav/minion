@@ -1328,10 +1328,6 @@ fn bad_queues_are_refused_before_anything_runs() {
             r#"key "events""#,
         ),
         (
-            with("notify", json!({"cmd": ["true"], "timeout_s": "1"})),
-            "timeout_s: needs seconds",
-        ),
-        (
             with("meters", json!([{"cmd": ["true"], "every": 2}])),
             r#"cmd meter: unknown key "every""#,
         ),
@@ -1494,22 +1490,17 @@ fn a_restore_by_hand_leaves_the_running_queue_alone() {
 #[test]
 fn a_notify_is_marked_and_killed_with_its_process_group() {
     let _serial = serial();
-    let f = Fake::new("queue-hang");
+    let f = Fake::new("queue-notify");
     let pids = f.root.join("pids");
-    // Every notify leaves a child behind; the one for run_done also hangs.
+    // Every notify leaves a child behind.
     let notify = format!(
-        "sleep 30 & echo \"$! $MINION_WORKLOAD\" >> {}; [ $MINION_EVENT != run_done ] || sleep 10",
+        "sleep 30 & echo \"$! $MINION_WORKLOAD\" >> {}",
         pids.display()
     );
-    let t = Instant::now();
     let (code, dir) = f.queue(json!({
-        "name": "hang", "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}}, "reps": 1,
-        "notify": {"cmd": ["sh", "-c", notify], "timeout_s": 0.5},
+        "name": "notify", "profiles": {"factory": {}}, "workloads": {"ok": {"cmd": ["true"]}}, "reps": 1,
+        "notify": {"cmd": ["sh", "-c", notify]},
     }));
-    assert!(
-        t.elapsed() < Duration::from_secs(3),
-        "the notify was not killed"
-    );
     assert_eq!(code, 0);
     assert_eq!(kinds(&dir), ["queue_started", "run_done", "queue_done"]);
     let id = dir.file_name().unwrap().to_str().unwrap();

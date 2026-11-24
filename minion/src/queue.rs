@@ -38,7 +38,6 @@ pub struct Queue {
     pub meters: Vec<Value>,
     pub out: PathBuf,
     pub notify: Vec<String>,
-    pub notify_timeout: Duration,
     pub thermal: Option<Thermal>,
 }
 
@@ -179,7 +178,6 @@ impl Running<'_> {
             "resolved": {
                 "seed": self.q.seed, "settle_s": self.q.settle.as_secs_f64(),
                 "meters": self.q.meters, "profiles": targets,
-                "notify_timeout_s": self.q.notify_timeout.as_secs_f64(),
             },
             "start": start,
             "time": run::edges(&[("start", started)]),
@@ -341,20 +339,18 @@ impl Running<'_> {
         let Some((prog, args)) = self.q.notify.split_first() else {
             return;
         };
-        let env = [
+        let mut cmd = workload(prog, args, &lock::mark(&self.o.lock, &self.id));
+        cmd.envs([
             ("MINION_EVENT", event),
             ("MINION_QUEUE", self.id.as_str()),
             ("MINION_RUN", run),
             ("MINION_STATUS", status),
             ("MINION_DETAIL", detail),
-        ];
-        let mut cmd = workload(prog, args, &lock::mark(&self.o.lock, &self.id));
-        cmd.envs(env);
-        let timeout = self.q.notify_timeout;
-        match run_with_timeout(cmd, timeout) {
+        ]);
+        match run_with_timeout(cmd, NOTIFY_TIMEOUT) {
             Ok(Some(o)) if o.status.success() => {}
             Ok(Some(o)) => log(format!("notify {event}: {}", o.status)),
-            Ok(None) => log(format!("notify {event}: killed after {timeout:?}")),
+            Ok(None) => log(format!("notify {event}: killed after {NOTIFY_TIMEOUT:?}")),
             Err(e) => log(format!("notify {event}: {prog}: {e}")),
         }
     }
@@ -462,13 +458,8 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
         out: get("out").as_str().ok_or("out: needs a string")?.into(),
         notify: match get("notify") {
             Value::Null => vec![],
-            n => command(n, "notify", &["cmd", "timeout_s"])?,
+            n => command(n, "notify", &["cmd"])?,
         },
-        notify_timeout: seconds(
-            &get("notify")["timeout_s"],
-            NOTIFY_TIMEOUT,
-            "notify timeout_s",
-        )?,
         thermal: match get("thermal") {
             Value::Null => None,
             t => Some(Thermal {
