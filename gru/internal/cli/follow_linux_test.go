@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeJob makes a job dir of this host whose wrapper is script, run in the dir.
@@ -53,5 +54,29 @@ func TestFollowWithoutStatus(t *testing.T) {
 	out.Reset()
 	if _, err := follow(dir, &out); err == nil || !strings.Contains(err.Error(), "another host") || out.String() != "early\n" {
 		t.Fatalf("other host: err %v out %q", err, out.String())
+	}
+}
+
+// When the reader goes away (gru attach was stopped, ssh closed), follow ends
+// at once rather than sleeping until the job writes or ends.
+func TestFollowEndsWhenTheReaderLeaves(t *testing.T) {
+	h, _ := os.Hostname()
+	dir, _ := fakeJob(t, h, "sleep 30")
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { _, err := follow(dir, w); done <- err }()
+	b := make([]byte, 6)
+	r.Read(b) // "early\n": follow is up
+	r.Close()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("follow ended without an error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("follow still runs after its reader left")
 	}
 }

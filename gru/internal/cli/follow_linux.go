@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -45,7 +46,14 @@ func follow(dir string, w io.Writer) (int, error) {
 			}
 		}
 	}
-	events := make([]syscall.EpollEvent, 2)
+	// A pipe or socket whose reader left (attach stopped, ssh gone) reports an
+	// error or hangup, which epoll always watches for. A file can't be watched.
+	out := -1
+	if f, ok := w.(*os.File); ok {
+		out = int(f.Fd())
+		syscall.EpollCtl(ep, syscall.EPOLL_CTL_ADD, out, &syscall.EpollEvent{Fd: int32(out)})
+	}
+	events := make([]syscall.EpollEvent, 3)
 	buf := make([]byte, 4096)
 	for done := pidfd < 0; ; {
 		if _, err := io.Copy(w, log); err != nil {
@@ -62,9 +70,12 @@ func follow(dir string, w io.Writer) (int, error) {
 			return 1, err
 		}
 		for _, ev := range events[:n] {
-			if int(ev.Fd) == pidfd {
+			switch int(ev.Fd) {
+			case pidfd:
 				done = true
-			} else {
+			case out:
+				return 1, errors.New("the reader left")
+			default:
 				syscall.Read(in, buf) // drain; the copy above reads the new bytes
 			}
 		}
