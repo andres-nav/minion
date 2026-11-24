@@ -439,7 +439,7 @@ check_utc() {
       "$T"/proj/results/energy
     cat "$T"/ps-*.out "$T"/state*/jobs/*/log
     find "$T"/remote/proj/results "$T"/proj/results -name '*.json*' -exec cat {} +
-  } | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?Z?|[0-9]{8}[T-][0-9]{6}(\.[0-9]+)?Z?' |
+  } | sed "s|$root||g" | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2})?(\.[0-9]+)?Z?|[0-9]{8}[T-][0-9]{6}(\.[0-9]+)?Z?' |
     tr ' ' _ | sort -u); do
     s=$(echo "$t" | sed -E 's/^(....)-?(..)-?(..)[T_-]?(..):?(..).*/\1-\2-\3 \4:\5/')
     s=$(date -u -d "$s" +%s 2> /dev/null || echo 0)
