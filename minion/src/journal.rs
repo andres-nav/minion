@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 use crate::utc;
 
 /// The open journal of the state dir, held under an exclusive lock. The lock is
-/// a separate file because the journal itself is renamed on close.
+/// a separate file because the journal itself is renamed on close. The state
+/// dir is 0711, so anyone can see whether journal.jsonl exists (a journal is
+/// open) but not list or read it.
 pub struct Journal {
     dir: PathBuf,
     file: Option<File>,
@@ -19,7 +21,7 @@ pub struct Journal {
 impl Journal {
     /// Locks the state dir and loads its journal, dropping an incomplete last line.
     pub fn open(dir: &Path) -> Result<Journal, String> {
-        create_dir(dir)?;
+        create_dir(dir, 0o711)?;
         let lock = OpenOptions::new()
             .write(true)
             .create(true)
@@ -75,24 +77,15 @@ impl Journal {
         Ok(())
     }
 
-    /// Moves the journal to done/<UTC time to the ns>.jsonl.
-    pub fn close(self) -> Result<(), String> {
+    /// Moves the journal to done/<UTC time to the ns>.jsonl, keeping the lock.
+    pub fn close(&mut self) -> Result<(), String> {
         let done = self.dir.join("done");
-        create_dir(&done)?;
+        create_dir(&done, 0o700)?;
         let to = done.join(format!("{}.jsonl", utc::stamp(utc::now_ns(), true)));
         fs::rename(self.dir.join("journal.jsonl"), &to).map_err(|e| err("rename to", &to, e))?;
+        (self.file, self.lines) = (None, vec![]);
         sync_dir(&done)?;
         sync_dir(&self.dir)
-    }
-}
-
-/// Reads the journal without the lock, for status. Missing means none is open.
-pub fn read(dir: &Path) -> Result<Vec<Value>, String> {
-    let path = dir.join("journal.jsonl");
-    match fs::read_to_string(&path) {
-        Ok(s) => parse(whole(&s)),
-        Err(e) if e.kind() == ErrorKind::NotFound => Ok(vec![]),
-        Err(e) => Err(err("read", &path, e)),
     }
 }
 
@@ -107,10 +100,10 @@ fn parse(s: &str) -> Result<Vec<Value>, String> {
         .collect()
 }
 
-/// Creates dir if missing, private to its owner, fsyncing its parent so the
-/// entry survives a crash.
-fn create_dir(dir: &Path) -> Result<(), String> {
-    match DirBuilder::new().mode(0o700).create(dir) {
+/// Creates dir if missing, with mode, fsyncing its parent so the entry survives
+/// a crash.
+fn create_dir(dir: &Path, mode: u32) -> Result<(), String> {
+    match DirBuilder::new().mode(mode).create(dir) {
         Ok(()) => sync_dir(&dir.join("..")),
         Err(e) if e.kind() == ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(err("create", dir, e)),

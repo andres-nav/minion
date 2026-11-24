@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # End-to-end test of gru and minion on this machine, with no ssh and no
-# root: test/ssh runs the "remote" commands here, and the runner works on a fake
-# sysfs and powercap tree. Everything lives in one temp dir, removed at the end.
+# root: test/ssh runs the "remote" commands here, test/sudo runs serve as this
+# user, and the runner works on a fake sysfs and powercap tree. Everything lives in one temp dir, removed at the end.
 # Run it with `make e2e`; E2E_KEEP=1 keeps the temp dir. Linux only.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -14,13 +14,23 @@ done
 
 T=$(mktemp -d)
 export TZ=Europe/Zurich HOME=$T/home GRU_CONFIG=$T/config.json PATH=$T/bin:$PATH
+# where root's files would be: the root copies of minion and the sudoers lines
+export GRU_TEST_DESTDIR=$T/root
 [ "$(date +%z)" != +0000 ] || { echo "e2e: TZ=$TZ did not load (no tzdata?)" >&2; exit 2; }
 # test/ssh runs "remote" commands with this home, so ~ differs on both sides.
 export E2E_REMOTE_HOME=$T/rhome
 mkdir -p "$T/bin" "$HOME" "$E2E_REMOTE_HOME" "$T/proj/work"
-ln -s "$root/gru/bin/gru" "$root/test/ssh" "$T/bin/"
-printf '#!/bin/sh\necho "sudo $*" >> %s/sudo.log\nexit 1\n' "$T" > "$T/bin/sudo"
-chmod +x "$T/bin/sudo"
+ln -s "$root/gru/bin/gru" "$root/test/ssh" "$root/test/sudo" "$T/bin/"
+V=$(gru version | cut -d' ' -f2)
+lib=$GRU_TEST_DESTDIR/usr/local/lib/gru
+# setup does by hand what `gru setup` will: the root copy of this minion build,
+# named as gru names its upload, and the sudoers line that lets serve run.
+setup() {
+  mkdir -p "$lib" "$GRU_TEST_DESTDIR/etc/sudoers.d"
+  cp "$M" "$lib/minion-$V-linux-$arch-$(sha256sum < "$M" | cut -c1-12)"
+  echo "$(id -un) ALL=(root) NOPASSWD: $lib/minion-* serve" > "$GRU_TEST_DESTDIR/etc/sudoers.d/gru-minion-$(id -un)"
+}
+setup
 
 cleanup() {
   for p in "$T"/state*/jobs/*/pid; do
@@ -49,8 +59,8 @@ put "$rapl/max_energy_range_uj" 262143328850
 put "$rapl/constraint_0_max_power_uw" 150000000
 cp -r "$sys/devices" "$T/sys.orig"
 
-# The project: a queue task on the fake machine, cleaned up by the always hooks.
-R="--sysfs $sys --state-dir $T/runner --lock $T/lock"
+# The project: a queue task on the fake machine, whose leftovers the always hook reaps.
+R="--sysfs $sys --state-dir $T/runner --lock $T/lock --lib $lib"
 cat > "$GRU_CONFIG" << EOF
 {
   "hosts": {
@@ -65,7 +75,7 @@ cat > "$T/proj/.gru.json" << EOF
   "use": "energy",
   "templates": {"energy": {
     "tasks": {"energy": "\"\$GRU_MINION\" queue $R \$GRU_ARGS"},
-    "always": ["\"\$GRU_MINION\" reap $R", "\"\$GRU_MINION\" restore $R"],
+    "always": ["\"\$GRU_MINION\" reap $R"],
     "fetch": ["results"],
     "fetch_into": "$T/fetched/{ts}/{id}"
   }}
@@ -153,13 +163,15 @@ notified() {
   for e; do grep -q "^$e $q-" "$T/notify.log" || fail "no $e notification for $q"; done
 }
 
-# The fake machine is as it was: settings back, journal closed, lock free, no sudo.
+# The fake machine is as it was, once no serve runs: settings back, journal
+# closed, lock free.
 machine_clean() {
+  wait_for 10 no_serve
   diff -r "$T/sys.orig" "$sys/devices" || fail "settings not restored"
   [ ! -e "$T/runner/journal.jsonl" ] || fail "journal still open"
   flock -n "$T/lock" true || fail "queue lock still held"
-  [ ! -e "$T/sudo.log" ] || fail "called sudo: $(cat "$T/sudo.log")"
 }
+no_serve() { ! pgrep -f "$lib/minion-.* serve" > /dev/null; }
 
 check_remote() {
   queue remote 2 "$BASE, $PERF" "$OK, $FAIL"
@@ -236,7 +248,7 @@ check_detach() {
   exists "$T/fetched/*/$id/results/energy/slow-*/events.jsonl" || fail "fetch: no events.jsonl"
   exists "$T/fetched/*/$id/_gru/log" || fail "fetch: no job log"
 
-  # A runner killed mid-run: its workload dies, and the always hooks reap and restore.
+  # A runner killed mid-run: its workload dies, its serve restores, and the always hook reaps.
   # The sleeps are named after this run, so a parallel e2e can't be mistaken for it.
   local s=1$$
   queue crash 1 "$PERF" "\"slow\": {\"cmd\": [\"sh\", \"-c\", \"sleep ${s}1 & sleep ${s}2\"]}"
@@ -247,6 +259,7 @@ check_detach() {
   [ "$(cat "$T/state/jobs/$crash/status")" = 137 ] || fail "crashed job: want status 137"
   ! pgrep -a -f "^sleep ${s}[12]$" || fail "the workload outlived its runner"
   machine_clean
+  grep -q "the queue is gone: restored" "$T/state/jobs/$crash/log" || fail "serve didn't restore"
 
   queue next 1 "$PERF" "$OK"
   gru run energy --host fake --arg next.json || fail "the next queue failed"
@@ -272,8 +285,8 @@ check_two() {
   touch "$T/go1"
   wait_for 30 exists "$T/remote/proj/results/energy/second-*/runs/0001-*/stdout"
   # The first job's always hook, run late, must not undo the second queue's profile.
-  "$M" restore $R || fail "late restore"
-  grep -qx performance "$gov" || fail "a late restore undid the second queue's profile"
+  "$M" restore $R | grep -q "nothing done" || fail "a restore by hand ran while a queue runs"
+  grep -qx performance "$gov" || fail "a restore by hand undid the second queue's profile"
   touch "$T/go2"
   wait_for 30 test -e "$T/state/jobs/$a/status"
   wait_for 30 test -e "$T/state/jobs/$b/status"
@@ -372,9 +385,11 @@ EOF
   grep -qx one "$T/show.out" || fail "--no-sync synced"
   # local is localhost: the job runs here, in the project dir, with nothing to sync or fetch.
   want 0 here gru run show --host local --no-sync
-  # A local job gets the minion bundled with gru; a remote one the upload.
+  # A local job gets minion like a remote one: a copy named by its hash.
   want 0 minion-local gru run minion --host local --no-sync
-  grep -qx "minion=$(readlink -f "$M")" "$T/minion-local.out" || fail "local GRU_MINION is not $M"
+  cmp "$(sed -n 's/^minion=//p' "$T/minion-local.out")" "$M" || fail "local GRU_MINION is not a copy of $M"
+  grep -q "^minion=$HOME/.gru/bin/minion-$V-linux-$arch-" "$T/minion-local.out" ||
+    fail "local GRU_MINION is not named by its hash in the state dir"
   want 0 minion-remote gru run minion --no-sync
   cmp "$(sed -n 's/^minion=//p' "$T/minion-remote.out")" "$M" || fail "remote GRU_MINION is not the upload"
   grep -qx second "$T/here.out" || fail "--host local: not run in the project dir"
@@ -488,14 +503,49 @@ check_exit() {
   want 0 cmdm gru run energy --host fake --arg cmdm.json
   has "$(echo "$T"/remote/proj/results/energy/cmdm-*/runs/*/run.json)" '"delta":{"uj":2000000.0}'
 
-  # The privileged verbs by hand, with the profile and the queue id on stdin.
-  echo '{"cpu.governor": {"policy0": "performance"}}' | "$M" apply $R || fail "minion apply"
-  grep -qx performance "$gov" || fail "apply: governor not set"
-  "$M" status $R | tr -d ' \n' | grep -q '"policy0":"performance"' || fail "status: no change shown"
-  echo '{"queue": "nope"}' | "$M" restore --held $R 2> "$T/held.out" && fail "restore --held ran for another queue"
-  grep -q "doesn't hold the queue lock" "$T/held.out" || fail "restore --held: no clear message"
-  "$M" restore $R || fail "minion restore"
+}
+
+# Root goes through serve, which `gru setup` allows: without it a queue that
+# changes settings stops before touching anything, and serve restores what a
+# dead queue left. Others see only whether a journal is open.
+check_serve() {
+  local u n
+  queue perfq 1 "$PERF" "$OK"
+  rm "$GRU_TEST_DESTDIR"/etc/sudoers.d/*
+  want 77 noroot gru run energy --host fake --arg perfq.json
+  grep -qF 'minion needs root on fake: run `gru setup --host fake` once in a terminal' "$T/noroot.out" ||
+    fail "no setup: no clear message"
+  ! exists "$T/remote/proj/results/energy/perfq-*" || fail "a queue without root left results"
   machine_clean
+  # A queue that sets nothing needs no root, and calls no sudo.
+  queue plain 1 "$BASE" "$OK"
+  n=$(wc -l < "$GRU_TEST_DESTDIR/sudo.log")
+  want 0 plain gru run energy --host fake --arg plain.json
+  has "$(echo "$T"/remote/proj/results/energy/plain-*/queue.json)" '"serve":false'
+  [ "$(wc -l < "$GRU_TEST_DESTDIR/sudo.log")" = "$n" ] || fail "a queue that sets nothing called sudo"
+
+  # A serve killed with -9 leaves its journal open: a queue that sets nothing
+  # then stops without root, and with it restores first.
+  u=$(echo "$T"/state/bin/minion-"$V"-linux-"$arch"-*)
+  mkfifo "$T/in"
+  "$u" serve --sysfs "$sys" --state-dir "$T/runner" < "$T/in" > "$T/serve.out" &
+  exec 3> "$T/in"
+  echo 'apply {"cpu.governor": {"policy0": "performance"}}' >&3
+  wait_for 10 grep -qx 'ok ' "$T/serve.out"
+  kill -9 $!
+  exec 3>&-
+  [ "$(stat -c %a "$T/runner") $(stat -c %a "$T/runner/journal.jsonl")" = "711 600" ] ||
+    fail "the state dir is not 0711 with a 0600 journal"
+  want 77 leftover gru run energy --host fake --arg plain.json
+  grep -q "a previous queue left settings applied on fake" "$T/leftover.out" || fail "leftover: no clear message"
+  grep -qx performance "$gov" || fail "the leftover was touched without root"
+  setup
+  want 0 plain2 gru run energy --host fake --arg plain.json
+  grep -q "leftover journal: restored" "$T/plain2.out" || fail "the leftover was not restored first"
+  machine_clean
+  "$u" restore $R | grep -qx "no journal open" || fail "restore by hand: no clear message"
+  [ "$(stat -c %a "$T/runner/done") $(stat -c %a "$T"/runner/done/* | sort -u)" = "700 600" ] ||
+    fail "done/ is not 0700 with 0600 journals"
 }
 
 check_snapshot() {
@@ -509,9 +559,10 @@ check_snapshot() {
 
 failed=0
 for c in "remote:remote path (fake ssh)" "localhost:--host localhost" \
-  "detach:detach, ps, attach, kill and a crashed runner" "two:two queues and a late restore" \
+  "detach:detach, ps, attach, kill and a crashed runner" "two:two queues and a restore by hand" \
   "cli:every gru option" "utc:every time in UTC (TZ=$TZ)" \
-  "exit:exit codes, broken queue files, privileged verbs" "snapshot:snapshot and run on the real /sys"; do
+  "exit:exit codes and broken queue files" "serve:root through serve" \
+  "snapshot:snapshot and run on the real /sys"; do
   SECONDS=0
   if (cd "$T/proj" && "check_${c%%:*}") > "$T/${c%%:*}.log" 2>&1; then
     echo "PASS ${c#*:} ($SECONDS s)"

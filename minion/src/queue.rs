@@ -16,9 +16,10 @@ use crate::ffi::{
 };
 use crate::lock;
 use crate::run::{self, Meter, STOP, WORKLOAD};
+use crate::serve::{NEEDS_ROOT, Root};
 use crate::settings::{self, State};
 use crate::utc::{self, log, now_ns};
-use crate::{NAME, Opts, VERSION};
+use crate::{Opts, VERSION};
 
 #[rustfmt::skip]
 const KEYS: [&str; 10] = ["name", "profiles", "workloads", "reps", "seed", "settle_s", "meters", "out", "notify", "thermal"];
@@ -73,7 +74,23 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     run::meters(&o.sysfs, &q.meters, "")?; // refuses bad meters before anything runs
     let plan = plan(&q);
 
+    // A queue that changes settings needs root, checked before anything is
+    // touched; one that doesn't needs it only to restore what a dead serve left.
+    let sets = q.profiles.values().flatten().any(|(_, v)| !v.is_empty());
+    let root = if sets { Root::start(o) } else { None };
+    if sets && root.is_none() {
+        return Ok(NEEDS_ROOT);
+    }
     let (lock, waited) = lock::take(&o.lock)?;
+    let left = !sets && o.state_dir.join("journal.jsonl").exists();
+    let root = if left { Root::start(o) } else { root };
+    if left && root.is_none() {
+        let h = std::env::var("GRU_HOST").unwrap_or("<host>".into());
+        log(format!(
+            "a previous queue left settings applied on {h}: run `gru minion restore --host {h}`"
+        ));
+        return Ok(NEEDS_ROOT);
+    }
     stop_on_signals();
     let started = run::clocks()?;
     let (id, dir) = new_dir(&q.out, &q.name)?;
@@ -88,6 +105,7 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
         .map_err(|e| format!("create {}/events.jsonl: {e}", dir.display()))?;
     let mut r = Running {
         o,
+        root,
         q: &q,
         dir,
         meters,
@@ -118,9 +136,10 @@ pub fn run(o: &Opts, file: &Path, euid: u32) -> Result<u8, String> {
     Ok(code)
 }
 
-/// A queue that holds the queue lock.
+/// A queue that holds the queue lock, and its serve if it needs one.
 struct Running<'a> {
     o: &'a Opts,
+    root: Option<Root>,
     q: &'a Queue,
     dir: PathBuf,
     meters: Vec<Box<dyn Meter>>,
@@ -165,8 +184,7 @@ impl Running<'_> {
             "start": start,
             "time": run::edges(&[("start", started)]),
             "runner": {
-                "version": VERSION, "lock": self.o.lock,
-                "privileged": if self.o.test { "in-process" } else { "sudo" },
+                "version": VERSION, "lock": self.o.lock, "serve": self.root.is_some(),
             },
             "gru": gru,
         });
@@ -191,8 +209,10 @@ impl Running<'_> {
                 break;
             }
             let target = &targets[&r.profile];
-            if current != Some(&r.profile) {
-                self.privileged("apply", Some(target))
+            if current != Some(&r.profile)
+                && let Some(root) = &mut self.root
+            {
+                root.ask(&format!("apply {}", json!(target)))
                     .map_err(|e| format!("apply {}: {e}", r.profile))?;
                 current = Some(&r.profile);
             }
@@ -289,36 +309,21 @@ impl Running<'_> {
         json!({"baseline": baseline, "now": now, "waited_s": waited, "hot": hot})
     }
 
-    /// Puts the original settings back and sends restore_ok (for the leftover
-    /// journal only if one was open) or restore_failed.
+    /// Restores through serve, if the queue has one, and sends restore_ok (for
+    /// the leftover journal only if one was open) or restore_failed.
     fn restore(&mut self, what: &str) -> bool {
-        match self.privileged("restore", None) {
-            Ok(said) if said.is_empty() && what == "leftover journal" => {}
-            Ok(said) if said.is_empty() => {
-                self.send("restore_ok", "", "ok", &format!("{what}: none open"))
-            }
-            Ok(said) => self.send("restore_ok", "", "ok", &format!("{what}: {said}")),
+        let Some(root) = &mut self.root else {
+            return true;
+        };
+        match root.ask("restore") {
+            Ok(s) if what == "leftover journal" && !s.starts_with("restored") => {}
+            Ok(s) => self.send("restore_ok", "", "ok", &format!("{what}: {s}")),
             Err(e) => {
                 self.send("restore_failed", "", "failed", &format!("{what}; {e}"));
                 return false;
             }
         }
         true
-    }
-
-    /// A privileged verb with this queue's id: `sudo -n minion <verb> --held`
-    /// with the input on stdin, or in-process on a test tree. Returns what it says.
-    fn privileged(&self, verb: &str, profile: Option<&State>) -> Result<String, String> {
-        let mut input = json!({"queue": self.id});
-        if let Some(p) = profile {
-            input["profile"] = json!(p);
-        }
-        let input = input.to_string();
-        if self.o.test {
-            crate::privileged(self.o, verb, true, input.as_bytes())
-        } else {
-            sudo(&[verb, "--held"], input.as_bytes())
-        }
     }
 
     /// Appends the event to events.jsonl, logs it and runs the notify command
@@ -399,31 +404,6 @@ pub fn workload(prog: &str, args: &[String], mark: &str) -> Command {
         });
     }
     c
-}
-
-pub fn sudo_command(args: &[&str]) -> Command {
-    let mut c = Command::new("sudo");
-    c.args(["-n", NAME])
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    c
-}
-
-/// Runs a privileged verb through sudo. Returns what it says on stdout.
-fn sudo(args: &[&str], input: &[u8]) -> Result<String, String> {
-    let mut child = sudo_command(args)
-        .spawn()
-        .map_err(|e| format!("sudo: {e}"))?;
-    let _ = child.stdin.take().unwrap().write_all(input); // a failure shows in the exit status
-    let out = child.wait_with_output().map_err(|e| format!("sudo: {e}"))?;
-    if !out.status.success() {
-        let text = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let cmd = args.join(" ");
-        return Err(format!("sudo -n {NAME} {cmd}: {}: {text}", out.status));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Creates <out>/<name>-<UTC time>, with -2, -3, ... if a queue of that name
@@ -525,11 +505,7 @@ pub fn parse(v: &Value) -> Result<Queue, String> {
 }
 
 /// v as an object that has only the given keys.
-pub fn object<'a>(
-    v: &'a Value,
-    what: &str,
-    keys: &[&str],
-) -> Result<&'a Map<String, Value>, String> {
+fn object<'a>(v: &'a Value, what: &str, keys: &[&str]) -> Result<&'a Map<String, Value>, String> {
     let m = v.as_object().ok_or(format!("{what}: needs an object"))?;
     match m.keys().find(|k| !keys.contains(&k.as_str())) {
         Some(k) => Err(format!("{what}: unknown key {k:?}")),

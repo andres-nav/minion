@@ -1,0 +1,26 @@
+#!/bin/sh
+# Stands in for sudo in the e2e test: runs the command as this user and logs it
+# to $GRU_TEST_DESTDIR/sudo.log. With -n (no password to ask for) it runs only
+# what a line "<user> ALL=(root) NOPASSWD: <glob> <arg>" in
+# $GRU_TEST_DESTDIR/etc/sudoers.d allows, with any test options after <arg>.
+# With -l it only says so.
+echo "sudo $*" >> "$GRU_TEST_DESTDIR/sudo.log"
+n= l=
+while :; do
+  case $1 in
+    -n) n=1 ;;
+    -l) l=1 ;;
+    *) break ;;
+  esac
+  shift
+done
+if [ -n "$n" ]; then
+  ok=
+  for f in "$GRU_TEST_DESTDIR"/etc/sudoers.d/*; do
+    [ -f "$f" ] && read -r user _ _ cmd arg < "$f" && [ "$user" = "$(id -un)" ] || continue
+    case $1 in $cmd) [ "$2" = "$arg" ] && ok=1 ;; esac
+  done
+  [ -n "$ok" ] || { echo "sudo: a password is required" >&2; exit 1; }
+fi
+[ -z "$l" ] || { echo "$1"; exit 0; }
+exec "$@"
