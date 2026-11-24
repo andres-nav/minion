@@ -433,9 +433,7 @@ needs a real host.
 4. Restricting other users (the lock, `AllowedCPUs` on shared slices, RAPL limits) needs root and
    the agreement of the admins and those users. Which machines opt in, with which maximum and
    admin group? On shared machines, keep it opt-in and time-limited.
-5. The Cascade Lake host runs kernel 5.15: no osnoise no-workload mode, and frequency reads
-   interrupt the CPU. Move it to Ubuntu 24.04 (6.8), or only record the gap?
-6. How do we enable the `perf` meter on the Ubuntu hosts: an admin sysctl, or `CAP_PERFMON` for
+5. How do we enable the `perf` meter on the Ubuntu hosts: an admin sysctl, or `CAP_PERFMON` for
    the runner?
-7. Isolation needs a delegated cgroup; without unit files, the plan is a transient scope. Is a
+6. Isolation needs a delegated cgroup; without unit files, the plan is a transient scope. Is a
    transient (not installed) unit acceptable?
