@@ -1,0 +1,8 @@
+#!/bin/sh
+# Stands in for visudo -cf FILE in the e2e test: the real one where there is
+# one (it checks a file as any user), else a check of gru's three lines.
+[ "$1" = -cf ] || exit 2
+[ ! -x /usr/sbin/visudo ] || exec /usr/sbin/visudo -cf "$2"
+[ "$(sed -E 's/GRU_MINION_[A-Z0-9_]+/A/g; s|/[^ ]*/minion-\* serve|C|; s/^[A-Za-z0-9._-]+ /U /' "$2")" = "Cmnd_Alias A = C
+Defaults!A !requiretty
+U ALL=(root) NOPASSWD: A" ]

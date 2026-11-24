@@ -31,6 +31,8 @@ func commands() []command {
 		{"ps", "list this project's jobs (--all for every job) (--host)", cmdPs},
 		{"ssh", "open an interactive shell on the host, in the project dir (--host)", cmdSSH},
 		{"doctor", "check the config and hosts; --notify also sends a test notification (--host)", cmdDoctor},
+		{"setup", "let minion do root's part on the host, with one sudo password (--host, --remove)", cmdSetup},
+		{"minion", "run minion on the host: snapshot, restore, ... (--host)", cmdMinion},
 		{"version", "print the gru version", cmdVersion},
 		{"help", "show this help", cmdHelp},
 		{"_agent", "", cmdAgent},
