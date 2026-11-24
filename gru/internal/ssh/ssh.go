@@ -168,9 +168,12 @@ func (c *Client) Output(command string) (string, error) {
 	return strings.TrimSpace(out.String()), nil
 }
 
-// Interactive opens an interactive ssh session with a tty, running command.
+// Interactive runs command with this terminal: over ssh -t, or here.
 func (c *Client) Interactive(command string) (int, error) {
-	cmd := exec.Command("ssh", append(append([]string{}, c.opts...), "-t", c.Host, command)...)
+	cmd := exec.Command("sh", "-c", command)
+	if !c.Local {
+		cmd = exec.Command("ssh", append(append([]string{}, c.opts...), "-t", c.Host, command)...)
+	}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return ExitCode(cmd.Run())
 }
