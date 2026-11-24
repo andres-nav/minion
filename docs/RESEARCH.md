@@ -1,8 +1,9 @@
 # minion — research
 
-What existing tools and Linux mechanisms offer for the design in [MINION.md](MINION.md), and
-which features are worth adding. Searched 2026-11-23; tool docs and source were read from each
-project's default branch on that date and may change.
+What existing tools and Linux mechanisms offer for the design in [MINION.md](MINION.md), and why
+energy measurements err; the features this asks for are ranked in
+[MINION.md](MINION.md#improvements-ranked). Searched 2026-11-23; tool docs and source were read
+from each project's default branch on that date and may change.
 
 Evidence tags: **measured** (real hardware), **trace** (analysis of recorded data), **simulated**,
 **claimed** (stated without data), **source** (read in code or docs), **unverified** (no source
@@ -21,26 +22,24 @@ backports, so each must still be checked on the host.
   it takes. EnergyTrackr's own preprint says it has no ground truth. A/A and injected-regression
   modes turn RQ3 into a number per machine and workload.
 - **Order and repetition need care on bare metal** (Duplyakin 2023, Maricq 2018; numbers in
-  [section 3](#3-methodology)).
-- **Linux facts that changed the design** (details in [section 2](#2-linux-mechanisms)):
-  - restore order is "dependencies first", not reverse;
-  - cpuset partitions conflict with systemd and are missing on 5.15;
-  - `systemctl revert` also deletes the admins' settings;
-  - RAPL reads on Cascade Lake interrupt the package's lowest CPU;
-  - osnoise has a no-workload mode only from 6.8 on;
-  - a missing `pam_access` file aborts PAM;
-  - without a service, `flock` (freed when the holder dies, no wakeups while waiting) and the EOF
-    sshd gives a non-pty command when the connection ends suffice for waiting queues and
-    follower hosts.
-- **The largest documented energy errors come from how meters are read and runs are set up,
-  more than from the meters** (our reading of [section
-  5](#5-measurement-accuracy-and-repeatability)). Tools mishandle counter wraps, zones and units.
-  Placement and idle states change the run-to-run spread by up to 30× and the energy itself by up
-  to 50%; temperature changes power by 10-16%. Detectors without an effect-size floor flagged most
-  planted null changes. RAPL follows the wall within one machine but is not wall energy, and AMD's
-  RAPL is a model.
-- The ranked feature list is in [section 4](#4-features-worth-adding-ranked); the improvements that
-  follow from section 5 are ranked in [MINION.md](MINION.md#improvements-for-minion).
+  [section 3.3](#33-methodology)).
+- **Linux facts that changed the design**, such as restoring in dependency order rather than in
+  reverse, and `flock` plus the EOF that sshd gives a non-pty command instead of a service, are in
+  [section 2](#2-linux-mechanisms).
+- **The largest documented energy errors come from how meters are read and runs are set up, more
+  than from the meters** (our reading of [section 3](#3-measurement-accuracy-and-repeatability)):
+  - Tools mishandle counter wraps, zones and units, and integrate sampled power instead of
+    reading energy counters.
+  - Within one machine, placement and idle states change the run-to-run spread by up to 30× and
+    the energy itself by up to 50%; temperature (power +10-16%) and input data move the mean.
+    Turbo, OS tuning and mitigations had no consistent effect on the energy spread of the Skylake
+    and Broadwell Xeons where that was measured.
+  - Rests between runs, common in guides, did not help where measured; reboots between runs and a
+    single idle baseline added noise.
+  - No energy regression tool reports a measured false-positive rate; where null changes were
+    planted, detectors without an effect-size floor flagged most of them.
+  - RAPL is good for comparing runs on one Intel server since Haswell. It follows the wall within
+    one machine but is not wall energy, and on AMD and on Sandy Bridge it is a model.
 
 ## 1. Tools
 
@@ -99,7 +98,7 @@ Notes, by tool (all **source** unless tagged):
   make a ready event list. [srun](https://slurm.schedmd.com/srun.html),
   [acct_gather.conf](https://slurm.schedmd.com/acct_gather.conf.html),
   [sbatch](https://slurm.schedmd.com/sbatch.html).
-- **GEOPM Service**: the closest model for the privileged verbs. When a client starts writing, it saves
+- **GEOPM Service**: the closest model for `minion serve`. When a client starts writing, it saves
   every supported control to `/run/geopm`; it restores them when the session ends, also when the
   client process dies; one writer at a time; allowlists in `/etc/geopm`.
   [service](https://geopm.github.io/service.html).
@@ -112,7 +111,7 @@ Notes, by tool (all **source** unless tagged):
   [likwid-setFrequencies](https://github.com/RRZE-HPC/likwid/wiki/likwid-setFrequencies).
 - **Scaphandre, PowerAPI (SmartWatts), Kepler, perun, CodeCarbon, PowerJoular**: periodic RAPL
   (and NVML, BMC) samplers that attribute power to processes or containers. They control no state;
-  their overhead and accuracy are in [section 5.4](#54-tools).
+  their overhead and accuracy are in [section 3.4](#34-tools).
   [Kepler config](https://sustainable-computing.io/kepler/usage/configuration/),
   [perun](https://perun.readthedocs.io/en/latest/configuration.html).
 - **hyperfine**: flags outliers with a modified z-score and warns when the *first* run is an
@@ -176,132 +175,14 @@ survives a reboot unless it says so.
 | PAM lock | `pam_access accessfile=`, `pam_nologin file=` | A missing custom accessfile makes pam_access return `PAM_ABORT` (linux-pam 1.5.3, the Ubuntu 24.04 version). pam_nologin returns `PAM_AUTH_ERR` for non-root users when the file exists and `PAM_IGNORE` when it doesn't, never refuses root, and shows the file's text. A custom accessfile with no matching line gives success, so a broken file opens the lock. pam_succeed_if has no file test. `default=` in `[value=action]` covers `abort`. sshd runs the account stack for every authentication type. | [pam_access.c](https://raw.githubusercontent.com/linux-pam/linux-pam/v1.5.3/modules/pam_access/pam_access.c), [pam_nologin.c](https://raw.githubusercontent.com/linux-pam/linux-pam/v1.5.3/modules/pam_nologin/pam_nologin.c), [pam_nologin(8)](https://man7.org/linux/man-pages/man8/pam_nologin.8.html), [access.conf(5)](https://man7.org/linux/man-pages/man5/access.conf.5.html), [pam.conf(5)](https://man7.org/linux/man-pages/man5/pam.conf.5.html), [sshd_config(5)](https://man7.org/linux/man-pages/man5/sshd_config.5.html) |
 | Go runtime | `runtime/proc.go` | When idle, sysmon parks for up to `forcegcperiod/2` (1 min); a GC is forced every 2 min. | [proc.go](https://raw.githubusercontent.com/golang/go/master/src/runtime/proc.go) |
 
-## 3. Methodology
-
-- **When to stop.**
-  - Hoefler & Belli 2015 recompute a nonparametric CI of the median after each run and stop when
-    it is narrow enough; at least 6 runs are needed for that CI.
-  - CONFIRM (Maricq 2018) estimates the runs needed for a ±1% median CI from past data. The
-    count reached 670 in one case and varied >10× between setups (**measured**).
-  - The Phoronix Test Suite stops at 3.5% std dev with a 2× cap (**claimed**).
-  - Kalibera & Jones 2013 plan repetitions per level (iteration, process, build) from a pilot
-    run and report effect size with a CI (**measured**, old hardware).
-- **Order.**
-  - Abedi & Brecht 2017: fixed and blocked orders "falsely report" a 38% difference between
-    identical systems; randomized multiple interleaved trials (RMIT) do not (**trace**, 2010 EC2
-    data).
-  - Duplyakin 2023: order biased results by 50% or more and could change the conclusion in 72%
-    of cases. Their method runs fixed and random orders side by side and compares them with
-    Kruskal-Wallis (**measured**, 1,700+ bare-metal servers).
-  - Mytkowicz 2009: environment size and link order alone swing a speedup from 0.92 to 1.10
-    (**measured**, old hardware).
-- **Thermal state.**
-  - Krun (Barrett 2017) waits until every sensor is within ±3 °C of its boot value (timeout 1 h),
-    checks `dmesg` and records APERF/MPERF per run (**measured** system).
-  - On one CPU, run-to-run power correlates with temperature (>84% at full load), and identical
-    CPU models differ by up to 29.6% at idle (von Kistowski 2016, **measured**, old hardware).
-  - Turbo spreads run time by up to 16% between processors, driven by power limits rather than
-    temperature (Acun 2016, **measured**, old hardware).
-  - Schöne 2021 pre-heats for 15 min.
-  - No paper defines a thermal steady-state test; a slope rule would be our own design. For
-    performance, Barrett 2017 and Traini 2022 detect steady state with change points ([section
-    5.3](#53-methodology)).
-- **Energy variation.** Ournani 2020 report that controlling the protocol, C-states, turbo and
-  pinning can tighten energy variation by up to 30× for some workloads; the per-factor numbers are
-  in [section 5.2](#52-sources-of-variation).
-- **Regression detection.**
-  - Change points:
-    - E-Divisive (Matteson & James 2014) in MongoDB's CI found about 1 useful ticket per 100 under
-      the old threshold scheme, and canary workloads flag suspect runs (Daly 2020, **measured**).
-    - Hunter (Fleming 2023) replaced the permutation test with a t-test so results repeat, and
-      needed about 30 points of history; "change point detection cannot fix noisy data"
-      (**measured**, injected changes).
-  - Run time: running both versions in random order on the same instances detects slowdowns of
-    10% or less (Laaber 2019; abstract only).
-  - Energy: Danglot 2024 and EnergyTrackr (no false-positive rate, by its own account) report no
-    detection limit; their numbers are in [section 5.3](#53-methodology).
-- **Noise as a covariate.** No prior work was found that adjusts energy or performance results with
-  OS-noise counters; tools only flag or drop runs. CUPED (Deng 2013) cuts variance by
-  var·(1 − ρ²) using a covariate measured *before* the experiment, about 50% at Bing
-  (**measured**, web A/B tests). Raffin & Trystram 2025 measured that frequent RAPL sampling raises
-  idle energy (**measured**, EPYC and Xeon). On AMD Zen 2, RAPL energy is modeled, not measured
-  (Schöne 2021, **measured** against an AC meter).
-- **Reporting.** Only 2 of 95 HPC papers reported CIs and 15 any variance (Hoefler 2015). The SIGPLAN
-  checklist asks for all parameters, versions and hardware. Guilloteau 2024 surveyed about 300
-  papers on artifact longevity (abstract only).
-
-## 4. Features worth adding (ranked)
-
-Ranked by how much each helps the project's questions per unit of work. "In design" means it is
-already in [MINION.md](MINION.md).
-
-1. **A/A and injected-regression modes.** They give the false-positive rate and the detection rate
-   against the number of runs, which is RQ3, and nobody reports them for energy. Sources: Laaber
-   2019, Bulej 2020, Fleming 2023; the gap is stated by EnergyTrackr. *In design (RQ3).*
-2. **Journaled save-before-write, restore when the client dies, and compare and restore.** This is
-   the core of RQ2; GEOPM Service, Slurm and tuned each have part of it. *In design.*
-3. **Randomized interleaved rounds, with seed, round and position saved.** Order bias is large and
-   common on bare metal (Abedi 2017, Duplyakin 2023). *In design.*
-4. **Order-independence check.** Run some rounds in a fixed order, then test fixed against random
-   (Kruskal-Wallis) and run order against shuffled (Mann-Whitney). This shows whether a machine
-   carries state between runs (Duplyakin 2023, Maricq 2018). *New: analysis on top of `plan.json`.*
-5. **Adaptive stopping on a median CI, with a minimum and a maximum.** The runs needed differ more
-   than 10× between machines (Hoefler 2015, Maricq 2018, Phoronix Test Suite). *New; noted in
-   the design as later.*
-6. **Canary workload that pauses the queue on drift.** It catches slow machine drift that
-   statistics can't fix (Green Metrics Tool, Daly 2020). *In design (optional).*
-7. **Covariate adjustment with pre-run covariates only.** For example the start temperature and
-   other cgroups' CPU time before the run, judged by the A/A and injected results (Deng 2013).
-   This is the test of whether the noise record helps. *New, RQ3.*
-8. **A `verify` command and start/end checks.** Use the Green Metrics Tool's list: timers, cron,
-   NTP, swap, RAPL limits, suspend and steal time. A cheap suspend check is a jump of
-   `CLOCK_BOOTTIME` against `CLOCK_MONOTONIC`. Sources: tuned, Green Metrics Tool. *In design.*
-9. **Thermal gate as a band around the idle baseline, with a timeout.** The Green Metrics Tool also
-   warms a cold machine. Sources: Krun, Green Metrics Tool. *In design without warm-up.*
-10. **Measure and publish the runner's own overhead.** Use a calibrate script, as the Green Metrics
-    Tool did. *In design (RQ2).*
-11. **Quality flags kept with the run, never silent drops.** Use a median/MAD outlier flag, a
-    first-run warning (hyperfine) and new `dmesg` lines (Krun). *In design (flags); add the two
-    rules.*
-12. **Energy-source metadata.** Record the zone backend (MSR, TPMI) and whether energy is modeled
-    (AMD) (Schöne 2021). *In design (`host.json`).*
-13. **Topology-aware experiment CPUs.** Use whole physical cores on one socket with local memory
-    (BenchExec, measured +22% and +6.8%). *New: guidance for host profiles.*
-14. **Meter data off the host, matched by time window.** Treat BMC power as coarse (Kwollect).
-    *In design (wall sampler).*
-15. **Offline change-point detection across commits, deterministic, with a minimum history.**
-    Sources: Daly 2020, Fleming 2023. *Later, for continuous use.*
-16. **Event names from Slurm's mail types and a push sink such as Pushover.** *In design (events,
-    `run` hooks).*
-
-Avoid:
-- resetting to fixed defaults (pyperf, LIKWID, EnergyTrackr);
-- one-way machine preparation (the Green Metrics Tool's NOP Linux);
-- periodic samplers that visit every CPU during runs (turbostat);
-- boot options such as `idle=poll` that change idle energy;
-- the osnoise workload during a measured run.
-
-## 5. Measurement accuracy and repeatability
+## 3. Measurement accuracy and repeatability
 
 Why energy numbers are wrong or don't repeat, with the size of each effect where it was measured.
 Searched 2026-11-23 in arXiv, Crossref, Semantic Scholar, HAL, OSTI and the tools' trackers;
-ACM DL and IEEE Xplore PDFs could not be fetched ([section 6](#6-unverified-or-not-fully-read)).
-Everything listed was read in full unless marked. Old hardware is marked by its generation. The
-improvements that follow are ranked in [MINION.md](MINION.md#improvements-for-minion).
+ACM DL and IEEE Xplore PDFs could not be fetched ([section 4](#4-unverified-or-not-fully-read)).
+Everything listed was read in full unless marked. Old hardware is marked by its generation.
 
-- RAPL is good for comparing runs on one Intel server since Haswell. It is not wall energy, and on
-  AMD and on Sandy Bridge it is a model.
-- The largest documented errors are made by tools, not meters (our reading): missed wraps, double-counted zones,
-  wrong units and sampled power instead of energy counters.
-- Within one machine, placement and idle states matter most for the spread, and temperature and
-  input data for the mean. Turbo, OS tuning and mitigations had no consistent effect on the energy
-  spread of the Skylake and Broadwell Xeons where that was measured.
-- Rests between runs, common in guides, did not help where measured; reboots between runs and a
-  single idle baseline added noise.
-- No energy regression tool reports a measured false-positive rate; where null changes were
-  planted, most were flagged unless an effect-size floor was used.
-
-### 5.1 Meters
+### 3.1 Meters
 
 | Problem | Size of the effect | Evidence | Source |
 |---|---|---|---|
@@ -319,7 +200,7 @@ improvements that follow are ranked in [MINION.md](MINION.md#improvements-for-mi
 | BMC power is coarse and late | iDRAC: 14 W steps, fixed 60 s window, rounded down; a model calibrated on IPMI erred −15.8%, one calibrated on a wall meter −0.2%; plug meters lag RAPL by 10-24 s | **measured**; Dell R430 (Haswell-EP), 2019; cluster trace, 2018 | Kavanagh 2019; Khan 2018 |
 | Above-idle ("dynamic") energy from on-chip sensors | mean error up to 73%, max 300% against an AC meter | **measured**; Haswell, Skylake, K40c, P100; 2019 | Fahad 2019 |
 
-### 5.2 Sources of variation
+### 3.2 Sources of variation
 
 "Spread" is the run-to-run standard deviation on one machine unless it says between parts.
 
@@ -330,6 +211,8 @@ improvements that follow are ranked in [MINION.md](MINION.md#improvements-for-mi
 | Newer parts vary more | median-node spread 10% (Broadwell) vs 5.2% (Sandy Bridge); power 20% vs 10%; a 50 W cap: worst case 4× | **measured**; ~4,300 LLNL nodes; 2017 | Marathe 2017 |
 | Identical GPUs differ | 8% mean (22% max) performance between GPUs, one GPU 0.12-6%; a 150 W limit doubles the spread (9% to 18%) | **measured**; V100, RTX 5000, MI60 clusters; 2022 | Sinha 2022 |
 | Power rises with temperature | server +16% from CPU 37.7 to 74.5 °C (fans excluded); warmer rack neighbours +5.6%; Haswell package +10-12% from 37 to 74 °C | **measured**; Haswell and Skylake servers, i7-4770; 2018 | Wang 2018; Khan 2018 |
+| Power follows temperature on one CPU; identical models differ at idle | run-to-run power correlates with temperature (> 84% at full load); identical CPU models differ by up to 29.6% at idle | **measured**, old hardware | von Kistowski 2016 |
+| Turbo spreads run time between processors | up to 16%, driven by power limits rather than temperature | **measured**, old hardware | Acun 2016 |
 | Power drifts for minutes at constant load | 625 to 629 W over the first 7 min; labs pre-heat 15 min | **measured**; 2× Xeon Gold 6154; 2019, 2021 | Schöne 2019; Schöne 2021 |
 | Fans | a fixed good fan speed saved 8.3% of CPU + fan energy over the default control | **measured**; SPARC T3, old; 2015 | Zapater 2015 |
 | One awake core keeps the package out of deep idle | Rome: one core in C1 instead of C2 +81 W at the wall (99 to 180 W); SMT siblings offline do the same; Skylake-SP first core in C1E +97 W | **measured**; 2× EPYC 7502, 2× Gold 6154; 2021 | Schöne 2021 |
@@ -342,29 +225,36 @@ improvements that follow are ranked in [MINION.md](MINION.md#improvements-for-mi
 | Mitigations and kernels (time only) | Meltdown/Spectre patches 2-3% single node, 5-11% multi-node; NUMA balancing on: 28-30% slower | **measured**; 2018; 2× EPYC 7742, 2026 | Simakov 2018 [preprint]; Lober 2026 [preprint] |
 | OS noise (time only) | ≤ 2.5% per process, but one daemon (snmpd) brought back most of the barrier-time spread | **measured**; 2003, 2016 | Petrini 2003; Leon 2016 |
 | Co-runners on the package | a power virus on other cores pushed a service to 190% of its latency target at low load; attribution tools +46% / −93% | **measured**; Haswell, 2015; 2× E5-2630, 2023 | Lo 2015; He 2023 |
-| Warm-up and steady state | 30-43.5% of (VM, benchmark) pairs reach steady state; 10.9% of JMH forks never do; a JVM's energy lead reversed after 150 s | **measured**; 2017, 2022, 2021 | Barrett 2017; Traini 2022; Ournani 2021 |
+| Thermal gates | Krun waits until every sensor is within ±3 °C of its boot value (timeout 1 h), checks `dmesg` and records APERF/MPERF per run; no paper defines a thermal steady-state test, so a slope rule would be our own design | **measured** system | Barrett 2017 |
+| Warm-up and steady state | 30-43.5% of (VM, benchmark) pairs reach steady state; 10.9% of JMH forks never do; a JVM's energy lead reversed after 150 s; for performance, steady state is detected with change points | **measured**; 2017, 2022, 2021 | Barrett 2017; Traini 2022; Ournani 2021 |
 
-### 5.3 Methodology
+### 3.3 Methodology
 
 | Problem | Size of the effect | Evidence | Source |
 |---|---|---|---|
+| Stopping on a CI of the median | recompute a nonparametric CI of the median after each run and stop when it is narrow enough, at least 6 runs for that CI; CONFIRM estimates the runs for a ±1% median CI from past data: 670 in one case, more than 10× apart between setups; the Phoronix Test Suite stops at 3.5% std dev with a 2× cap | **measured** (CONFIRM); **claimed** (Phoronix) | Hoefler 2015; Maricq 2018; Phoronix Test Suite |
+| Repetitions per level | plan repetitions per level (iteration, process, build) from a pilot run, and report the effect size with a CI | **measured**, old hardware | Kalibera 2013 |
 | Stopping when the test is significant ("peeking") | false positives "can easily increase fivefold" | **simulated**, online A/B tests | Johari 2022 |
 | Stopping rules differ | relative CI width 3% (99% bootstrap) kept 87.6% of JMH benchmarks equal to full runs, CV 78.8%, and cut time 48-86% | **measured**; Xeon X5670, Linux 5.2; 2020 | Laaber 2020 |
 | Best-of-n and means without CIs | up to 16% of comparisons too strong, > 3% in the wrong direction | **measured**; 2007, old | Georges 2007 |
 | Runs are not independent | lag-1 correlation 0.668 dropped a 99% CI's coverage to 92% | **measured**, **simulated**; 2017 | Barrett 2017 |
 | Pairing helps only if the pair shares the noise | duet runs narrowed CIs 5-37×; pairs shuffled: 1.02-1.03× | **measured**; clouds and bare metal; 2020 | Bulej 2020 |
-| Fixed A, B, A, B order | aliases with periodic noise (odd trials slower than even) | **trace**; EC2 2010-2011 | Abedi 2017 |
+| Fixed and blocked orders | they "falsely report" a 38% difference between identical systems, randomized multiple interleaved trials (RMIT) do not; a fixed A, B, A, B order aliases with periodic noise (odd trials slower than even) | **trace**; EC2 2010-2011 | Abedi 2017 |
+| Order on bare metal | order biased results by 50% or more and could change the conclusion in 72% of cases; the method runs fixed and random orders side by side and compares them with Kruskal-Wallis | **measured**; 1,700+ bare-metal servers | Duplyakin 2023 |
+| Environment and link order | environment size and link order alone swing a speedup from 0.92 to 1.10 | **measured**, old hardware | Mytkowicz 2009 |
 | Fixed warm-up counts | developers' JMH warm-up right in 19% of forks; too short in 32%, and 57% of those ≥ 5% off | **measured**; 2× Xeon E5-2650 v3; 2022 | Traini 2022 |
 | Rest times are folklore | 60 s sleep did not lower energy spread; the 180 s (Green Metrics Tool) and 60 s (Cruz) rests come with no data | **measured**; **claimed** | Ournani 2020; [GMT](https://raw.githubusercontent.com/green-coding-solutions/documentation/main/content/en/docs/measuring/best-practices.md); [Cruz 2021](https://luiscruz.github.io/2021/10/10/scientific-guide.html) (blog) |
 | Idle-baseline subtraction | idle spread up to 140% above a one-process job; the first active core adds 22-81 W, so energy − idle × time is not the run's own energy; one lab pins fans at 100% to keep idle fixed | **measured**; 2020, 2024, 2019 | Ournani 2020; Cadorel 2024; Khaleghzadeh 2019 [preprint] |
 | Null changes are flagged | planted null changes: 49/60 flagged without an effect-size floor, 0/60 with Cohen's d ≥ 0.8, which still caught 54/60 large ones (decided on CPU cycles, as energy CV was 0.09-0.28 vs 0.02-0.10) | **measured**; RAPL, Java tests; 2024 | Danglot 2024 |
 | Many tests at α = 0.05 | 114 of 320 commits flagged while 318 of 319 changes were < 5%; no ground truth | **measured**; Xeon Gold 6326; 2026 | Maquoi 2026 [preprint] |
+| Change points in CI | E-Divisive (Matteson & James 2014) in MongoDB's CI found about 1 useful ticket per 100 under the old threshold scheme, and canary workloads flag suspect runs; Hunter replaced the permutation test with a t-test so results repeat, and needed about 30 points of history: "change point detection cannot fix noisy data" | **measured**; injected changes (Hunter) | Daly 2020; Fleming 2023 |
+| Detecting slowdowns | running both versions in random order on the same instances detects run-time slowdowns of 10% or less; for energy, Danglot 2024 and EnergyTrackr (no false-positive rate, by its own account) report no detection limit | abstract only (Laaber 2019); **source** | Laaber 2019; Danglot 2024; EnergyTrackr |
 | Change-point defaults | default F1 against human labels: binary segmentation 0.87, E-Divisive 0.86, PELT 0.84; tuned mean 0.70 to 0.90; Mozilla's t > 7 and 2% rule: 12.5% false alert groups | **trace**; GraalVM, MongoDB, SAP HANA, Firefox; 2026 | Costa 2026 [preprint]; Besbes 2026 [preprint] |
 | Reporting rules exist for power | SPECpower: meter ≤ 1% uncertainty, calibrated yearly, ≥ 1 Hz; inlet temperature ±0.5 °C within 50 mm; Green500's partial-window level overstated efficiency by up to 30% | **source** (2015); **measured** (2015) | [SPECpower rules](https://www.spec.org/power_ssj2008/docs/SPECpower_ssj2008-Run_Reporting_Rules.html); Rohr 2015 |
-| Practice | 79 green-software papers used 31 meters, mostly 10 or 30 runs | survey; 2026 | Hort 2026 [preprint] |
-| Covariates | regression adjustment with treatment × covariate terms can't lose asymptotic precision (abstract only); no benchmarking paper found that adjusts with temperature, frequency or interrupts | **claimed** (proof) | Lin 2013 |
+| Reporting and practice | only 2 of 95 HPC papers reported CIs and 15 any variance; the SIGPLAN checklist asks for all parameters, versions and hardware; about 300 papers surveyed on artifact longevity (abstract only); 79 green-software papers used 31 meters, mostly 10 or 30 runs | surveys; **source** | Hoefler 2015; SIGPLAN checklist (Berger 2018); Guilloteau 2024; Hort 2026 [preprint] |
+| Covariates | regression adjustment with treatment × covariate terms can't lose asymptotic precision (abstract only); CUPED cuts variance by var·(1 − ρ²) using a covariate measured *before* the experiment, about 50% at Bing; no benchmarking work found that adjusts energy or performance with temperature, frequency, interrupts or other OS-noise counters: tools only flag or drop runs | **claimed** (proof); **measured**, web A/B tests | Lin 2013; Deng 2013 |
 
-### 5.4 Tools
+### 3.4 Tools
 
 Accuracy only; features are in [section 1](#1-tools). Issue numbers are on each tool's GitHub
 tracker, read 2026-11-23.
@@ -387,7 +277,7 @@ Correct handling, from the same sources: perf's 64-bit RAPL count or each zone's
 `max_energy_range_uj`, subtraction on raw integers before converting (van Kempen 2025), one zone
 per package, monotonic timestamps, and energy counters read at run edges.
 
-## 6. Unverified or not fully read
+## 4. Unverified or not fully read
 
 - Paper texts behind a paywall (only metadata, abstracts or code read): benchkit, EnergyTrackr
   (ASE; its preprint was read), Laaber 2019, Guilloteau 2024, Kwollect, perun, Kepler (Amaral
@@ -403,7 +293,7 @@ per package, monotonic timestamps, and energy counters read at run edges.
   [de Oliveira 2013](https://doi.org/10.1145/2451116.2451140) (quantile regression) abstract only.
 - Whether tuned's originals survive a daemon crash; what Slurm does if `slurmstepd` crashes.
 - Overhead numbers for perun, variorum, LIKWID and EnergyTrackr (none published; the others are in
-  [section 5.4](#54-tools)).
+  [section 3.4](#34-tools)).
 - osnoise overhead in no-workload mode; the energy unit on the 6248R and 6515P; Ubuntu backports
   of Granite Rapids RAPL; the NVML energy counter's update rate, accuracy and call cost (Yang 2024
   studied only the power reading); whether the NVML counter resets without persistence; the
