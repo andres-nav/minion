@@ -19,28 +19,20 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v30
-      - name: make test e2e (unit tests, lints, end to end with no ssh or root)
-        run: nix develop --command make test e2e
-
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }} # a dispatch builds the tag it releases
+          ref: ${{ inputs.tag || github.ref }} # a dispatch tests and builds the tag it releases
           fetch-depth: 0 # tags, so the Makefile's `git describe` sees the version
 
       - uses: cachix/install-nix-action@v30
 
-      # Every platform cross-compiles from Linux. Each archive holds gru for its
-      # platform and the Linux agents and minion builds it uploads.
-      - name: Build and package
-        run: nix develop --command make dist
+      # Unit tests, lints and e2e, then the archives: every platform cross-compiles
+      # from Linux, and each holds gru for its platform and the Linux agents and minion.
+      - name: Test and package
+        run: nix develop --command make test e2e dist
 
       - uses: actions/upload-artifact@v4
         with:
@@ -50,7 +42,7 @@ jobs:
 
   release:
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [test, build]
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -60,16 +52,13 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Checksums
-        working-directory: artifacts
-        run: sha256sum *.tar.gz > checksums.txt
-
       - name: Create release
         working-directory: artifacts
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
+          sha256sum *.tar.gz > checksums.txt
           gh release create "$TAG" *.tar.gz checksums.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "$TAG" \
