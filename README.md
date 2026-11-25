@@ -1,47 +1,127 @@
 # minion
 
-Two tools for running builds, tests and experiments on other machines:
+Two tools for running builds, tests and experiments on other machines. **gru**, on your laptop,
+runs a repo's own tasks (`make test`, a benchmark) here or on an ssh host: it syncs the changed
+files, runs each task as a job that survives disconnects, and fetches the results. **minion**, on
+the host, makes experiments repeatable: it sets the machine's state (CPU governor, turbo, idle
+states), reads the meters (time, RAPL energy) around each run, and puts the settings back after,
+also after a crash. gru carries minion to the host, so you install only gru.
 
-- **gru**, on the laptop: runs a repo's own build, test and experiment commands here or on an ssh
-  host. It syncs only changed files, runs each task as a detached job that survives disconnects,
-  notifies when it ends and fetches the results. [GRU.md](docs/GRU.md)
-- **minion**, on the measured host: applies machine settings for a measurement, puts the
-  originals back (also after a crash) and runs queues of measured runs. gru ships and uploads it;
-  `gru setup` gives it root. [minion/README.md](minion/README.md), [MINION.md](docs/MINION.md)
-
-How they fit together: [DESIGN.md](docs/DESIGN.md). Sources: [RESEARCH.md](docs/RESEARCH.md).
-
-## Use
+## Install
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/andres-nav/minion/main/install.sh | sh
-gru upgrade         # later: the latest release
-gru help            # the commands
-gru run <task>      # a task of this repo's template, on its host
+gru upgrade         # later: the latest release, with its skill
 ```
 
-The config is `~/.config/gru/config.json`, plus an optional `.gru.json` per project
-([GRU.md](docs/GRU.md#configuration)). A host needs only a POSIX shell.
+This puts gru in `~/.local/bin`, its Linux agents and minion in `~/.local/libexec/gru`, and its
+AI skill in `~/.claude/skills/gru` if `~/.claude` exists. To choose the version or the dir, end
+the first line with `| sh -s -- --version v0.2.0 --prefix DIR`. For Linux and macOS; a host
+needs only a POSIX shell. From a checkout, `make install` installs what you built in the same
+places.
+
+## Quick start
+
+`~/.config/gru/config.json` names the hosts. `state_dir` holds gru's jobs and uploads there: put
+it on local disk when the home is on NFS.
+
+```json
+{
+  "hosts": {
+    "box": {"ssh": "box.example.org", "state_dir": "/local/home/$USER/.gru"}
+  }
+}
+```
+
+`.gru.json`, at the root of a repo, gives its tasks (shell commands), their host and what to
+bring back:
+
+```json
+{
+  "host": "box",
+  "tasks": {
+    "test": "make test",
+    "exp": "mkdir -p results && make bench > results/bench.txt"
+  },
+  "fetch": ["results"]
+}
+```
+
+```sh
+gru list               # the tasks, and where they run
+gru run test           # sync, run on box, stream the output, fetch; exits with the task's code
+gru run exp --detach   # start a job and return; prints its id
+gru ps                 # this repo's jobs
+gru attach             # watch the latest job (or: gru attach <id>)
+gru fetch              # copy its results/ here
+```
+
+`--host localhost` runs a task on this machine; `gru doctor` checks the config and the hosts.
+
+## Energy experiments
+
+A queue file lists machine settings (profiles) and workloads; minion runs every pair `reps`
+times, in a shuffled order, and reads time and energy around each run. `gru minion snapshot
+--host box` prints the settings a profile can change.
+
+```json
+{
+  "name": "governor",
+  "profiles": {
+    "default": {},
+    "performance": {"cpu.governor": {"policy0": "performance"}}
+  },
+  "workloads": {
+    "idle": {"cmd": ["sleep", "5"]},
+    "hash": {"cmd": ["sh", "-c", "seq 50000000 | sha256sum"]}
+  },
+  "reps": 3,
+  "out": "results/energy"
+}
+```
+
+Save it as `governor.json` in the experiment repo, whose `.gru.json` runs it with the minion gru
+uploaded (`always` kills what a crashed queue left running):
+
+```json
+{
+  "host": "box",
+  "tasks": {"energy": "\"$GRU_MINION\" queue $GRU_ARGS"},
+  "always": ["\"$GRU_MINION\" reap"],
+  "fetch": ["results"]
+}
+```
+
+```sh
+gru setup --host box                       # once per host and gru version: asks for sudo
+gru run energy --arg governor.json --detach
+gru fetch                                  # when it's done
+```
+
+Each queue writes a new dir, `results/energy/governor-20261125T101500Z/`: the queue, its plan,
+its events and one `run.json` per run, with the times and joules. Every time and name is in UTC.
+More: [minion/README.md](minion/README.md).
 
 ## Develop
 
 ```sh
 nix develop         # Go and Rust, from flake.nix
-make build          # -> gru/bin: gru, its Linux agents and minion's static Linux builds
+make build          # gru, its Linux agents, minion's static Linux builds and the skill, in gru/bin
 make dist           # the release archives, in dist/
 make test           # go test + vet, cargo test + clippy
-make e2e            # gru + minion end to end on this machine (Linux only)
+make e2e            # gru + minion end to end on this machine, with no ssh or root (Linux)
 ```
 
-Inside `gru/`, `go build .` and `go test ./...` also work (the version is then "dev"), and
+Inside `gru/`, `go build .` and `go test ./...` also work (the version is then "dev"), and so do
 `cargo build` and `cargo test` inside `minion/`. Without nix, minion's builds need `rustup target
-add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`. `make install` installs what you built, like
-install.sh: gru in `~/.local/bin`, its agents and minion in `~/.local/libexec/gru`, and the AI skill
-(docs/ai/SKILL.md) in `~/.claude/skills/gru` if `~/.claude` exists.
+add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`. [test/e2e.sh](test/e2e.sh) stands in
+for ssh and sudo and gives minion a fake sysfs, so it can't cover real RAPL and cpufreq writes,
+sudo or ssh: test those on a real host. CI runs `make test e2e dist` on every pull request; a `v*`
+tag releases the archives that install.sh and `gru upgrade` use.
 
-`make e2e` (test/e2e.sh) runs real queues and every gru command and option, with no ssh and no
-root: `test/ssh` runs the "remote" commands here with their own home, `test/sudo` and
-`test/visudo` stand in for sudo (as this user, with requiretty) and visudo (classic sudo's rules,
-or sudo-rs's), and minion works on a fake sysfs and powercap tree. Everything lives in one temp
-dir (`E2E_KEEP=1` keeps it). CI runs `make test e2e` on every pull request. It can't cover real
-RAPL and cpufreq writes, real sudo, real ssh or several hosts: test those on a real machine.
+## Docs
+
+- [DESIGN.md](docs/DESIGN.md): how gru and minion fit together
+- [GRU.md](docs/GRU.md): gru's config, commands, jobs and sync
+- [MINION.md](docs/MINION.md): what minion controls and measures, and why
+- [RESEARCH.md](docs/RESEARCH.md): sources and related tools
