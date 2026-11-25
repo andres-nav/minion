@@ -402,6 +402,8 @@ EOF
   # doctor, ssh, version and help.
   want 1 doctor gru doctor
   grep -q "^host fake2 .*OK.*, minion .*minion-.*-linux-$arch-" "$T/doctor.out" || fail "doctor: fake2 not OK with its minion"
+  grep -q "agent $T/state/bin/gru-$V-linux-$arch-[0-9a-f]*, minion $T/state/bin/minion-$V-" "$T/doctor.out" ||
+    fail "doctor: paths not plain"
   grep -q "^host down .*FAIL .*down.invalid" "$T/doctor.out" || fail "doctor: down not FAIL"
   grep -q "^1 problem" "$T/doctor.out" || fail "doctor: not 1 problem"
   gru doctor --notify --host fake2 || fail "doctor --notify"

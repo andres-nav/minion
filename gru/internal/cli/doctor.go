@@ -41,12 +41,16 @@ func cmdDoctor(args []string) int {
 			problems++
 			continue
 		}
+		agent, minion := t.agent, t.minion
+		if p, err := t.Output("printf '%s\\n' " + t.agent + " " + t.minion); err == nil {
+			agent, minion, _ = strings.Cut(p, "\n")
+		}
 		root := "no minion for this platform"
 		if t.minion != "" {
-			root = t.minion + ", root: " + cmp.Or(serveProbe(t), "set up")
+			root = minion + ", root: " + cmp.Or(serveProbe(t), "set up")
 		}
 		t.Close()
-		fmt.Printf("host %-14s OK    %s, agent %s, minion %s\n", n, t.alias, t.agent, root)
+		fmt.Printf("host %-14s OK    %s, agent %s, minion %s\n", n, t.alias, agent, root)
 	}
 	if *notify && sendNotifyTest(r, *host) != 0 {
 		problems++
