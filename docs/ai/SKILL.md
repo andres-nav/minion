@@ -62,6 +62,9 @@ This prints the resolved `template`, `host`, `remote_dir`, and available
   build. It asks for the user's sudo password, so it needs a terminal:
   never run it yourself; ask the user to.
 
+- `gru upgrade` — install gru's latest release, which also updates this skill.
+  Only when the user asks.
+
 Flags can follow the positional arg (`gru attach my_job --host gpu`); a
 second positional is a usage error.
 

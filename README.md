@@ -14,7 +14,8 @@ How they fit together: [DESIGN.md](docs/DESIGN.md). Sources: [RESEARCH.md](docs/
 ## Use
 
 ```sh
-make install        # gru -> ~/.local/bin, its agents and minion -> ~/.local/libexec/gru
+curl -fsSL https://raw.githubusercontent.com/andres-nav/minion/main/install.sh | sh
+gru upgrade         # later: the latest release
 gru help            # the commands
 gru run <task>      # a task of this repo's template, on its host
 ```
@@ -34,8 +35,9 @@ make e2e            # gru + minion end to end on this machine (Linux only)
 
 Inside `gru/`, `go build .` and `go test ./...` also work (the version is then "dev"), and
 `cargo build` and `cargo test` inside `minion/`. Without nix, minion's builds need `rustup target
-add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`. `make install` also copies the AI skill
-(docs/ai/SKILL.md) to `~/.claude/skills/gru` if that dir exists.
+add x86_64-unknown-linux-musl aarch64-unknown-linux-musl`. `make install` installs what you built, like
+install.sh: gru in `~/.local/bin`, its agents and minion in `~/.local/libexec/gru`, and the AI skill
+(docs/ai/SKILL.md) in `~/.claude/skills/gru` if `~/.claude` exists.
 
 `make e2e` (test/e2e.sh) runs real queues and every gru command and option, with no ssh and no
 root: `test/ssh` runs the "remote" commands here with their own home, `test/sudo` and

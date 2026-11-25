@@ -64,6 +64,12 @@ and `hosts`, merged over the global ones (local wins), so a project needs no glo
   `ps [--all]`, `ssh`, `doctor [--notify]`, `setup [--remove]`, `minion <args>`, each with
   `--host`. Without an id, `attach` and `fetch` take this project's latest job. Flags may follow
   the positional; a second positional is a usage error.
+- `install [--prefix DIR] [--skill-dir DIR]` lays out the gru it runs from (a build's `gru/bin`
+  or an extracted release): gru in `DIR/bin` (default `~/.local`), its Linux agents and minion
+  in `DIR/libexec/gru`, and the AI skill in `~/.claude/skills/gru` if `~/.claude` exists. Each
+  file goes to a temp file and is renamed, as overwriting a binary in place breaks its macOS
+  signature. `upgrade [--version vX.Y.Z]` gets the release's `gru-<os>-<arch>.tar.gz` from
+  GitHub, checks it against `checksums.txt`, and runs its `install` with this gru's prefix.
 - `version`, `help`. Hidden: `_agent`, the counterpart on the host (`now`, `follow`, `manifest`,
   `recv`, `send`, `notify --config FILE|- [--log F] [--subject S --body B]`; a given subject or
   body skips the `on` gate, for a task's own messages).
