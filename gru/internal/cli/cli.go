@@ -33,6 +33,8 @@ func commands() []command {
 		{"doctor", "check the config and hosts; --notify also sends a test notification (--host)", cmdDoctor},
 		{"setup", "let minion do root's part on the host, with one sudo password (--host, --remove)", cmdSetup},
 		{"minion", "run minion on the host: snapshot, restore, ... (--host)", cmdMinion},
+		{"install", "install this gru, its agents, minion and the AI skill (--prefix, --skill-dir)", cmdInstall},
+		{"upgrade", "install the latest release, or --version vX.Y.Z, over this gru", cmdUpgrade},
 		{"version", "print the gru version", cmdVersion},
 		{"help", "show this help", cmdHelp},
 		{"_agent", "", cmdAgent},

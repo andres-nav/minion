@@ -8,11 +8,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 arch=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
 # M is the minion build that gru uploads to this machine; checks by hand call it.
 M=$root/gru/bin/minion-linux-$arch
-for b in gru/bin/gru gru/bin/minion-linux-$arch; do
-  [ -x "$root/$b" ] || { echo "e2e: no $b, run make build" >&2; exit 2; }
+for b in gru/bin/gru gru/bin/minion-linux-$arch dist/gru-linux-$arch.tar.gz; do
+  [ -e "$root/$b" ] || { echo "e2e: no $b, run make dist" >&2; exit 2; }
 done
 
 T=$(mktemp -d)
+home=$HOME # for check_install's make, which needs the Go and Rust caches
 export TZ=Europe/Zurich HOME=$T/home GRU_CONFIG=$T/config.json PATH=$T/bin:$PATH
 # where root's files would be: the root copies of minion and the sudoers lines
 export GRU_TEST_DESTDIR=$T/root
@@ -577,6 +578,35 @@ check_snapshot() {
   has "$T/run.json" '"time":{'
 }
 
+# make install, and install.sh from a release, lay gru out in a prefix, with the skill if the Claude dir exists.
+check_install() {
+  local rel=$T/release a="" f
+  mkdir -p "$T/claude" "$rel/tags" "$HOME/.claude"
+  HOME=$home make -s -C "$root" install PREFIX="$T/inst" SKILL_DIR="$T/claude/skills" || fail "make install"
+  (cd "$T" && find inst claude -type f | sort) > "$T/layout"
+  printf '%s\n' claude/skills/gru/SKILL.md inst/bin/gru inst/libexec/gru/gru-linux-amd64 inst/libexec/gru/gru-linux-arm64 \
+    inst/libexec/gru/minion-linux-amd64 inst/libexec/gru/minion-linux-arm64 | diff - "$T/layout" || fail "make install: wrong layout"
+
+  # A release as GitHub's API shows it, with make dist's archives.
+  cp "$root"/dist/gru-*.tar.gz "$rel/"
+  (cd "$rel" && sha256sum gru-*.tar.gz > checksums.txt)
+  for f in "$rel"/*.tar.gz "$rel"/checksums.txt; do
+    a="$a{\"name\": \"${f##*/}\", \"browser_download_url\": \"file://$f\"},"
+  done
+  echo "{\"tag_name\": \"$V\", \"assets\": [${a%,}]}" > "$rel/tags/$V"
+  cp "$rel/tags/$V" "$rel/latest"
+  export GRU_RELEASES=file://$rel
+  curl -fsSL "file://$root/install.sh" | sh -s -- --prefix "$T/sh" || fail "install.sh"
+  [ "$("$T/sh/bin/gru" version)" = "gru $V" ] && [ -x "$T/sh/libexec/gru/minion-linux-$arch" ] &&
+    cmp "$HOME/.claude/skills/gru/SKILL.md" "$root/docs/ai/SKILL.md" || fail "install.sh: not the release's gru, minion and skill"
+  echo '{"tag_name": "vlater", "assets": []}' > "$rel/latest"
+  sh "$root/install.sh" --version "$V" --prefix "$T/shv" && [ "$("$T/shv/bin/gru" version)" = "gru $V" ] ||
+    fail "install.sh --version"
+  echo x >> "$rel/gru-linux-$arch.tar.gz"
+  says 1 badsum "doesn't match the release's checksums.txt" sh "$root/install.sh" --version "$V" --prefix "$T/bad"
+  [ ! -e "$T/bad" ] || fail "install.sh installed a changed archive"
+}
+
 # Like a host whose sudo needs a tty unless the drop-in says otherwise.
 mkdir -p "$GRU_TEST_DESTDIR/etc" && echo "Defaults requiretty" > "$GRU_TEST_DESTDIR/etc/sudoers"
 (cd "$T" && setup)
@@ -585,7 +615,8 @@ for c in "remote:remote path (fake ssh)" "localhost:--host localhost" \
   "detach:detach, ps, attach, kill and a crashed runner" "two:two queues" \
   "cli:every gru option" "utc:every time in UTC (TZ=$TZ)" \
   "exit:exit codes and broken queue files" "serve:root through serve and gru setup" \
-  "perf:RAPL through perf when energy_uj is unreadable" "snapshot:snapshot and run on the real /sys"; do
+  "perf:RAPL through perf when energy_uj is unreadable" "snapshot:snapshot and run on the real /sys" \
+  "install:make install, and install.sh from a release"; do
   SECONDS=0
   if (cd "$T/proj" && "check_${c%%:*}") < /dev/null > "$T/${c%%:*}.log" 2>&1; then
     echo "PASS ${c#*:} ($SECONDS s)"
